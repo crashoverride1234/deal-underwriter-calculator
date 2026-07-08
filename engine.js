@@ -172,5 +172,82 @@
         return result;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite };
+    /**
+     * Desktop appraisal via the sales comparison approach.
+     * Each comp's sale price is adjusted toward the subject's post-rehab
+     * (renovated) state; comps needing fewer adjustments weigh more.
+     *
+     * inputs: {
+     *   subject: { sqft, beds, baths },
+     *   comps: [{ label, salePrice, sqft, beds, baths,
+     *             condition: 'renovated'|'average'|'dated', monthsAgo }],
+     *   settings: { pricePerSqftAdj, bedAdj, bathAdj,
+     *               conditionAdjPct: { renovated, average, dated },
+     *               annualAppreciationPct }
+     * }
+     */
+    function appraise(inputs) {
+        const subject = inputs.subject || {};
+        const settings = inputs.settings || {};
+        const sSqft = num(subject.sqft);
+        const sBeds = num(subject.beds);
+        const sBaths = num(subject.baths);
+        const adjPerSqft = num(settings.pricePerSqftAdj);
+        const bedAdj = num(settings.bedAdj);
+        const bathAdj = num(settings.bathAdj);
+        const condPct = settings.conditionAdjPct || {};
+        const apprPct = num(settings.annualAppreciationPct);
+
+        const comps = (Array.isArray(inputs.comps) ? inputs.comps : [])
+            .map(c => {
+                const salePrice = num(c.salePrice);
+                const adjustments = {
+                    sqft: (sSqft - num(c.sqft)) * adjPerSqft,
+                    beds: (sBeds - num(c.beds)) * bedAdj,
+                    baths: (sBaths - num(c.baths)) * bathAdj,
+                    condition: salePrice * num(condPct[c.condition || 'renovated']) / 100,
+                    time: salePrice * (apprPct / 100) * (num(c.monthsAgo) / 12)
+                };
+                const netAdjustment = Object.values(adjustments).reduce((a, b) => a + b, 0);
+                const grossAdj = Object.values(adjustments).reduce((a, b) => a + Math.abs(b), 0);
+                const grossAdjPct = salePrice > 0 ? (grossAdj / salePrice) * 100 : 0;
+                return {
+                    label: c.label || '',
+                    salePrice,
+                    adjustments,
+                    netAdjustment,
+                    grossAdjPct,
+                    adjustedValue: salePrice + netAdjustment,
+                    pricePerSqft: num(c.sqft) > 0 ? salePrice / num(c.sqft) : 0,
+                    // Perfect comp = weight 1, fading linearly; floor keeps every comp counted
+                    weight: Math.max(0.1, 1 - grossAdjPct / 50),
+                    flagged: grossAdjPct > 25 // appraisal convention: >25% gross = weak comp
+                };
+            })
+            .filter(c => c.salePrice > 0);
+
+        if (comps.length === 0) {
+            return { comps: [], arv: 0, low: 0, high: 0, spreadPct: 0, confidence: 'low', subjectPricePerSqft: 0 };
+        }
+
+        const weightSum = comps.reduce((s, c) => s + c.weight, 0);
+        const weighted = comps.reduce((s, c) => s + c.adjustedValue * c.weight, 0) / weightSum;
+        const arv = Math.round(weighted / 1000) * 1000;
+
+        const values = comps.map(c => c.adjustedValue);
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        const sd = Math.sqrt(values.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / values.length);
+        const spreadPct = mean > 0 ? (sd / mean) * 100 : 0;
+        const confidence = (comps.length >= 3 && spreadPct < 5) ? 'high' : (spreadPct < 10 ? 'medium' : 'low');
+
+        return {
+            comps, arv,
+            low: Math.round(Math.min.apply(null, values) / 1000) * 1000,
+            high: Math.round(Math.max.apply(null, values) / 1000) * 1000,
+            spreadPct, confidence,
+            subjectPricePerSqft: sSqft > 0 ? arv / sSqft : 0
+        };
+    }
+
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise };
 }));

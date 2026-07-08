@@ -190,6 +190,92 @@ test('rental: appraisal variance flows into refi loan sizing', () => {
     assertNear(m.loanAmount, 288000 * 0.75, 1e-6, 'refiLoan');
 });
 
+// ---- Desktop Appraisal (sales comparison) ----
+
+const APPRAISE_BASE = {
+    subject: { sqft: 1500, beds: 3, baths: 2 },
+    settings: {
+        pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500,
+        conditionAdjPct: { renovated: 0, average: 8, dated: 15 },
+        annualAppreciationPct: 6
+    }
+};
+const IDENTICAL_COMP = { label: 'twin', salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 0 };
+
+test('appraise: identical comp needs no adjustments, full weight', () => {
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [IDENTICAL_COMP] });
+    assertNear(a.comps[0].netAdjustment, 0, 1e-9, 'netAdjustment');
+    assertNear(a.comps[0].adjustedValue, 300000, 1e-9, 'adjustedValue');
+    assertNear(a.comps[0].weight, 1, 1e-9, 'weight');
+    assert(!a.comps[0].flagged, 'should not be flagged');
+    assertNear(a.arv, 300000, 1e-9, 'arv');
+});
+
+test('appraise: sqft, bed, condition and time adjustments are itemized', () => {
+    const comp = { salePrice: 280000, sqft: 1400, beds: 2, baths: 2, condition: 'average', monthsAgo: 6 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [comp] });
+    const adj = a.comps[0].adjustments;
+    assertNear(adj.sqft, (1500 - 1400) * 50, 1e-9, 'sqft adj');            // +5,000
+    assertNear(adj.beds, 5000, 1e-9, 'bed adj');
+    assertNear(adj.baths, 0, 1e-9, 'bath adj');
+    assertNear(adj.condition, 280000 * 0.08, 1e-9, 'condition adj');       // +22,400
+    assertNear(adj.time, 280000 * 0.06 * 0.5, 1e-9, 'time adj');           // +8,400
+    assertNear(a.comps[0].adjustedValue, 320800, 1e-9, 'adjustedValue');
+    assertNear(a.comps[0].grossAdjPct, (40800 / 280000) * 100, 1e-9, 'grossAdjPct');
+});
+
+test('appraise: heavily-adjusted comps get less weight in the blend', () => {
+    const adjustedComp = { salePrice: 280000, sqft: 1400, beds: 2, baths: 2, condition: 'average', monthsAgo: 6 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [IDENTICAL_COMP, adjustedComp] });
+    const w2 = 1 - ((40800 / 280000) * 100) / 50;
+    const expected = Math.round(((300000 * 1 + 320800 * w2) / (1 + w2)) / 1000) * 1000;
+    assertNear(a.arv, expected, 1e-9, 'weighted arv');
+    assert(a.arv > 300000 && a.arv < 320800, 'blend must land between the comps');
+    assert(a.comps[1].weight < a.comps[0].weight, 'adjusted comp weighs less');
+});
+
+test('appraise: comps over 25% gross adjustment are flagged', () => {
+    const weak = { salePrice: 200000, sqft: 1000, beds: 3, baths: 2, condition: 'dated', monthsAgo: 0 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [weak] });
+    // sqft +25,000 (12.5%) + dated +30,000 (15%) = 27.5% gross
+    assertNear(a.comps[0].grossAdjPct, 27.5, 1e-9, 'grossAdjPct');
+    assert(a.comps[0].flagged, 'must be flagged');
+    assertNear(a.comps[0].weight, 1 - 27.5 / 50, 1e-9, 'weight');
+});
+
+test('appraise: weight never drops below the 0.1 floor', () => {
+    const extreme = { salePrice: 100000, sqft: 600, beds: 3, baths: 2, condition: 'dated', monthsAgo: 0 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [extreme] });
+    assert(a.comps[0].grossAdjPct > 50, 'precondition: gross > 50%');
+    assertNear(a.comps[0].weight, 0.1, 1e-9, 'weight floor');
+});
+
+test('appraise: no comps (or zero-price comps) yields zero ARV, low confidence', () => {
+    const empty = Engine.appraise({ ...APPRAISE_BASE, comps: [] });
+    assert(empty.arv === 0 && empty.confidence === 'low', 'empty comps');
+    const zeros = Engine.appraise({ ...APPRAISE_BASE, comps: [{ salePrice: 0, sqft: 1500 }] });
+    assert(zeros.arv === 0, 'zero-price comps are filtered out');
+});
+
+test('appraise: ARV is rounded to the nearest $1,000', () => {
+    const comp = { salePrice: 299499, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 0 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [comp] });
+    assertNear(a.arv, 299000, 1e-9, 'rounded arv');
+});
+
+test('appraise: confidence requires 3+ agreeing comps for HIGH', () => {
+    const three = Engine.appraise({ ...APPRAISE_BASE, comps: [IDENTICAL_COMP, { ...IDENTICAL_COMP }, { ...IDENTICAL_COMP }] });
+    assert(three.confidence === 'high', '3 identical comps → high');
+    const two = Engine.appraise({ ...APPRAISE_BASE, comps: [IDENTICAL_COMP, { ...IDENTICAL_COMP }] });
+    assert(two.confidence === 'medium', '2 comps cap at medium');
+});
+
+test('appraise: time adjustment scales with months since sale', () => {
+    const yearOld = { salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 12 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [yearOld] });
+    assertNear(a.comps[0].adjustments.time, 300000 * 0.06, 1e-9, '12mo at 6%/yr = +6%');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

@@ -527,8 +527,298 @@ document.getElementById('strategy-flip-btn').addEventListener('click', () => swi
 document.getElementById('strategy-rental-btn').addEventListener('click', () => switchStrategy('rental'));
 document.getElementById('export-pdf-btn').addEventListener('click', () => window.print());
 
-// Initial render (scripts are deferred, so the DOM is ready here)
+// ==================== ARV Desktop Appraisal (Page 1) ====================
+
+const appraisalPage = document.getElementById('appraisal-page');
+const calculatorPage = document.getElementById('calculator-page');
+const pageAppraisalBtn = document.getElementById('page-appraisal-btn');
+const pageCalculatorBtn = document.getElementById('page-calculator-btn');
+const strategySelector = document.getElementById('strategy-selector');
+const calcAddressNote = document.getElementById('calc-address-note');
+
+const subjectAddressInput = document.getElementById('subject-address');
+const subjectSqftInput = document.getElementById('subject-sqft');
+const subjectBedsInput = document.getElementById('subject-beds');
+const subjectBathsInput = document.getElementById('subject-baths');
+const adjPriceSqftInput = document.getElementById('adj-price-sqft');
+const adjBedInput = document.getElementById('adj-bed');
+const adjBathInput = document.getElementById('adj-bath');
+const adjCondAvgInput = document.getElementById('adj-cond-avg');
+const adjCondDatedInput = document.getElementById('adj-cond-dated');
+const adjAppreciationInput = document.getElementById('adj-appreciation');
+
+const compsContainer = document.getElementById('comps-container');
+const addCompBtn = document.getElementById('add-comp-btn');
+const arvEstimateValue = document.getElementById('arv-estimate-value');
+const arvPpsfNote = document.getElementById('arv-ppsf-note');
+const arvRangeValue = document.getElementById('arv-range-value');
+const arvConfidenceCard = document.getElementById('arv-confidence-card');
+const arvConfidenceValue = document.getElementById('arv-confidence-value');
+const arvSpreadNote = document.getElementById('arv-spread-note');
+const compResultsBody = document.getElementById('comp-results-body');
+const appraisalWarnings = document.getElementById('appraisal-warnings');
+const useArvBtn = document.getElementById('use-arv-btn');
+
+const APPRAISAL_STORAGE_KEY = 'underwriter-appraisal-v1';
+const MAX_COMPS = 6;
+
+const DEFAULT_COMPS = [
+    { label: '412 Oak Ave', salePrice: 325000, sqft: 1520, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 2 },
+    { label: '88 Birch Ln', salePrice: 310000, sqft: 1450, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 4 },
+    { label: '205 Cedar Ct', salePrice: 289000, sqft: 1400, beds: 3, baths: 1, condition: 'average', monthsAgo: 6 }
+];
+
+let appraisalComps = DEFAULT_COMPS.map(c => ({ ...c }));
+let lastAppraisal = null;
+
+function saveAppraisalState() {
+    try {
+        localStorage.setItem(APPRAISAL_STORAGE_KEY, JSON.stringify({
+            address: subjectAddressInput.value,
+            sqft: subjectSqftInput.value,
+            beds: subjectBedsInput.value,
+            baths: subjectBathsInput.value,
+            settings: {
+                pricePerSqft: adjPriceSqftInput.value,
+                bed: adjBedInput.value,
+                bath: adjBathInput.value,
+                condAvg: adjCondAvgInput.value,
+                condDated: adjCondDatedInput.value,
+                appreciation: adjAppreciationInput.value
+            },
+            comps: appraisalComps
+        }));
+    } catch (e) { /* storage full/blocked — appraisal still works, just not persisted */ }
+}
+
+function restoreAppraisalState() {
+    try {
+        const raw = localStorage.getItem(APPRAISAL_STORAGE_KEY);
+        if (!raw) return;
+        const s = JSON.parse(raw);
+        if (s.address !== undefined) subjectAddressInput.value = s.address;
+        if (s.sqft !== undefined) subjectSqftInput.value = s.sqft;
+        if (s.beds !== undefined) subjectBedsInput.value = s.beds;
+        if (s.baths !== undefined) subjectBathsInput.value = s.baths;
+        if (s.settings) {
+            adjPriceSqftInput.value = s.settings.pricePerSqft;
+            adjBedInput.value = s.settings.bed;
+            adjBathInput.value = s.settings.bath;
+            adjCondAvgInput.value = s.settings.condAvg;
+            adjCondDatedInput.value = s.settings.condDated;
+            adjAppreciationInput.value = s.settings.appreciation;
+        }
+        if (Array.isArray(s.comps) && s.comps.length) {
+            appraisalComps = s.comps.slice(0, MAX_COMPS);
+        }
+    } catch (e) { /* corrupted state — fall back to defaults */ }
+}
+
+const CONDITION_OPTIONS = [
+    { value: 'renovated', text: 'Renovated' },
+    { value: 'average', text: 'Average' },
+    { value: 'dated', text: 'Dated' }
+];
+
+// Rebuild comp editor cards (only on add/remove/restore; typing updates state in place)
+function renderComps() {
+    compsContainer.innerHTML = '';
+    appraisalComps.forEach((comp, idx) => {
+        const card = document.createElement('div');
+        card.className = 'comp-card';
+        card.innerHTML = `
+            <div class="comp-card-header">
+                <span>Comp ${idx + 1}</span>
+                <button class="comp-remove" title="Remove comp" ${appraisalComps.length <= 1 ? 'disabled' : ''}>&times;</button>
+            </div>
+            <div class="form-group">
+                <label>Address / Label</label>
+                <input type="text" data-field="label">
+            </div>
+            <div class="input-row">
+                <div class="form-group">
+                    <label>Sale Price</label>
+                    <div class="input-wrapper has-prefix">
+                        <span class="input-prefix">$</span>
+                        <input type="number" data-field="salePrice" min="0" step="1000">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>SqFt</label>
+                    <input type="number" data-field="sqft" min="0" step="10">
+                </div>
+            </div>
+            <div class="input-row">
+                <div class="form-group">
+                    <label>Beds</label>
+                    <input type="number" data-field="beds" min="0" max="12" step="1">
+                </div>
+                <div class="form-group">
+                    <label>Baths</label>
+                    <input type="number" data-field="baths" min="0" max="12" step="0.5">
+                </div>
+            </div>
+            <div class="input-row">
+                <div class="form-group">
+                    <label>Condition</label>
+                    <select data-field="condition">
+                        ${CONDITION_OPTIONS.map(o => `<option value="${o.value}">${o.text}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Sold (months ago)</label>
+                    <input type="number" data-field="monthsAgo" min="0" max="24" step="1">
+                </div>
+            </div>
+        `;
+        // Fill current values and wire updates back into state
+        card.querySelectorAll('[data-field]').forEach(el => {
+            el.value = comp[el.dataset.field];
+            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+                comp[el.dataset.field] = el.value;
+                recalcAppraisal();
+            });
+        });
+        card.querySelector('.comp-remove').addEventListener('click', () => {
+            appraisalComps.splice(idx, 1);
+            renderComps();
+            recalcAppraisal();
+        });
+        compsContainer.appendChild(card);
+    });
+    addCompBtn.disabled = appraisalComps.length >= MAX_COMPS;
+}
+
+function readAppraisalInputs() {
+    return {
+        subject: {
+            sqft: subjectSqftInput.value,
+            beds: subjectBedsInput.value,
+            baths: subjectBathsInput.value
+        },
+        comps: appraisalComps,
+        settings: {
+            pricePerSqftAdj: adjPriceSqftInput.value,
+            bedAdj: adjBedInput.value,
+            bathAdj: adjBathInput.value,
+            conditionAdjPct: {
+                renovated: 0,
+                average: adjCondAvgInput.value,
+                dated: adjCondDatedInput.value
+            },
+            annualAppreciationPct: adjAppreciationInput.value
+        }
+    };
+}
+
+const CONFIDENCE_STYLES = {
+    high: { label: 'HIGH', card: 'success' },
+    medium: { label: 'MEDIUM', card: 'warning' },
+    low: { label: 'LOW', card: 'danger' }
+};
+
+function recalcAppraisal() {
+    const a = Engine.appraise(readAppraisalInputs());
+    lastAppraisal = a;
+
+    arvEstimateValue.textContent = formatCurrency(a.arv);
+    arvPpsfNote.textContent = a.subjectPricePerSqft > 0
+        ? `$${a.subjectPricePerSqft.toFixed(0)}/sqft on subject` : 'Weighted comp value';
+    arvRangeValue.textContent = `${formatCurrency(a.low)} – ${formatCurrency(a.high)}`;
+
+    const conf = CONFIDENCE_STYLES[a.confidence];
+    arvConfidenceValue.textContent = conf.label;
+    arvConfidenceCard.className = `metric-card ${conf.card}`;
+    arvSpreadNote.textContent = a.comps.length
+        ? `${a.spreadPct.toFixed(1)}% spread across ${a.comps.length} comp${a.comps.length !== 1 ? 's' : ''}`
+        : 'Add at least one comp';
+
+    compResultsBody.innerHTML = '';
+    a.comps.forEach((c, i) => {
+        const row = document.createElement('tr');
+        const netPrefix = c.netAdjustment >= 0 ? '+' : '';
+        row.innerHTML = `
+            <td>${c.flagged ? '⚠ ' : ''}<span class="comp-name"></span></td>
+            <td>${formatCurrency(c.salePrice)}</td>
+            <td class="${c.netAdjustment >= 0 ? 'adj-pos' : 'adj-neg'}">${netPrefix}${formatCurrency(c.netAdjustment)}</td>
+            <td><strong>${formatCurrency(c.adjustedValue)}</strong></td>
+            <td>×${c.weight.toFixed(2)}</td>
+        `;
+        row.querySelector('.comp-name').textContent = c.label || `Comp ${i + 1}`;
+        compResultsBody.appendChild(row);
+    });
+
+    const flagged = a.comps.filter(c => c.flagged);
+    appraisalWarnings.innerHTML = '';
+    if (flagged.length) {
+        const warn = document.createElement('div');
+        warn.className = 'appraisal-warning';
+        warn.textContent = `⚠ ${flagged.map(c => c.label || 'Unnamed comp').join(', ')}: gross adjustments exceed 25% of sale price — weak comparable(s), consider replacing.`;
+        appraisalWarnings.appendChild(warn);
+    }
+
+    useArvBtn.disabled = a.arv <= 0;
+    useArvBtn.textContent = a.arv > 0
+        ? `Use ${formatCurrency(a.arv)} as ARV in the Deal Calculator →`
+        : 'Add comps to estimate ARV';
+
+    saveAppraisalState();
+}
+
+// Push the appraised ARV into the calculator and move to step 2
+function useAppraisedArv() {
+    if (!lastAppraisal || lastAppraisal.arv <= 0) return;
+    arvInput.value = lastAppraisal.arv;
+    const address = subjectAddressInput.value.trim();
+    calcAddressNote.textContent = `${address ? address + ' — ' : ''}appraised ARV ${formatCurrency(lastAppraisal.arv)} applied (${lastAppraisal.confidence} confidence)`;
+    calcAddressNote.classList.remove('hidden');
+    switchPage('calculator');
+    calculateDeal();
+}
+
+// ==================== Page switching ====================
+
+function switchPage(page) {
+    const onAppraisal = page === 'appraisal';
+    pageAppraisalBtn.classList.toggle('active', onAppraisal);
+    pageCalculatorBtn.classList.toggle('active', !onAppraisal);
+    appraisalPage.classList.toggle('hidden', !onAppraisal);
+    calculatorPage.classList.toggle('hidden', onAppraisal);
+    strategySelector.classList.toggle('hidden', onAppraisal);
+    if (!onAppraisal && chart) {
+        // Chart may have been created while its container was hidden
+        requestAnimationFrame(() => chart.resize());
+    }
+}
+
+pageAppraisalBtn.addEventListener('click', () => switchPage('appraisal'));
+pageCalculatorBtn.addEventListener('click', () => switchPage('calculator'));
+useArvBtn.addEventListener('click', useAppraisedArv);
+addCompBtn.addEventListener('click', () => {
+    if (appraisalComps.length >= MAX_COMPS) return;
+    appraisalComps.push({
+        label: '', salePrice: 300000,
+        sqft: Engine.num(subjectSqftInput.value), beds: Engine.num(subjectBedsInput.value),
+        baths: Engine.num(subjectBathsInput.value), condition: 'renovated', monthsAgo: 0
+    });
+    renderComps();
+    recalcAppraisal();
+});
+
+[
+    subjectAddressInput, subjectSqftInput, subjectBedsInput, subjectBathsInput,
+    adjPriceSqftInput, adjBedInput, adjBathInput, adjCondAvgInput,
+    adjCondDatedInput, adjAppreciationInput
+].forEach(input => input.addEventListener('input', recalcAppraisal));
+
+// ==================== Initial render ====================
+// (scripts are deferred, so the DOM is ready here)
+
 if (window.lucide) {
     window.lucide.createIcons(); // static page icons only; dynamic ones use inline SVGs
 }
 switchStrategy('flip');
+restoreAppraisalState();
+renderComps();
+recalcAppraisal();
+switchPage('appraisal'); // step 1 first
