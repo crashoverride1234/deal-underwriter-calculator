@@ -1,0 +1,6 @@
+# Local build/deploy artifacts
+dist/
+underwriter-deploy.zip
+
+# Local tooling config
+.claude/

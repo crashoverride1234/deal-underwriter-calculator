@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real Estate Deal Underwriter & Stress Test Calculator</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Pinned CDN dependencies, deferred off the critical path -->
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js"></script>
+    <script defer src="https://unpkg.com/lucide@0.462.0/dist/umd/lucide.min.js"></script>
+    <!-- Application scripts (engine must load before app) -->
+    <script defer src="engine.js"></script>
+    <script defer src="app.js"></script>
+
+    <!-- PWA Setup -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0f172a">
+    <link rel="apple-touch-icon" href="icon-180.png">
+</head>
+<body>
+    <div class="container">
+        <!-- Application Header -->
+        <header>
+            <div class="logo-section">
+                <h1><i data-lucide="building-2"></i> ANTIGRAVITY UNDERWRITER</h1>
+                <p>Investment Calculator & Stress-Testing Simulator</p>
+            </div>
+            
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <div class="strategy-selector">
+                    <button id="strategy-flip-btn" class="tab-btn active">
+                        <i data-lucide="trending-up"></i> Fix & Flip
+                    </button>
+                    <button id="strategy-rental-btn" class="tab-btn">
+                        <i data-lucide="home"></i> Rental (Buy & Hold)
+                    </button>
+                </div>
+                <button id="export-pdf-btn" class="btn btn-secondary">
+                    <i data-lucide="printer"></i> Export PDF
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Workspace Grid -->
+        <div class="app-grid">
+            
+            <!-- Inputs Panel (Left Column) -->
+            <div class="panel-card" id="inputs-panel">
+                <!-- Project details -->
+                <div class="input-section-title">
+                    <i data-lucide="map-pin"></i> Property Acquisition
+                </div>
+                <div class="inputs-group">
+                    <div class="form-group">
+                        <label for="purchase-price">Purchase Price</label>
+                        <div class="input-wrapper has-prefix">
+                            <span class="input-prefix">$</span>
+                            <input type="number" id="purchase-price" value="200000" min="0" step="1000">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="buying-costs">Buying Costs</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="buying-costs" value="4000" min="0" step="500">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="arv">After Repair Value (ARV)</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="arv" value="320000" min="0" step="1000">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Rehab & Timeline -->
+                <div class="input-section-title">
+                    <i data-lucide="wrench"></i> Rehab & Project Period
+                </div>
+                <div class="inputs-group">
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="rehab-budget">Rehab Budget</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="rehab-budget" value="45000" min="0" step="1000">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="holding-period" id="holding-period-label">Project Hold Period</label>
+                            <div class="input-wrapper has-suffix">
+                                <input type="number" id="holding-period" value="6" min="1" max="60">
+                                <span class="input-suffix">mo</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Financing details -->
+                <div class="input-section-title">
+                    <i data-lucide="wallet"></i> Financing Details
+                </div>
+                <div class="inputs-group">
+                    <div class="form-group">
+                        <label for="financing-type">Financing Option</label>
+                        <select id="financing-type">
+                            <!-- Populated dynamically by JS depending on strategy -->
+                        </select>
+                    </div>
+                    
+                    <!-- Financed parameters (Conditional) -->
+                    <div id="financing-params" class="hidden">
+                        <div class="input-row" style="margin-bottom: 1rem;">
+                            <div class="form-group">
+                                <label for="loan-ltv" id="ltv-label">Loan-to-Cost (LTC)</label>
+                                <div class="input-wrapper has-suffix">
+                                    <input type="number" id="loan-ltv" value="80" min="10" max="100" step="1">
+                                    <span class="input-suffix">%</span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="interest-rate">Interest Rate</label>
+                                <div class="input-wrapper has-suffix">
+                                    <input type="number" id="interest-rate" value="10.0" min="0" max="25" step="0.1">
+                                    <span class="input-suffix">%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="form-group">
+                                <label for="lender-points">Lender Points</label>
+                                <div class="input-wrapper has-suffix">
+                                    <input type="number" id="lender-points" value="2.0" min="0" max="10" step="0.5">
+                                    <span class="input-suffix">%</span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="lender-fees">Junk/Lender Fees</label>
+                                <div class="input-wrapper has-prefix">
+                                    <span class="input-prefix">$</span>
+                                    <input type="number" id="lender-fees" value="1500" min="0" step="100">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Operations Section (Only visible for Rental) -->
+                <div id="rental-operations-section" class="hidden">
+                    <div class="input-section-title">
+                        <i data-lucide="activity"></i> Monthly Rental Operations
+                    </div>
+                    <div class="inputs-group">
+                        <div class="form-group">
+                            <label for="monthly-rent">Gross Monthly Rent</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="monthly-rent" value="2200" min="0" step="50">
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="form-group">
+                                <label for="vacancy-rate">Vacancy Rate</label>
+                                <div class="input-wrapper has-suffix">
+                                    <input type="number" id="vacancy-rate" value="8" min="0" max="100">
+                                    <span class="input-suffix">%</span>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="operating-expenses">Operating Expenses</label>
+                                <div class="input-wrapper has-suffix">
+                                    <input type="number" id="operating-expenses" value="40" min="0" max="100">
+                                    <span class="input-suffix">%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="monthly-taxes-ins">Monthly Taxes, Insurance & HOA</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="monthly-taxes-ins" value="350" min="0" step="25">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dashboard Panel (Right Column) -->
+            <div class="dashboard-grid">
+                
+                <!-- Deal Scorecard Banner -->
+                <div id="deal-scorecard" class="scorecard-banner">
+                    <div class="scorecard-banner-title">
+                        <span id="scorecard-icon"></span>
+                        <span id="scorecard-text">Calculating...</span>
+                    </div>
+                    <div id="scorecard-subtext" style="font-size: 0.9rem; font-weight: 500;">Please check details</div>
+                </div>
+
+                <!-- KPI Metrics Grid -->
+                <div id="metrics-container" class="metrics-row">
+                    <!-- Dynamic cards will go here via Javascript depending on active strategy -->
+                </div>
+
+                <!-- Visualization & holding costs -->
+                <div class="chart-row">
+                    <div class="panel-card chart-container">
+                        <div class="chart-title">
+                            <span id="chart-main-title">Financial Model Breakdown</span>
+                            <i data-lucide="pie-chart" style="width: 16px; height: 16px; color: var(--text-muted);"></i>
+                        </div>
+                        <div class="chart-wrapper">
+                            <canvas id="underwriterChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Stress Test / Real Time Adjustment -->
+                    <div class="panel-card stress-test-card" style="display: flex; flex-direction: column; justify-content: space-between;">
+                        <div>
+                            <div class="stress-header">
+                                <i data-lucide="sliders" style="color: #a5b4fc; width: 18px; height: 18px;"></i>
+                                <h4>Stress-Test Simulator</h4>
+                            </div>
+                            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 1.25rem;">
+                                Move the sliders to test how holding delays or price volatility impact your final numbers.
+                            </p>
+                            
+                            <div class="stress-slider-group">
+                                <!-- Slider 1: Rehab Holding Duration Buffer -->
+                                <div class="form-group">
+                                    <div class="slider-label-row">
+                                        <span>Rehab Hold Buffer</span>
+                                        <span class="slider-value" id="rehab-buffer-val">+0 months</span>
+                                    </div>
+                                    <input type="range" id="rehab-buffer-slider" min="0" max="12" value="0" step="1">
+                                </div>
+                                
+                                <!-- Slider 2: Appraised Value Variance / Price Drop -->
+                                <div class="form-group">
+                                    <div class="slider-label-row">
+                                        <span id="slider-variance-label">ARV Market Variance</span>
+                                        <span class="slider-value" id="variance-val">0%</span>
+                                    </div>
+                                    <input type="range" id="variance-slider" min="-25" max="10" value="0" step="1">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="margin-top: 1.5rem; font-size: 0.8rem; line-height: 1.4; color: var(--text-secondary); border-top: 1px solid rgba(255,255,255,0.05); padding-top: 1rem;">
+                            <span style="font-weight: 700; color: var(--text-primary); display: block; margin-bottom: 0.25rem;">Holding Carrying Costs include:</span>
+                            Taxes, insurance, utilities, and finance interest payments incurred monthly during rehab and sale holding.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Selling Costs & Carrying Costs Details Card -->
+                <div class="panel-card">
+                    <div class="input-section-title" style="margin-bottom: 0.75rem; border: none; padding: 0;">
+                        <i data-lucide="info"></i> Financial Summary Details
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; font-size: 0.85rem;">
+                        <div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);">Total Project Capital:</span>
+                                <span style="font-weight: 600;" id="summary-total-capital">$0</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);">Out-of-Pocket Cash:</span>
+                                <span style="font-weight: 600;" id="summary-cash-invested">$0</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);" id="summary-leverage-label">Financed Loan Amount:</span>
+                                <span style="font-weight: 600;" id="summary-loan-amount">$0</span>
+                            </div>
+                        </div>
+                        <div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);">Monthly Holding Cost:</span>
+                                <span style="font-weight: 600; color: var(--accent-danger);" id="summary-monthly-holding-cost">$0</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);">Total Financing Costs:</span>
+                                <span style="font-weight: 600;" id="summary-total-finance-costs">$0</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
+                                <span style="color: var(--text-secondary);">Est. Refi/Selling Costs:</span>
+                                <span style="font-weight: 600;" id="summary-selling-costs">$0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+    </div>
+
+    <!-- PWA Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('sw.js').then(registration => {
+                    console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                }, err => {
+                    console.log('ServiceWorker registration failed: ', err);
+                });
+            });
+        }
+    </script>
+</body>
+</html>

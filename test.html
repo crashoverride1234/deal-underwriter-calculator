@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Underwriter Engine — Test Suite</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0b0f19;
+            color: #f3f4f6;
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+        h1 { font-size: 1.3rem; }
+        #summary {
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: 700;
+            margin: 1rem 0;
+        }
+        #summary.pass { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        #summary.fail { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .test {
+            display: flex;
+            gap: 0.6rem;
+            padding: 0.45rem 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.9rem;
+        }
+        .test .badge { font-weight: 700; width: 3.2rem; flex-shrink: 0; }
+        .test.pass .badge { color: #34d399; }
+        .test.fail .badge { color: #f87171; }
+        .test .error { color: #fca5a5; font-size: 0.8rem; margin-top: 0.2rem; }
+        a { color: #a5b4fc; }
+    </style>
+</head>
+<body>
+    <h1>Underwriter Engine — Test Suite</h1>
+    <p>Same tests as <code>node tests.js</code>, running against <code>engine.js</code> in the browser.
+       Back to <a href="index.html">the calculator</a>.</p>
+    <div id="summary">Running…</div>
+    <div id="results"></div>
+
+    <script src="engine.js"></script>
+    <script>
+        window.renderTestResults = function (results) {
+            const summary = document.getElementById('summary');
+            const list = document.getElementById('results');
+            const passed = results.filter(r => r.pass).length;
+            const allPass = passed === results.length;
+            summary.textContent = `${passed}/${results.length} tests passed`;
+            summary.className = allPass ? 'pass' : 'fail';
+            results.forEach(r => {
+                const row = document.createElement('div');
+                row.className = 'test ' + (r.pass ? 'pass' : 'fail');
+                row.innerHTML = `<span class="badge">${r.pass ? 'PASS' : 'FAIL'}</span>` +
+                    `<span>${r.name}${r.pass ? '' : `<div class="error"></div>`}</span>`;
+                if (!r.pass) row.querySelector('.error').textContent = r.error;
+                list.appendChild(row);
+            });
+        };
+    </script>
+    <script src="tests.js"></script>
+</body>
+</html>
