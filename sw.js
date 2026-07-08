@@ -1,4 +1,4 @@
-const CACHE_NAME = 'underwriter-v5';
+const CACHE_NAME = 'underwriter-v6';
 const PRECACHE_URLS = [
   './',
   './index.html',

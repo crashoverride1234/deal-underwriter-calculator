@@ -60,8 +60,12 @@
                 <div class="inputs-group">
                     <div class="form-group">
                         <label for="subject-address">Property Address</label>
-                        <input type="text" id="subject-address" placeholder="123 Main St, Springfield">
+                        <input type="text" id="subject-address" placeholder="123 Main St, Springfield, TX 75001">
                     </div>
+                    <button id="lookup-address-btn" class="btn btn-secondary" style="width: 100%;">
+                        <i data-lucide="download-cloud"></i> Auto-Fill Property Data
+                    </button>
+                    <div id="lookup-status" class="lookup-status hidden"></div>
                     <div class="input-row">
                         <div class="form-group">
                             <label for="subject-sqft">Living Area</label>
@@ -75,14 +79,64 @@
                             <input type="number" id="subject-beds" value="3" min="0" max="12" step="1">
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label for="subject-baths">Bathrooms</label>
-                        <input type="number" id="subject-baths" value="2" min="0" max="12" step="0.5">
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="subject-baths">Bathrooms</label>
+                            <input type="number" id="subject-baths" value="2" min="0" max="12" step="0.5">
+                        </div>
+                        <div class="form-group">
+                            <label for="subject-lot">Lot Size</label>
+                            <div class="input-wrapper has-suffix">
+                                <input type="number" id="subject-lot" value="7000" min="0" step="100">
+                                <span class="input-suffix">sqft</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="subject-year">Year Built</label>
+                            <input type="number" id="subject-year" value="1980" min="1800" max="2030" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="subject-garage">Garage / Covered Spaces</label>
+                            <input type="number" id="subject-garage" value="2" min="0" max="8" step="1">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="subject-stories">Stories</label>
+                            <select id="subject-stories">
+                                <option value="1">1 Story</option>
+                                <option value="1.5">1.5 Story</option>
+                                <option value="2">2 Story</option>
+                                <option value="3">3+ Story</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="subject-pool">Pool</label>
+                            <select id="subject-pool">
+                                <option value="no">No Pool</option>
+                                <option value="yes">Pool</option>
+                            </select>
+                        </div>
                     </div>
                     <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
                         The subject is valued in <strong>after-repair (renovated) condition</strong>.
                         Comps in weaker condition are adjusted upward to match.
                     </p>
+                    <details class="settings-details">
+                        <summary>Property Data API (RentCast)</summary>
+                        <div class="form-group" style="margin-top: 0.75rem;">
+                            <label for="rentcast-api-key">RentCast API Key</label>
+                            <input type="password" id="rentcast-api-key" placeholder="Paste your API key" autocomplete="off">
+                        </div>
+                        <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 0.5rem;">
+                            Auto-fill pulls beds, baths, sqft, lot, year, garage &amp; pool from public
+                            records. Get a free key (50 lookups/mo) at
+                            <a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a>.
+                            The key is stored only on this device.
+                        </p>
+                    </details>
                 </div>
 
                 <div class="input-section-title">
@@ -137,6 +191,60 @@
                             </div>
                         </div>
                     </div>
+                    <details class="settings-details" id="advanced-adjustments">
+                        <summary>Advanced Adjustments (lot, garage, pool, age, quality)</summary>
+                        <div class="inputs-group" style="margin-top: 1rem; margin-bottom: 0;">
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="adj-lot">Lot Size (per sqft)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-lot" value="1.5" min="0" step="0.25">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="adj-garage">Per Garage Space</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-garage" value="7500" min="0" step="500">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="adj-pool">Pool</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-pool" value="15000" min="0" step="1000">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="adj-year">Age (per year newer)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-year" value="500" min="0" step="50">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="adj-story">1-Story Premium (negative = 2-story premium)</label>
+                                <div class="input-wrapper has-prefix">
+                                    <span class="input-prefix">$</span>
+                                    <input type="number" id="adj-story" value="5000" step="500">
+                                </div>
+                            </div>
+                            <div>
+                                <div class="qual-settings-title">Qualitative Ratings (% of comp sale price)</div>
+                                <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; margin-bottom: 0.75rem;">
+                                    Rate each comp against the subject on the comp cards. An <em>inferior</em>
+                                    comp adjusts up by this %, a <em>superior</em> comp adjusts down.
+                                </p>
+                                <div id="qual-settings" class="qual-settings-grid">
+                                    <!-- Populated by JS from QUALITATIVE_FACTORS -->
+                                </div>
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
 
@@ -197,6 +305,51 @@
                     <button id="use-arv-btn" class="btn" style="width: 100%; margin-top: 1.25rem; padding: 0.9rem;">
                         Use This ARV in the Deal Calculator →
                     </button>
+                </div>
+
+                <!-- Market Absorption Meter -->
+                <div class="panel-card">
+                    <div class="input-section-title">
+                        <i data-lucide="thermometer"></i> Market Absorption Meter
+                    </div>
+                    <div class="absorption-grid">
+                        <div class="absorption-inputs">
+                            <div class="form-group">
+                                <label for="mkt-actives">Active Listings</label>
+                                <input type="number" id="mkt-actives" value="42" min="0" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="mkt-pendings">Pending Sales</label>
+                                <input type="number" id="mkt-pendings" value="28" min="0" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="mkt-sold90">Sold (Last 90 Days)</label>
+                                <input type="number" id="mkt-sold90" value="51" min="0" step="1">
+                            </div>
+                        </div>
+                        <div class="absorption-readout">
+                            <div class="meter-header">
+                                <span id="absorption-badge" class="absorption-badge">—</span>
+                                <span id="absorption-score-note" class="absorption-score-note"></span>
+                            </div>
+                            <div class="meter-track">
+                                <div class="meter-needle" id="absorption-needle"></div>
+                            </div>
+                            <div class="meter-scale">
+                                <span>COLD</span><span>COOL</span><span>BALANCED</span><span>WARM</span><span>HOT</span>
+                            </div>
+                            <div class="absorption-stats">
+                                <div><span class="stat-label">Months of Inventory</span><span class="stat-value" id="stat-moi">—</span></div>
+                                <div><span class="stat-label">Absorption Rate</span><span class="stat-value" id="stat-absorption">—</span></div>
+                                <div><span class="stat-label">Pending / Active</span><span class="stat-value" id="stat-pending-ratio">—</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 1rem;">
+                        Pull the counts from your MLS hot sheet for the subject's zip or neighborhood.
+                        Under ~3 months of inventory is a seller's market; a high pending-to-active
+                        ratio signals accelerating demand.
+                    </p>
                 </div>
             </div>
         </div>

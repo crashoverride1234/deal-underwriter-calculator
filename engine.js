@@ -172,19 +172,42 @@
         return result;
     }
 
+    // Distinguish "field not provided" from a legitimate 0 — a missing data
+    // point on either side of a comparison means no adjustment (appraiser rule)
+    function has(v) {
+        return v !== undefined && v !== null && v !== '';
+    }
+
+    // Normalize the many ways a pool/no-pool answer arrives; null = unknown
+    function boolish(v) {
+        if (v === true || v === 'yes' || v === 'true' || v === 1 || v === '1') return true;
+        if (v === false || v === 'no' || v === 'false' || v === 0 || v === '0') return false;
+        return null;
+    }
+
     /**
      * Desktop appraisal via the sales comparison approach.
      * Each comp's sale price is adjusted toward the subject's post-rehab
      * (renovated) state; comps needing fewer adjustments weigh more.
      *
      * inputs: {
-     *   subject: { sqft, beds, baths },
-     *   comps: [{ label, salePrice, sqft, beds, baths,
-     *             condition: 'renovated'|'average'|'dated', monthsAgo }],
-     *   settings: { pricePerSqftAdj, bedAdj, bathAdj,
+     *   subject: { sqft, beds, baths, lotSqft, garageSpaces, yearBuilt, pool, stories },
+     *   comps: [{ label, salePrice, sqft, beds, baths, lotSqft, garageSpaces,
+     *             yearBuilt, pool, stories,
+     *             condition: 'renovated'|'average'|'dated', monthsAgo,
+     *             ratings: { <factor>: 'superior'|'similar'|'inferior' } }],
+     *   settings: { pricePerSqftAdj, bedAdj, bathAdj, lotAdjPerSqft,
+     *               garageAdjPerSpace, poolAdj, yearAdjPerYear, storyAdj,
      *               conditionAdjPct: { renovated, average, dated },
-     *               annualAppreciationPct }
+     *               annualAppreciationPct,
+     *               qualitativeAdjPct: { lotPlacement, lotUsability, schools,
+     *                                    curbAppeal, floorplan, locationInfluence } }
      * }
+     *
+     * Rating semantics (comp relative to subject): an INFERIOR comp sold for
+     * less than the subject deserves, so its price adjusts UP; SUPERIOR down.
+     * storyAdj > 0 encodes a 1-story premium: comps with more stories than
+     * the subject adjust up, comps with fewer adjust down.
      */
     function appraise(inputs) {
         const subject = inputs.subject || {};
@@ -192,22 +215,50 @@
         const sSqft = num(subject.sqft);
         const sBeds = num(subject.beds);
         const sBaths = num(subject.baths);
+        const sPool = boolish(subject.pool);
         const adjPerSqft = num(settings.pricePerSqftAdj);
         const bedAdj = num(settings.bedAdj);
         const bathAdj = num(settings.bathAdj);
+        const lotAdj = num(settings.lotAdjPerSqft);
+        const garageAdj = num(settings.garageAdjPerSpace);
+        const poolAdj = num(settings.poolAdj);
+        const yearAdj = num(settings.yearAdjPerYear);
+        // Story premium may legitimately be negative (2-story premium markets)
+        const storyAdjRaw = parseFloat(settings.storyAdj);
+        const storyAdj = Number.isFinite(storyAdjRaw) ? storyAdjRaw : 0;
         const condPct = settings.conditionAdjPct || {};
         const apprPct = num(settings.annualAppreciationPct);
+        const qualPct = settings.qualitativeAdjPct || {};
 
         const comps = (Array.isArray(inputs.comps) ? inputs.comps : [])
             .map(c => {
                 const salePrice = num(c.salePrice);
+                const cPool = boolish(c.pool);
                 const adjustments = {
                     sqft: (sSqft - num(c.sqft)) * adjPerSqft,
                     beds: (sBeds - num(c.beds)) * bedAdj,
                     baths: (sBaths - num(c.baths)) * bathAdj,
+                    lot: (has(subject.lotSqft) && has(c.lotSqft))
+                        ? (num(subject.lotSqft) - num(c.lotSqft)) * lotAdj : 0,
+                    garage: (has(subject.garageSpaces) && has(c.garageSpaces))
+                        ? (num(subject.garageSpaces) - num(c.garageSpaces)) * garageAdj : 0,
+                    year: (num(subject.yearBuilt) > 0 && num(c.yearBuilt) > 0)
+                        ? (num(subject.yearBuilt) - num(c.yearBuilt)) * yearAdj : 0,
+                    pool: (sPool !== null && cPool !== null && sPool !== cPool)
+                        ? (sPool ? poolAdj : -poolAdj) : 0,
+                    stories: (has(subject.stories) && has(c.stories))
+                        ? Math.sign(num(c.stories) - num(subject.stories)) * storyAdj : 0,
                     condition: salePrice * num(condPct[c.condition || 'renovated']) / 100,
                     time: salePrice * (apprPct / 100) * (num(c.monthsAgo) / 12)
                 };
+                // Qualitative grid: % of sale price per factor, signed by rating
+                const ratings = c.ratings || {};
+                Object.keys(qualPct).forEach(key => {
+                    const r = ratings[key];
+                    const sign = r === 'inferior' ? 1 : (r === 'superior' ? -1 : 0);
+                    adjustments[key] = sign * salePrice * num(qualPct[key]) / 100;
+                });
+
                 const netAdjustment = Object.values(adjustments).reduce((a, b) => a + b, 0);
                 const grossAdj = Object.values(adjustments).reduce((a, b) => a + Math.abs(b), 0);
                 const grossAdjPct = salePrice > 0 ? (grossAdj / salePrice) * 100 : 0;
@@ -249,5 +300,52 @@
         };
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise };
+    /**
+     * Market absorption / velocity readout.
+     * inputs: { activeListings, pendingListings, soldLast90Days }
+     *
+     * Months of Inventory (MOI) = actives / monthly sales pace. Standard
+     * read: under ~3 months is a seller's market, 3–6 balanced, 6+ a
+     * buyer's market. Pendings-to-actives adds a leading-indicator boost.
+     * Returns a 0–100 heat score and a temperature bucket for the gauge.
+     */
+    function marketAbsorption(inputs) {
+        const actives = num(inputs.activeListings);
+        const pendings = num(inputs.pendingListings);
+        const sold90 = num(inputs.soldLast90Days);
+
+        if (actives <= 0 && pendings <= 0 && sold90 <= 0) {
+            return {
+                soldPerMonth: 0, monthsOfInventory: 0, absorptionRatePct: 0,
+                pendingRatio: 0, score: 50, temperature: 'unknown'
+            };
+        }
+
+        const soldPerMonth = sold90 / 3;
+        const monthsOfInventory = soldPerMonth > 0
+            ? actives / soldPerMonth
+            : (actives > 0 ? Infinity : 0);
+        const absorptionRatePct = actives > 0
+            ? (soldPerMonth / actives) * 100
+            : (soldPerMonth > 0 ? Infinity : 0);
+        const pendingRatio = actives > 0
+            ? pendings / actives
+            : (pendings > 0 ? Infinity : 0);
+
+        // 0 MOI → 100, 12+ MOI → 0; pendings can add up to +20 (leading demand)
+        const moiCapped = Number.isFinite(monthsOfInventory) ? Math.min(monthsOfInventory, 12) : 12;
+        let score = 100 * (1 - moiCapped / 12);
+        score += Math.min((Number.isFinite(pendingRatio) ? pendingRatio : 1) * 20, 20);
+        score = Math.max(0, Math.min(100, score));
+
+        const temperature = score >= 80 ? 'hot'
+            : score >= 60 ? 'warm'
+            : score >= 40 ? 'balanced'
+            : score >= 20 ? 'cool'
+            : 'cold';
+
+        return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
+    }
+
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption };
 }));

@@ -661,6 +661,201 @@ input[type="range"]::-webkit-slider-thumb:active {
     font-weight: 500;
 }
 
+/* Collapsible settings / comp details */
+.settings-details, .comp-details {
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.9rem;
+    background: rgba(10, 15, 30, 0.35);
+}
+
+.settings-details summary, .comp-details summary {
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    user-select: none;
+}
+
+.settings-details summary:hover, .comp-details summary:hover {
+    color: var(--text-primary);
+}
+
+.comp-details-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+
+.comp-ratings-title, .qual-settings-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #a5b4fc;
+    margin-top: 0.25rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.qual-settings-title {
+    border: none;
+    padding-top: 0;
+    margin-bottom: 0.35rem;
+}
+
+.comp-rating-row {
+    display: grid;
+    grid-template-columns: 1fr 110px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.comp-rating-row label {
+    font-size: 0.72rem;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.comp-rating-row select {
+    padding: 0.4rem 0.5rem;
+    font-size: 0.8rem;
+    padding-right: 1.8rem;
+}
+
+.qual-settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+}
+
+/* Address auto-fill status */
+.lookup-status {
+    font-size: 0.78rem;
+    line-height: 1.4;
+    padding: 0.55rem 0.8rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+}
+
+.lookup-status.info {
+    background: rgba(99, 102, 241, 0.08);
+    border-color: rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+}
+
+.lookup-status.success {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: var(--accent-success);
+}
+
+.lookup-status.error {
+    background: rgba(239, 68, 68, 0.08);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: var(--accent-danger);
+}
+
+/* Market Absorption Meter */
+.absorption-grid {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+@media (max-width: 700px) {
+    .absorption-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.absorption-inputs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.meter-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.9rem;
+}
+
+.absorption-badge {
+    display: inline-block;
+    padding: 0.35rem 0.9rem;
+    border-radius: 9999px;
+    border: 1px solid;
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 0.85rem;
+    letter-spacing: 0.03em;
+}
+
+.absorption-score-note {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.meter-track {
+    position: relative;
+    height: 12px;
+    border-radius: 9999px;
+    background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 25%, #10b981 50%, #f59e0b 75%, #ef4444 100%);
+    opacity: 0.9;
+}
+
+.meter-needle {
+    position: absolute;
+    top: -4px;
+    left: 50%;
+    width: 5px;
+    height: 20px;
+    border-radius: 3px;
+    background: #ffffff;
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
+    transform: translateX(-50%);
+    transition: left 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.meter-scale {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+}
+
+.absorption-stats {
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.absorption-stats > div {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 0.82rem;
+}
+
+.absorption-stats .stat-label { color: var(--text-secondary); }
+
+.absorption-stats .stat-value {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
 /* PDF Print Customization */
 @media print {
     body {

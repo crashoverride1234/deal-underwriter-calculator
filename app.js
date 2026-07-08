@@ -540,12 +540,37 @@ const subjectAddressInput = document.getElementById('subject-address');
 const subjectSqftInput = document.getElementById('subject-sqft');
 const subjectBedsInput = document.getElementById('subject-beds');
 const subjectBathsInput = document.getElementById('subject-baths');
+const subjectLotInput = document.getElementById('subject-lot');
+const subjectYearInput = document.getElementById('subject-year');
+const subjectGarageInput = document.getElementById('subject-garage');
+const subjectStoriesInput = document.getElementById('subject-stories');
+const subjectPoolInput = document.getElementById('subject-pool');
 const adjPriceSqftInput = document.getElementById('adj-price-sqft');
 const adjBedInput = document.getElementById('adj-bed');
 const adjBathInput = document.getElementById('adj-bath');
 const adjCondAvgInput = document.getElementById('adj-cond-avg');
 const adjCondDatedInput = document.getElementById('adj-cond-dated');
 const adjAppreciationInput = document.getElementById('adj-appreciation');
+const adjLotInput = document.getElementById('adj-lot');
+const adjGarageInput = document.getElementById('adj-garage');
+const adjPoolInput = document.getElementById('adj-pool');
+const adjYearInput = document.getElementById('adj-year');
+const adjStoryInput = document.getElementById('adj-story');
+const qualSettingsContainer = document.getElementById('qual-settings');
+
+const lookupBtn = document.getElementById('lookup-address-btn');
+const lookupStatus = document.getElementById('lookup-status');
+const rentcastKeyInput = document.getElementById('rentcast-api-key');
+
+const mktActivesInput = document.getElementById('mkt-actives');
+const mktPendingsInput = document.getElementById('mkt-pendings');
+const mktSold90Input = document.getElementById('mkt-sold90');
+const absorptionBadge = document.getElementById('absorption-badge');
+const absorptionScoreNote = document.getElementById('absorption-score-note');
+const absorptionNeedle = document.getElementById('absorption-needle');
+const statMoi = document.getElementById('stat-moi');
+const statAbsorption = document.getElementById('stat-absorption');
+const statPendingRatio = document.getElementById('stat-pending-ratio');
 
 const compsContainer = document.getElementById('comps-container');
 const addCompBtn = document.getElementById('add-comp-btn');
@@ -560,31 +585,85 @@ const appraisalWarnings = document.getElementById('appraisal-warnings');
 const useArvBtn = document.getElementById('use-arv-btn');
 
 const APPRAISAL_STORAGE_KEY = 'underwriter-appraisal-v1';
+const RENTCAST_KEY_STORAGE = 'underwriter-rentcast-key';
 const MAX_COMPS = 6;
 
-const DEFAULT_COMPS = [
-    { label: '412 Oak Ave', salePrice: 325000, sqft: 1520, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 2 },
-    { label: '88 Birch Ln', salePrice: 310000, sqft: 1450, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 4 },
-    { label: '205 Cedar Ct', salePrice: 289000, sqft: 1400, beds: 3, baths: 1, condition: 'average', monthsAgo: 6 }
+// Appraiser-style qualitative grid: each factor is rated per comp relative
+// to the subject (superior / similar / inferior) at a % of comp sale price
+const QUALITATIVE_FACTORS = [
+    { key: 'lotPlacement', label: 'Lot Placement', pct: 3 },
+    { key: 'lotUsability', label: 'Lot Usability', pct: 3 },
+    { key: 'schools', label: 'School District', pct: 4 },
+    { key: 'curbAppeal', label: 'Curb Appeal', pct: 2 },
+    { key: 'floorplan', label: 'Floorplan / Function', pct: 3 },
+    { key: 'locationInfluence', label: 'Adverse Location (road / rail / power)', pct: 5 }
 ];
 
-let appraisalComps = DEFAULT_COMPS.map(c => ({ ...c }));
+function defaultRatings() {
+    const r = {};
+    QUALITATIVE_FACTORS.forEach(f => { r[f.key] = 'similar'; });
+    return r;
+}
+
+function compTemplate() {
+    return {
+        label: '', salePrice: 300000, sqft: 1500, beds: 3, baths: 2,
+        lotSqft: 7000, garageSpaces: 2, yearBuilt: 1980, pool: 'no', stories: '1',
+        condition: 'renovated', monthsAgo: 0, ratings: defaultRatings()
+    };
+}
+
+// Older saved comps predate the extra fields; fill gaps with template values
+function normalizeComp(c) {
+    const t = compTemplate();
+    return { ...t, ...c, ratings: { ...t.ratings, ...(c.ratings || {}) } };
+}
+
+const DEFAULT_COMPS = [
+    { ...compTemplate(), label: '412 Oak Ave', salePrice: 325000, sqft: 1520, lotSqft: 7200, yearBuilt: 1982, monthsAgo: 2 },
+    { ...compTemplate(), label: '88 Birch Ln', salePrice: 310000, sqft: 1450, lotSqft: 6800, yearBuilt: 1978, monthsAgo: 4 },
+    { ...compTemplate(), label: '205 Cedar Ct', salePrice: 289000, sqft: 1400, baths: 1, garageSpaces: 1, yearBuilt: 1975, condition: 'average', monthsAgo: 6,
+      ratings: { ...defaultRatings(), locationInfluence: 'inferior' } }
+];
+
+let appraisalComps = DEFAULT_COMPS.map(c => normalizeComp(c));
 let lastAppraisal = null;
+const qualSettingInputs = {}; // factor key -> generated % input
 
 function saveAppraisalState() {
     try {
+        const qual = {};
+        QUALITATIVE_FACTORS.forEach(f => {
+            if (qualSettingInputs[f.key]) qual[f.key] = qualSettingInputs[f.key].value;
+        });
         localStorage.setItem(APPRAISAL_STORAGE_KEY, JSON.stringify({
             address: subjectAddressInput.value,
             sqft: subjectSqftInput.value,
             beds: subjectBedsInput.value,
             baths: subjectBathsInput.value,
+            lot: subjectLotInput.value,
+            year: subjectYearInput.value,
+            garage: subjectGarageInput.value,
+            stories: subjectStoriesInput.value,
+            pool: subjectPoolInput.value,
             settings: {
                 pricePerSqft: adjPriceSqftInput.value,
                 bed: adjBedInput.value,
                 bath: adjBathInput.value,
                 condAvg: adjCondAvgInput.value,
                 condDated: adjCondDatedInput.value,
-                appreciation: adjAppreciationInput.value
+                appreciation: adjAppreciationInput.value,
+                lot: adjLotInput.value,
+                garage: adjGarageInput.value,
+                pool: adjPoolInput.value,
+                year: adjYearInput.value,
+                story: adjStoryInput.value,
+                qual
+            },
+            market: {
+                actives: mktActivesInput.value,
+                pendings: mktPendingsInput.value,
+                sold90: mktSold90Input.value
             },
             comps: appraisalComps
         }));
@@ -596,22 +675,65 @@ function restoreAppraisalState() {
         const raw = localStorage.getItem(APPRAISAL_STORAGE_KEY);
         if (!raw) return;
         const s = JSON.parse(raw);
-        if (s.address !== undefined) subjectAddressInput.value = s.address;
-        if (s.sqft !== undefined) subjectSqftInput.value = s.sqft;
-        if (s.beds !== undefined) subjectBedsInput.value = s.beds;
-        if (s.baths !== undefined) subjectBathsInput.value = s.baths;
+        const set = (input, v) => { if (v !== undefined && v !== null) input.value = v; };
+        set(subjectAddressInput, s.address);
+        set(subjectSqftInput, s.sqft);
+        set(subjectBedsInput, s.beds);
+        set(subjectBathsInput, s.baths);
+        set(subjectLotInput, s.lot);
+        set(subjectYearInput, s.year);
+        set(subjectGarageInput, s.garage);
+        set(subjectStoriesInput, s.stories);
+        set(subjectPoolInput, s.pool);
         if (s.settings) {
-            adjPriceSqftInput.value = s.settings.pricePerSqft;
-            adjBedInput.value = s.settings.bed;
-            adjBathInput.value = s.settings.bath;
-            adjCondAvgInput.value = s.settings.condAvg;
-            adjCondDatedInput.value = s.settings.condDated;
-            adjAppreciationInput.value = s.settings.appreciation;
+            set(adjPriceSqftInput, s.settings.pricePerSqft);
+            set(adjBedInput, s.settings.bed);
+            set(adjBathInput, s.settings.bath);
+            set(adjCondAvgInput, s.settings.condAvg);
+            set(adjCondDatedInput, s.settings.condDated);
+            set(adjAppreciationInput, s.settings.appreciation);
+            set(adjLotInput, s.settings.lot);
+            set(adjGarageInput, s.settings.garage);
+            set(adjPoolInput, s.settings.pool);
+            set(adjYearInput, s.settings.year);
+            set(adjStoryInput, s.settings.story);
+            if (s.settings.qual) {
+                QUALITATIVE_FACTORS.forEach(f => {
+                    if (qualSettingInputs[f.key] && s.settings.qual[f.key] !== undefined) {
+                        qualSettingInputs[f.key].value = s.settings.qual[f.key];
+                    }
+                });
+            }
+        }
+        if (s.market) {
+            set(mktActivesInput, s.market.actives);
+            set(mktPendingsInput, s.market.pendings);
+            set(mktSold90Input, s.market.sold90);
         }
         if (Array.isArray(s.comps) && s.comps.length) {
-            appraisalComps = s.comps.slice(0, MAX_COMPS);
+            appraisalComps = s.comps.slice(0, MAX_COMPS).map(normalizeComp);
         }
     } catch (e) { /* corrupted state — fall back to defaults */ }
+}
+
+// Generate the qualitative % inputs in Adjustment Settings from one source of truth
+function renderQualSettings() {
+    qualSettingsContainer.innerHTML = '';
+    QUALITATIVE_FACTORS.forEach(f => {
+        const div = document.createElement('div');
+        div.className = 'form-group';
+        div.innerHTML = `
+            <label></label>
+            <div class="input-wrapper has-suffix">
+                <input type="number" min="0" max="25" step="0.5" value="${f.pct}">
+                <span class="input-suffix">%</span>
+            </div>`;
+        div.querySelector('label').textContent = f.label;
+        const input = div.querySelector('input');
+        input.addEventListener('input', recalcAppraisal);
+        qualSettingInputs[f.key] = input;
+        qualSettingsContainer.appendChild(div);
+    });
 }
 
 const CONDITION_OPTIONS = [
@@ -670,12 +792,66 @@ function renderComps() {
                     <input type="number" data-field="monthsAgo" min="0" max="24" step="1">
                 </div>
             </div>
+            <details class="comp-details">
+                <summary>Details &amp; Ratings vs Subject</summary>
+                <div class="comp-details-body">
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Lot SqFt</label>
+                            <input type="number" data-field="lotSqft" min="0" step="100">
+                        </div>
+                        <div class="form-group">
+                            <label>Garage Spaces</label>
+                            <input type="number" data-field="garageSpaces" min="0" max="8" step="1">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Year Built</label>
+                            <input type="number" data-field="yearBuilt" min="1800" max="2030" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label>Stories</label>
+                            <select data-field="stories">
+                                <option value="1">1</option>
+                                <option value="1.5">1.5</option>
+                                <option value="2">2</option>
+                                <option value="3">3+</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Pool</label>
+                        <select data-field="pool">
+                            <option value="no">No Pool</option>
+                            <option value="yes">Pool</option>
+                        </select>
+                    </div>
+                    <div class="comp-ratings-title">Location &amp; Quality (comp vs subject)</div>
+                    ${QUALITATIVE_FACTORS.map(f => `
+                    <div class="comp-rating-row">
+                        <label>${f.label}</label>
+                        <select data-rating="${f.key}">
+                            <option value="superior">Superior</option>
+                            <option value="similar">Similar</option>
+                            <option value="inferior">Inferior</option>
+                        </select>
+                    </div>`).join('')}
+                </div>
+            </details>
         `;
         // Fill current values and wire updates back into state
         card.querySelectorAll('[data-field]').forEach(el => {
             el.value = comp[el.dataset.field];
             el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
                 comp[el.dataset.field] = el.value;
+                recalcAppraisal();
+            });
+        });
+        card.querySelectorAll('[data-rating]').forEach(el => {
+            el.value = comp.ratings[el.dataset.rating] || 'similar';
+            el.addEventListener('change', () => {
+                comp.ratings[el.dataset.rating] = el.value;
                 recalcAppraisal();
             });
         });
@@ -690,23 +866,38 @@ function renderComps() {
 }
 
 function readAppraisalInputs() {
+    const qualitativeAdjPct = {};
+    QUALITATIVE_FACTORS.forEach(f => {
+        qualitativeAdjPct[f.key] = qualSettingInputs[f.key] ? qualSettingInputs[f.key].value : f.pct;
+    });
     return {
         subject: {
             sqft: subjectSqftInput.value,
             beds: subjectBedsInput.value,
-            baths: subjectBathsInput.value
+            baths: subjectBathsInput.value,
+            lotSqft: subjectLotInput.value,
+            garageSpaces: subjectGarageInput.value,
+            yearBuilt: subjectYearInput.value,
+            pool: subjectPoolInput.value,
+            stories: subjectStoriesInput.value
         },
         comps: appraisalComps,
         settings: {
             pricePerSqftAdj: adjPriceSqftInput.value,
             bedAdj: adjBedInput.value,
             bathAdj: adjBathInput.value,
+            lotAdjPerSqft: adjLotInput.value,
+            garageAdjPerSpace: adjGarageInput.value,
+            poolAdj: adjPoolInput.value,
+            yearAdjPerYear: adjYearInput.value,
+            storyAdj: adjStoryInput.value,
             conditionAdjPct: {
                 renovated: 0,
                 average: adjCondAvgInput.value,
                 dated: adjCondDatedInput.value
             },
-            annualAppreciationPct: adjAppreciationInput.value
+            annualAppreciationPct: adjAppreciationInput.value,
+            qualitativeAdjPct
         }
     };
 }
@@ -776,6 +967,117 @@ function useAppraisedArv() {
     calculateDeal();
 }
 
+// ==================== Market Absorption Meter ====================
+
+const TEMPERATURE_STYLES = {
+    hot: { label: 'HOT MARKET', color: '#ef4444' },
+    warm: { label: 'WARM · SELLER LEAN', color: '#f59e0b' },
+    balanced: { label: 'BALANCED', color: '#10b981' },
+    cool: { label: 'COOL · BUYER LEAN', color: '#06b6d4' },
+    cold: { label: 'COLD MARKET', color: '#3b82f6' },
+    unknown: { label: 'ENTER MLS COUNTS', color: '#6b7280' }
+};
+
+function updateAbsorption() {
+    const m = Engine.marketAbsorption({
+        activeListings: mktActivesInput.value,
+        pendingListings: mktPendingsInput.value,
+        soldLast90Days: mktSold90Input.value
+    });
+    const style = TEMPERATURE_STYLES[m.temperature];
+    absorptionBadge.textContent = style.label;
+    absorptionBadge.style.background = style.color + '22';
+    absorptionBadge.style.borderColor = style.color + '55';
+    absorptionBadge.style.color = style.color;
+    absorptionScoreNote.textContent = m.temperature === 'unknown' ? '' : `heat ${m.score.toFixed(0)}/100`;
+    absorptionNeedle.style.left = `${m.score}%`;
+    statMoi.textContent = Number.isFinite(m.monthsOfInventory) ? `${m.monthsOfInventory.toFixed(1)} mo` : 'No sales';
+    statAbsorption.textContent = Number.isFinite(m.absorptionRatePct) ? `${m.absorptionRatePct.toFixed(0)}%/mo` : '—';
+    statPendingRatio.textContent = Number.isFinite(m.pendingRatio) ? m.pendingRatio.toFixed(2) : '—';
+    saveAppraisalState();
+}
+
+// ==================== Property Data Auto-Fill (RentCast) ====================
+
+function setLookupStatus(message, kind) {
+    lookupStatus.textContent = message;
+    lookupStatus.className = `lookup-status ${kind}`;
+}
+
+async function lookupSubjectProperty() {
+    const address = subjectAddressInput.value.trim();
+    if (!address) {
+        setLookupStatus('Enter the property address first.', 'error');
+        return;
+    }
+    const key = rentcastKeyInput.value.trim();
+    if (!key) {
+        setLookupStatus('Paste a free RentCast API key below to enable auto-fill (50 lookups/mo free).', 'error');
+        rentcastKeyInput.closest('details').open = true;
+        rentcastKeyInput.focus();
+        return;
+    }
+
+    lookupBtn.disabled = true;
+    setLookupStatus('Looking up property records…', 'info');
+    try {
+        const res = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`, {
+            headers: { 'X-Api-Key': key, 'Accept': 'application/json' }
+        });
+        if (res.status === 401 || res.status === 403) throw new Error('API key rejected — double-check your RentCast key.');
+        if (res.status === 404) throw new Error('No property record found for that address.');
+        if (!res.ok) throw new Error(`Lookup failed (HTTP ${res.status}).`);
+        const data = await res.json();
+        const p = Array.isArray(data) ? data[0] : data;
+        if (!p || (p.squareFootage == null && p.bedrooms == null)) {
+            throw new Error('No property record found for that address.');
+        }
+
+        // Only overwrite fields the record actually has; everything stays editable
+        const filled = [];
+        const fill = (input, value, label) => {
+            if (value === undefined || value === null || value === '') return;
+            input.value = value;
+            filled.push(`${label} ${value}`);
+        };
+        fill(subjectSqftInput, p.squareFootage, 'sqft');
+        fill(subjectBedsInput, p.bedrooms, 'beds');
+        fill(subjectBathsInput, p.bathrooms, 'baths');
+        fill(subjectLotInput, p.lotSize, 'lot');
+        fill(subjectYearInput, p.yearBuilt, 'built');
+        const f = p.features || {};
+        const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
+        if (garage != null) fill(subjectGarageInput, garage, 'garage');
+        if (f.pool === true || f.pool === false) {
+            subjectPoolInput.value = f.pool ? 'yes' : 'no';
+            filled.push(`pool ${f.pool ? 'yes' : 'no'}`);
+        }
+        if (f.floorCount != null) {
+            const storyVal = f.floorCount >= 3 ? '3' : String(f.floorCount);
+            if ([...subjectStoriesInput.options].some(o => o.value === storyVal)) {
+                subjectStoriesInput.value = storyVal;
+                filled.push(`stories ${storyVal}`);
+            }
+        }
+        if (p.formattedAddress) subjectAddressInput.value = p.formattedAddress;
+
+        setLookupStatus(
+            filled.length
+                ? `✓ ${p.formattedAddress || address}: ${filled.join(' · ')}. Review and override anything below.`
+                : 'Record found, but it had no usable fields — enter details manually.',
+            'success'
+        );
+        recalcAppraisal();
+    } catch (err) {
+        const msg = err instanceof TypeError
+            ? 'Network error — check your connection and try again.'
+            : err.message;
+        setLookupStatus(`✗ ${msg}`, 'error');
+    } finally {
+        lookupBtn.disabled = false;
+    }
+}
+
 // ==================== Page switching ====================
 
 function switchPage(page) {
@@ -796,10 +1098,13 @@ pageCalculatorBtn.addEventListener('click', () => switchPage('calculator'));
 useArvBtn.addEventListener('click', useAppraisedArv);
 addCompBtn.addEventListener('click', () => {
     if (appraisalComps.length >= MAX_COMPS) return;
+    // Seed the new comp from the subject so only the differences need editing
     appraisalComps.push({
-        label: '', salePrice: 300000,
+        ...compTemplate(),
         sqft: Engine.num(subjectSqftInput.value), beds: Engine.num(subjectBedsInput.value),
-        baths: Engine.num(subjectBathsInput.value), condition: 'renovated', monthsAgo: 0
+        baths: Engine.num(subjectBathsInput.value), lotSqft: Engine.num(subjectLotInput.value),
+        garageSpaces: Engine.num(subjectGarageInput.value), yearBuilt: Engine.num(subjectYearInput.value),
+        pool: subjectPoolInput.value, stories: subjectStoriesInput.value
     });
     renderComps();
     recalcAppraisal();
@@ -807,9 +1112,19 @@ addCompBtn.addEventListener('click', () => {
 
 [
     subjectAddressInput, subjectSqftInput, subjectBedsInput, subjectBathsInput,
+    subjectLotInput, subjectYearInput, subjectGarageInput,
     adjPriceSqftInput, adjBedInput, adjBathInput, adjCondAvgInput,
-    adjCondDatedInput, adjAppreciationInput
+    adjCondDatedInput, adjAppreciationInput, adjLotInput, adjGarageInput,
+    adjPoolInput, adjYearInput, adjStoryInput
 ].forEach(input => input.addEventListener('input', recalcAppraisal));
+
+[subjectStoriesInput, subjectPoolInput].forEach(sel => sel.addEventListener('change', recalcAppraisal));
+[mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
+
+lookupBtn.addEventListener('click', lookupSubjectProperty);
+rentcastKeyInput.addEventListener('input', () => {
+    try { localStorage.setItem(RENTCAST_KEY_STORAGE, rentcastKeyInput.value.trim()); } catch (e) { /* private mode */ }
+});
 
 // ==================== Initial render ====================
 // (scripts are deferred, so the DOM is ready here)
@@ -818,7 +1133,10 @@ if (window.lucide) {
     window.lucide.createIcons(); // static page icons only; dynamic ones use inline SVGs
 }
 switchStrategy('flip');
+renderQualSettings();          // must exist before restore fills the % values
 restoreAppraisalState();
+try { rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || ''; } catch (e) { /* private mode */ }
 renderComps();
 recalcAppraisal();
+updateAbsorption();
 switchPage('appraisal'); // step 1 first

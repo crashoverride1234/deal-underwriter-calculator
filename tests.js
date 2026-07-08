@@ -276,6 +276,104 @@ test('appraise: time adjustment scales with months since sale', () => {
     assertNear(a.comps[0].adjustments.time, 300000 * 0.06, 1e-9, '12mo at 6%/yr = +6%');
 });
 
+// ---- Expanded appraiser adjustment grid ----
+
+const APPRAISE_FULL = {
+    subject: { sqft: 1500, beds: 3, baths: 2, lotSqft: 8000, garageSpaces: 2, yearBuilt: 1990, pool: 'yes', stories: 1 },
+    settings: {
+        ...APPRAISE_BASE.settings,
+        lotAdjPerSqft: 1.5, garageAdjPerSpace: 7500, poolAdj: 15000,
+        yearAdjPerYear: 500, storyAdj: 5000,
+        qualitativeAdjPct: { schools: 4, curbAppeal: 2, locationInfluence: 5 }
+    }
+};
+const FULL_TWIN = {
+    salePrice: 300000, sqft: 1500, beds: 3, baths: 2, lotSqft: 8000, garageSpaces: 2,
+    yearBuilt: 1990, pool: 'yes', stories: 1, condition: 'renovated', monthsAgo: 0
+};
+
+test('appraise: lot, garage, pool, age and story adjustments are itemized', () => {
+    const comp = { ...FULL_TWIN, lotSqft: 6000, garageSpaces: 1, yearBuilt: 1980, pool: 'no', stories: 2 };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [comp] });
+    const adj = a.comps[0].adjustments;
+    assertNear(adj.lot, (8000 - 6000) * 1.5, 1e-9, 'lot adj');             // +3,000
+    assertNear(adj.garage, 7500, 1e-9, 'garage adj');
+    assertNear(adj.year, (1990 - 1980) * 500, 1e-9, 'age adj');            // +5,000
+    assertNear(adj.pool, 15000, 1e-9, 'pool adj (subject has, comp lacks)');
+    assertNear(adj.stories, 5000, 1e-9, '2-story comp vs 1-story premium');
+    assertNear(a.comps[0].netAdjustment, 35500, 1e-9, 'net');
+});
+
+test('appraise: pool and story adjustments reverse direction correctly', () => {
+    const comp = { ...FULL_TWIN, pool: 'yes', stories: 1 };
+    const subjNoPool2Story = { ...APPRAISE_FULL.subject, pool: 'no', stories: 2 };
+    const a = Engine.appraise({ ...APPRAISE_FULL, subject: subjNoPool2Story, comps: [comp] });
+    const adj = a.comps[0].adjustments;
+    assertNear(adj.pool, -15000, 1e-9, 'comp has pool, subject does not → down');
+    assertNear(adj.stories, -5000, 1e-9, '1-story comp is superior under 1-story premium → down');
+});
+
+test('appraise: qualitative ratings adjust by % of sale price, signed', () => {
+    const comp = { ...FULL_TWIN, ratings: { schools: 'inferior', curbAppeal: 'superior', locationInfluence: 'similar' } };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [comp] });
+    const adj = a.comps[0].adjustments;
+    assertNear(adj.schools, 300000 * 0.04, 1e-9, 'inferior schools → +4%');
+    assertNear(adj.curbAppeal, -(300000 * 0.02), 1e-9, 'superior curb appeal → -2%');
+    assertNear(adj.locationInfluence, 0, 1e-9, 'similar → 0');
+});
+
+test('appraise: missing comp data means no adjustment (not a phantom one)', () => {
+    // Comp saved before the new fields existed — no lot/garage/year/pool/stories
+    const legacyComp = { salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 0 };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [legacyComp] });
+    const adj = a.comps[0].adjustments;
+    assertNear(adj.lot, 0, 1e-9, 'no lot data → 0');
+    assertNear(adj.garage, 0, 1e-9, 'no garage data → 0');
+    assertNear(adj.year, 0, 1e-9, 'no year data → 0');
+    assertNear(adj.pool, 0, 1e-9, 'unknown pool → 0');
+    assertNear(adj.stories, 0, 1e-9, 'unknown stories → 0');
+    assertNear(a.arv, 300000, 1e-9, 'twin still appraises at sale price');
+});
+
+// ---- Market absorption ----
+
+test('absorption: strong sales pace + pendings reads HOT', () => {
+    const m = Engine.marketAbsorption({ activeListings: 42, pendingListings: 28, soldLast90Days: 51 });
+    const soldPerMonth = 51 / 3;
+    const moi = 42 / soldPerMonth;
+    assertNear(m.soldPerMonth, soldPerMonth, 1e-9, 'soldPerMonth');
+    assertNear(m.monthsOfInventory, moi, 1e-9, 'MOI');
+    const expectedScore = Math.min(100, 100 * (1 - moi / 12) + Math.min((28 / 42) * 20, 20));
+    assertNear(m.score, expectedScore, 1e-9, 'score');
+    assert(m.temperature === 'hot', `expected hot, got ${m.temperature}`);
+});
+
+test('absorption: heavy inventory with slow sales reads COLD', () => {
+    const m = Engine.marketAbsorption({ activeListings: 100, pendingListings: 2, soldLast90Days: 15 });
+    assertNear(m.monthsOfInventory, 100 / 5, 1e-9, 'MOI = 20 months');
+    assert(m.score < 20, `score should be cold-range, got ${m.score}`);
+    assert(m.temperature === 'cold', `expected cold, got ${m.temperature}`);
+});
+
+test('absorption: 6 months of inventory with no pendings is BALANCED', () => {
+    const m = Engine.marketAbsorption({ activeListings: 30, pendingListings: 0, soldLast90Days: 15 });
+    assertNear(m.monthsOfInventory, 6, 1e-9, 'MOI');
+    assertNear(m.score, 50, 1e-9, 'score');
+    assert(m.temperature === 'balanced', `expected balanced, got ${m.temperature}`);
+});
+
+test('absorption: no data yields unknown, not a fake reading', () => {
+    const m = Engine.marketAbsorption({ activeListings: 0, pendingListings: 0, soldLast90Days: 0 });
+    assert(m.temperature === 'unknown', 'unknown temperature');
+    assertNear(m.score, 50, 1e-9, 'neutral needle position');
+});
+
+test('absorption: listings but zero sales reads infinite inventory / cold', () => {
+    const m = Engine.marketAbsorption({ activeListings: 20, pendingListings: 0, soldLast90Days: 0 });
+    assert(m.monthsOfInventory === Infinity, 'MOI is Infinity');
+    assert(m.temperature === 'cold', `expected cold, got ${m.temperature}`);
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);
