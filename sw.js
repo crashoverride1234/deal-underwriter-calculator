@@ -1,4 +1,8 @@
-const CACHE_NAME = 'underwriter-v6';
+const CACHE_NAME = 'underwriter-v7';
+
+// Live data APIs — never cache these (autocomplete queries and property
+// lookups must always be fresh, and caching every keystroke bloats storage)
+const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io'];
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -46,7 +50,9 @@ function fetchAndCache(request) {
 // are pinned versions and this keeps them working offline.
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-  const sameOrigin = new URL(event.request.url).origin === self.location.origin;
+  const url = new URL(event.request.url);
+  if (NETWORK_ONLY_HOSTS.includes(url.hostname)) return; // straight to network
+  const sameOrigin = url.origin === self.location.origin;
 
   if (sameOrigin) {
     event.respondWith(

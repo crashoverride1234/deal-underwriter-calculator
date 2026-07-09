@@ -60,7 +60,10 @@
                 <div class="inputs-group">
                     <div class="form-group">
                         <label for="subject-address">Property Address</label>
-                        <input type="text" id="subject-address" placeholder="123 Main St, Springfield, TX 75001">
+                        <div class="autocomplete-wrap">
+                            <input type="text" id="subject-address" placeholder="Start typing an address…" autocomplete="off" spellcheck="false">
+                            <div id="address-suggestions" class="address-suggestions hidden" role="listbox"></div>
+                        </div>
                     </div>
                     <button id="lookup-address-btn" class="btn btn-secondary" style="width: 100%;">
                         <i data-lucide="download-cloud"></i> Auto-Fill Property Data
@@ -575,33 +578,33 @@
                     <div class="input-section-title" style="margin-bottom: 0.75rem; border: none; padding: 0;">
                         <i data-lucide="info"></i> Financial Summary Details
                     </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; font-size: 0.85rem;">
+                    <div class="summary-details-grid">
                         <div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);">Total Project Capital:</span>
-                                <span style="font-weight: 600;" id="summary-total-capital">$0</span>
+                            <div class="summary-row">
+                                <span class="label">Total Project Capital:</span>
+                                <span class="value" id="summary-total-capital">$0</span>
                             </div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);">Out-of-Pocket Cash:</span>
-                                <span style="font-weight: 600;" id="summary-cash-invested">$0</span>
+                            <div class="summary-row">
+                                <span class="label">Out-of-Pocket Cash:</span>
+                                <span class="value" id="summary-cash-invested">$0</span>
                             </div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);" id="summary-leverage-label">Financed Loan Amount:</span>
-                                <span style="font-weight: 600;" id="summary-loan-amount">$0</span>
+                            <div class="summary-row">
+                                <span class="label" id="summary-leverage-label">Financed Loan Amount:</span>
+                                <span class="value" id="summary-loan-amount">$0</span>
                             </div>
                         </div>
                         <div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);">Monthly Holding Cost:</span>
-                                <span style="font-weight: 600; color: var(--accent-danger);" id="summary-monthly-holding-cost">$0</span>
+                            <div class="summary-row">
+                                <span class="label">Monthly Holding Cost:</span>
+                                <span class="value" style="color: var(--accent-danger);" id="summary-monthly-holding-cost">$0</span>
                             </div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);">Total Financing Costs:</span>
-                                <span style="font-weight: 600;" id="summary-total-finance-costs">$0</span>
+                            <div class="summary-row">
+                                <span class="label">Total Financing Costs:</span>
+                                <span class="value" id="summary-total-finance-costs">$0</span>
                             </div>
-                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 0.5rem 0;">
-                                <span style="color: var(--text-secondary);">Est. Refi/Selling Costs:</span>
-                                <span style="font-weight: 600;" id="summary-selling-costs">$0</span>
+                            <div class="summary-row">
+                                <span class="label">Est. Refi/Selling Costs:</span>
+                                <span class="value" id="summary-selling-costs">$0</span>
                             </div>
                         </div>
                     </div>

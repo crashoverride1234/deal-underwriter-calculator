@@ -75,19 +75,12 @@ const FINANCING_OPTIONS = {
     ]
 };
 
-// Typical loan terms, applied once when the user picks a new financing type
-const LOAN_DEFAULTS = {
-    hard_money: { ltv: 85, rate: 10.5, points: 2.0 },
-    private_money: { ltv: 85, rate: 10.5, points: 2.0 },
-    dscr_purchase: { ltv: 75, rate: 7.5, points: 1.0 },
-    dscr_refi: { ltv: 75, rate: 7.5, points: 1.0 }
-};
-
-const LOAN_LABELS = {
-    hard_money: { ltv: 'Loan-to-Cost (LTC)', summary: 'Hard/Private Loan:' },
-    private_money: { ltv: 'Loan-to-Cost (LTC)', summary: 'Hard/Private Loan:' },
-    dscr_purchase: { ltv: 'Loan-to-Value (LTV)', summary: 'DSCR Purchase Loan:' },
-    dscr_refi: { ltv: 'Refi LTV', summary: 'DSCR Refi Loan:' }
+// Typical loan terms + labels, applied once when the user picks a new financing type
+const LOAN_TYPE_CONFIG = {
+    hard_money: { ltv: 85, rate: 10.5, points: 2.0, ltvLabel: 'Loan-to-Cost (LTC)', summaryLabel: 'Hard/Private Loan:' },
+    private_money: { ltv: 85, rate: 10.5, points: 2.0, ltvLabel: 'Loan-to-Cost (LTC)', summaryLabel: 'Hard/Private Loan:' },
+    dscr_purchase: { ltv: 75, rate: 7.5, points: 1.0, ltvLabel: 'Loan-to-Value (LTV)', summaryLabel: 'DSCR Purchase Loan:' },
+    dscr_refi: { ltv: 75, rate: 7.5, points: 1.0, ltvLabel: 'Refi LTV', summaryLabel: 'DSCR Refi Loan:' }
 };
 
 // Metric card templates; values are filled in by reference on every recalc
@@ -192,11 +185,11 @@ function populateFinancingDropdown() {
 function handleFinancingChange() {
     const type = financingTypeSelect.value;
     if (type !== lastFinancingType) {
-        const defaults = LOAN_DEFAULTS[type];
-        if (defaults) {
-            loanLtvInput.value = defaults.ltv;
-            interestRateInput.value = defaults.rate;
-            lenderPointsInput.value = defaults.points;
+        const config = LOAN_TYPE_CONFIG[type];
+        if (config) {
+            loanLtvInput.value = config.ltv;
+            interestRateInput.value = config.rate;
+            lenderPointsInput.value = config.points;
         }
         lastFinancingType = type;
     }
@@ -211,10 +204,10 @@ function refreshFinancingUI() {
         summaryLeverageLabel.textContent = 'Financed Loan Amount:';
     } else {
         financingParamsDiv.classList.remove('hidden');
-        const labels = LOAN_LABELS[type];
-        if (labels) {
-            ltvLabel.textContent = labels.ltv;
-            summaryLeverageLabel.textContent = labels.summary;
+        const config = LOAN_TYPE_CONFIG[type];
+        if (config) {
+            ltvLabel.textContent = config.ltvLabel;
+            summaryLeverageLabel.textContent = config.summaryLabel;
         }
     }
 }
@@ -630,41 +623,32 @@ let appraisalComps = DEFAULT_COMPS.map(c => normalizeComp(c));
 let lastAppraisal = null;
 const qualSettingInputs = {}; // factor key -> generated % input
 
+// Shared field lists so save/restore can't drift apart (key -> input element)
+const SUBJECT_STATE_FIELDS = {
+    address: subjectAddressInput, sqft: subjectSqftInput, beds: subjectBedsInput,
+    baths: subjectBathsInput, lot: subjectLotInput, year: subjectYearInput,
+    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput
+};
+const SETTINGS_STATE_FIELDS = {
+    pricePerSqft: adjPriceSqftInput, bed: adjBedInput, bath: adjBathInput,
+    condAvg: adjCondAvgInput, condDated: adjCondDatedInput, appreciation: adjAppreciationInput,
+    lot: adjLotInput, garage: adjGarageInput, pool: adjPoolInput, year: adjYearInput, story: adjStoryInput
+};
+const MARKET_STATE_FIELDS = {
+    actives: mktActivesInput, pendings: mktPendingsInput, sold90: mktSold90Input
+};
+
 function saveAppraisalState() {
     try {
         const qual = {};
         QUALITATIVE_FACTORS.forEach(f => {
             if (qualSettingInputs[f.key]) qual[f.key] = qualSettingInputs[f.key].value;
         });
+        const dump = fields => Object.fromEntries(Object.entries(fields).map(([k, input]) => [k, input.value]));
         localStorage.setItem(APPRAISAL_STORAGE_KEY, JSON.stringify({
-            address: subjectAddressInput.value,
-            sqft: subjectSqftInput.value,
-            beds: subjectBedsInput.value,
-            baths: subjectBathsInput.value,
-            lot: subjectLotInput.value,
-            year: subjectYearInput.value,
-            garage: subjectGarageInput.value,
-            stories: subjectStoriesInput.value,
-            pool: subjectPoolInput.value,
-            settings: {
-                pricePerSqft: adjPriceSqftInput.value,
-                bed: adjBedInput.value,
-                bath: adjBathInput.value,
-                condAvg: adjCondAvgInput.value,
-                condDated: adjCondDatedInput.value,
-                appreciation: adjAppreciationInput.value,
-                lot: adjLotInput.value,
-                garage: adjGarageInput.value,
-                pool: adjPoolInput.value,
-                year: adjYearInput.value,
-                story: adjStoryInput.value,
-                qual
-            },
-            market: {
-                actives: mktActivesInput.value,
-                pendings: mktPendingsInput.value,
-                sold90: mktSold90Input.value
-            },
+            ...dump(SUBJECT_STATE_FIELDS),
+            settings: { ...dump(SETTINGS_STATE_FIELDS), qual },
+            market: dump(MARKET_STATE_FIELDS),
             comps: appraisalComps
         }));
     } catch (e) { /* storage full/blocked — appraisal still works, just not persisted */ }
@@ -676,27 +660,11 @@ function restoreAppraisalState() {
         if (!raw) return;
         const s = JSON.parse(raw);
         const set = (input, v) => { if (v !== undefined && v !== null) input.value = v; };
-        set(subjectAddressInput, s.address);
-        set(subjectSqftInput, s.sqft);
-        set(subjectBedsInput, s.beds);
-        set(subjectBathsInput, s.baths);
-        set(subjectLotInput, s.lot);
-        set(subjectYearInput, s.year);
-        set(subjectGarageInput, s.garage);
-        set(subjectStoriesInput, s.stories);
-        set(subjectPoolInput, s.pool);
+        const apply = (fields, source) => Object.entries(fields).forEach(([k, input]) => set(input, source[k]));
+
+        apply(SUBJECT_STATE_FIELDS, s);
         if (s.settings) {
-            set(adjPriceSqftInput, s.settings.pricePerSqft);
-            set(adjBedInput, s.settings.bed);
-            set(adjBathInput, s.settings.bath);
-            set(adjCondAvgInput, s.settings.condAvg);
-            set(adjCondDatedInput, s.settings.condDated);
-            set(adjAppreciationInput, s.settings.appreciation);
-            set(adjLotInput, s.settings.lot);
-            set(adjGarageInput, s.settings.garage);
-            set(adjPoolInput, s.settings.pool);
-            set(adjYearInput, s.settings.year);
-            set(adjStoryInput, s.settings.story);
+            apply(SETTINGS_STATE_FIELDS, s.settings);
             if (s.settings.qual) {
                 QUALITATIVE_FACTORS.forEach(f => {
                     if (qualSettingInputs[f.key] && s.settings.qual[f.key] !== undefined) {
@@ -705,11 +673,7 @@ function restoreAppraisalState() {
                 });
             }
         }
-        if (s.market) {
-            set(mktActivesInput, s.market.actives);
-            set(mktPendingsInput, s.market.pendings);
-            set(mktSold90Input, s.market.sold90);
-        }
+        if (s.market) apply(MARKET_STATE_FIELDS, s.market);
         if (Array.isArray(s.comps) && s.comps.length) {
             appraisalComps = s.comps.slice(0, MAX_COMPS).map(normalizeComp);
         }
@@ -1077,6 +1041,188 @@ async function lookupSubjectProperty() {
         lookupBtn.disabled = false;
     }
 }
+
+// ==================== Address Autocomplete ====================
+// Two free, keyless sources queried in parallel:
+// - US Census Bureau geocoder (JSONP — no CORS support): authoritative
+//   house-number matches from TIGER data, listed first
+// - Photon / OpenStreetMap (fetch): fuzzy partial matching as fallback
+// Selecting a suggestion auto-runs the RentCast record lookup when a key
+// is on file, and every populated field stays editable.
+
+const addressSuggestionsBox = document.getElementById('address-suggestions');
+let suggestDebounce = null;
+let suggestAbort = null;
+let suggestGeneration = 0; // ignore out-of-order responses while typing
+let jsonpCounter = 0;      // unique JSONP callback names (separate from generation)
+let currentSuggestions = [];
+let activeSuggestion = -1;
+
+function titleCase(s) {
+    return s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+}
+
+function hideSuggestions() {
+    addressSuggestionsBox.classList.add('hidden');
+    addressSuggestionsBox.innerHTML = '';
+    currentSuggestions = [];
+    activeSuggestion = -1;
+}
+
+function highlightSuggestion(idx) {
+    activeSuggestion = idx;
+    [...addressSuggestionsBox.children].forEach((el, i) => {
+        el.classList.toggle('active', i === idx);
+    });
+}
+
+function selectSuggestion(s) {
+    subjectAddressInput.value = s.text;
+    hideSuggestions();
+    recalcAppraisal(); // persists the chosen address
+    if (rentcastKeyInput.value.trim()) {
+        lookupSubjectProperty(); // auto-populate beds/baths/sqft/etc — all editable after
+    } else {
+        setLookupStatus('Address set. Paste a free RentCast API key below and property details will fill in automatically.', 'info');
+    }
+}
+
+function renderSuggestions(list) {
+    currentSuggestions = list;
+    activeSuggestion = -1;
+    addressSuggestionsBox.innerHTML = '';
+    if (!list.length) {
+        hideSuggestions();
+        return;
+    }
+    list.forEach((s, i) => {
+        const item = document.createElement('div');
+        item.className = 'address-suggestion';
+        item.setAttribute('role', 'option');
+        const primary = document.createElement('div');
+        primary.textContent = s.line1;
+        item.appendChild(primary);
+        if (s.line2) {
+            const secondary = document.createElement('div');
+            secondary.className = 'suggestion-secondary';
+            secondary.textContent = s.line2;
+            item.appendChild(secondary);
+        }
+        // mousedown (not click) so the input doesn't blur first and eat the event
+        item.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            selectSuggestion(s);
+        });
+        item.addEventListener('mouseenter', () => highlightSuggestion(i));
+        addressSuggestionsBox.appendChild(item);
+    });
+    addressSuggestionsBox.classList.remove('hidden');
+}
+
+// Census geocoder only speaks JSONP — inject a script tag with a callback
+function censusSuggestions(query) {
+    return new Promise((resolve) => {
+        const cb = '__censusCb' + (++jsonpCounter);
+        const timer = setTimeout(() => { cleanup(); resolve([]); }, 5000);
+        const script = document.createElement('script');
+        const cleanup = () => { clearTimeout(timer); delete window[cb]; script.remove(); };
+        window[cb] = (data) => {
+            const matches = (data.result && data.result.addressMatches) || [];
+            cleanup();
+            resolve(matches.map(m => {
+                // "5500 GRAND LAKE, SAN ANTONIO, TX, 78244" → street / city, ST zip
+                const parts = m.matchedAddress.split(', ');
+                const street = titleCase(parts[0] || '');
+                const city = titleCase(parts[1] || '');
+                const state = parts[2] || '';
+                const zip = parts[3] || '';
+                return {
+                    text: [street, city, state, zip].filter(Boolean).join(', '),
+                    line1: street,
+                    line2: [city, state].filter(Boolean).join(', ') + (zip ? ' ' + zip : '')
+                };
+            }));
+        };
+        script.src = 'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress'
+            + `?address=${encodeURIComponent(query)}&benchmark=Public_AR_Current&format=jsonp&callback=${cb}`;
+        script.onerror = () => { cleanup(); resolve([]); };
+        document.head.appendChild(script);
+    });
+}
+
+async function photonSuggestions(query) {
+    if (suggestAbort) suggestAbort.abort();
+    suggestAbort = new AbortController();
+    try {
+        // lat/lon bias toward the continental US improves ranking
+        const res = await fetch(
+            `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=8&lang=en&lat=39.8&lon=-98.5`,
+            { signal: suggestAbort.signal }
+        );
+        if (!res.ok) return [];
+        const data = await res.json();
+        const props = (data.features || [])
+            .map(f => f.properties || {})
+            .filter(p => p.countrycode === 'US');
+        // Address-level results (with a house number) rank first
+        props.sort((a, b) => (b.housenumber ? 1 : 0) - (a.housenumber ? 1 : 0));
+        return props.map(p => {
+            const line1 = (p.housenumber ? `${p.housenumber} ${p.street || p.name || ''}` : (p.name || p.street || '')).trim();
+            const line2 = [p.city || p.county, p.state, p.postcode].filter(Boolean).join(', ');
+            return { text: [line1, line2].filter(Boolean).join(', '), line1: line1 || line2, line2: line1 ? line2 : '' };
+        });
+    } catch (e) {
+        return []; // aborted mid-typing or offline
+    }
+}
+
+async function fetchAddressSuggestions(query) {
+    const generation = ++suggestGeneration;
+    // Census needs a house number to match; skip it for street-only fragments
+    const censusPromise = /\d/.test(query) ? censusSuggestions(query) : Promise.resolve([]);
+    const [census, photon] = await Promise.all([censusPromise, photonSuggestions(query)]);
+    if (generation !== suggestGeneration) return; // a newer query superseded this one
+    // Census (authoritative) first, then Photon, deduped by normalized text
+    const seen = new Set();
+    const merged = [...census, ...photon].filter(s => {
+        const key = s.text.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    renderSuggestions(merged.slice(0, 6));
+}
+
+subjectAddressInput.addEventListener('input', () => {
+    const q = subjectAddressInput.value.trim();
+    clearTimeout(suggestDebounce);
+    if (q.length < 4) {
+        hideSuggestions();
+        return;
+    }
+    suggestDebounce = setTimeout(() => fetchAddressSuggestions(q), 300);
+});
+
+subjectAddressInput.addEventListener('keydown', (e) => {
+    if (addressSuggestionsBox.classList.contains('hidden')) return;
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlightSuggestion(Math.min(activeSuggestion + 1, currentSuggestions.length - 1));
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlightSuggestion(Math.max(activeSuggestion - 1, 0));
+    } else if (e.key === 'Enter' && activeSuggestion >= 0) {
+        e.preventDefault();
+        selectSuggestion(currentSuggestions[activeSuggestion]);
+    } else if (e.key === 'Escape') {
+        hideSuggestions();
+    }
+});
+
+subjectAddressInput.addEventListener('blur', () => {
+    // Delay so a mousedown on a suggestion can land first
+    setTimeout(hideSuggestions, 150);
+});
 
 // ==================== Page switching ====================
 
