@@ -555,6 +555,7 @@ const lookupBtn = document.getElementById('lookup-address-btn');
 const lookupStatus = document.getElementById('lookup-status');
 const rentcastKeyInput = document.getElementById('rentcast-api-key');
 const melissaKeyInput = document.getElementById('melissa-api-key');
+const workerUrlInput = document.getElementById('worker-url');
 
 const mktActivesInput = document.getElementById('mkt-actives');
 const mktPendingsInput = document.getElementById('mkt-pendings');
@@ -581,6 +582,7 @@ const useArvBtn = document.getElementById('use-arv-btn');
 const APPRAISAL_STORAGE_KEY = 'underwriter-appraisal-v1';
 const RENTCAST_KEY_STORAGE = 'underwriter-rentcast-key';
 const MELISSA_KEY_STORAGE = 'underwriter-melissa-key';
+const WORKER_URL_STORAGE = 'underwriter-worker-url';
 const MAX_COMPS = 6;
 
 // Appraiser-style qualitative grid: each factor is rated per comp relative
@@ -977,6 +979,23 @@ function setLookupStatus(message, kind) {
 
 const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v1';
 let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
+let lastSelectedMprId = null;  // realtor.com property id from the picked suggestion
+
+// Optional self-hosted Cloudflare Worker (see worker/README.md): keyless
+// realtor.com records plus server-side key storage for RentCast/Melissa
+function workerBase() {
+    const raw = workerUrlInput.value.trim().replace(/\/+$/, '');
+    return /^https?:\/\/.+/i.test(raw) ? raw : '';
+}
+
+// null = no record / provider not configured (both fall through the ladder)
+async function workerFetchRecord(path) {
+    const res = await fetch(workerBase() + path, { headers: { 'Accept': 'application/json' } });
+    if (res.status === 404 || res.status === 501) return null;
+    if (!res.ok) throw new Error(`Worker request failed (HTTP ${res.status}).`);
+    const rec = await res.json();
+    return recordHasData(rec) ? rec : null;
+}
 
 function cacheKeyFor(address) {
     return address.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1141,10 +1160,10 @@ async function lookupSubjectProperty() {
     }
     const rcKey = rentcastKeyInput.value.trim();
     const mdKey = melissaKeyInput.value.trim();
-    if (!rcKey && !mdKey) {
-        setLookupStatus('Paste a free RentCast or Melissa API key below to enable auto-fill.', 'error');
+    const worker = workerBase();
+    if (!rcKey && !mdKey && !worker) {
+        setLookupStatus('Deploy the bundled Cloudflare Worker (keyless) or paste a free RentCast/Melissa API key below to enable auto-fill.', 'error');
         rentcastKeyInput.closest('details').open = true;
-        rentcastKeyInput.focus();
         return;
     }
 
@@ -1160,18 +1179,48 @@ async function lookupSubjectProperty() {
     const problems = [];
     try {
         let rec = null;
-        if (rcKey) {
+        // 1. Worker + realtor.com (keyless, richest data) — needs the picked
+        //    suggestion's mpr_id, which realtor.com suggestions carry
+        if (worker && lastSelectedMprId) {
+            try {
+                rec = await workerFetchRecord(`/property?mpr_id=${encodeURIComponent(lastSelectedMprId)}`);
+            } catch (err) {
+                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
+            }
+        }
+        // 2. RentCast with a browser-side key
+        if (!rec && rcKey) {
             try {
                 rec = await rentcastLookup(address, rcKey);
             } catch (err) {
                 problems.push(err instanceof TypeError ? 'RentCast: network error' : err.message);
             }
         }
+        // 3. RentCast through the worker (server-side key, if configured)
+        if (!rec && worker && !rcKey) {
+            try {
+                rec = await workerFetchRecord(`/rentcast?address=${encodeURIComponent(address)}`);
+                if (!rec && lastSelectedCoords) {
+                    rec = await workerFetchRecord(`/rentcast?latitude=${lastSelectedCoords.lat}&longitude=${lastSelectedCoords.lon}&radius=0.05&limit=1`);
+                }
+            } catch (err) {
+                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker RentCast: ' + err.message);
+            }
+        }
+        // 4. Melissa with a browser-side key
         if (!rec && mdKey) {
             try {
                 rec = await melissaLookup(address, mdKey);
             } catch (err) {
                 problems.push(err instanceof TypeError ? 'Melissa: network error' : err.message);
+            }
+        }
+        // 5. Melissa through the worker (server-side key, if configured)
+        if (!rec && worker && !mdKey) {
+            try {
+                rec = await workerFetchRecord(`/melissa?ff=${encodeURIComponent(address)}`);
+            } catch (err) {
+                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker Melissa: ' + err.message);
             }
         }
         if (rec) {
@@ -1230,13 +1279,15 @@ function highlightSuggestion(idx) {
 function selectSuggestion(s) {
     rawTypedAddress = subjectAddressInput.value.trim(); // keep as a lookup fallback variant
     lastSelectedCoords = (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null;
+    lastSelectedMprId = s.mprId || null;
     subjectAddressInput.value = s.text;
     hideSuggestions();
     recalcAppraisal(); // persists the chosen address
-    if (rentcastKeyInput.value.trim()) {
+    const anyProvider = rentcastKeyInput.value.trim() || melissaKeyInput.value.trim() || workerBase();
+    if (anyProvider) {
         lookupSubjectProperty(); // auto-populate beds/baths/sqft/etc — all editable after
     } else {
-        setLookupStatus('Address set. Paste a free RentCast API key below and property details will fill in automatically.', 'info');
+        setLookupStatus('Address set. Deploy the free Cloudflare Worker or paste an API key below and property details will fill in automatically.', 'info');
     }
 }
 
@@ -1290,7 +1341,8 @@ async function realtorSuggestions(query) {
                     line1: a.line,
                     line2,
                     lat: a.centroid ? a.centroid.lat : null,
-                    lon: a.centroid ? a.centroid.lon : null
+                    lon: a.centroid ? a.centroid.lon : null,
+                    mprId: a.mpr_id || null // realtor property id — unlocks the keyless worker lookup
                 };
             });
     } catch (e) {
@@ -1386,6 +1438,7 @@ async function fetchAddressSuggestions(query) {
 
 subjectAddressInput.addEventListener('input', () => {
     lastSelectedCoords = null; // typing invalidates the previously picked location
+    lastSelectedMprId = null;
     const q = subjectAddressInput.value.trim();
     clearTimeout(suggestDebounce);
     if (q.length < 4) {
@@ -1467,6 +1520,28 @@ melissaKeyInput.addEventListener('input', () => {
     try { localStorage.setItem(MELISSA_KEY_STORAGE, melissaKeyInput.value.trim()); } catch (e) { /* private mode */ }
 });
 
+let workerHealthDebounce = null;
+workerUrlInput.addEventListener('input', () => {
+    try { localStorage.setItem(WORKER_URL_STORAGE, workerUrlInput.value.trim()); } catch (e) { /* private mode */ }
+    clearTimeout(workerHealthDebounce);
+    const base = workerBase();
+    if (!base) return;
+    workerHealthDebounce = setTimeout(async () => {
+        try {
+            const res = await fetch(base + '/health', { headers: { 'Accept': 'application/json' } });
+            const h = await res.json();
+            if (h && h.ok) {
+                const extras = [h.providers.rentcast && 'RentCast', h.providers.melissa && 'Melissa'].filter(Boolean);
+                setLookupStatus(`✓ Worker connected — keyless realtor.com data${extras.length ? ' + server-side keys: ' + extras.join(', ') : ''}.`, 'success');
+            } else {
+                setLookupStatus('✗ That URL responded, but not like the underwriter worker — check the deployment.', 'error');
+            }
+        } catch (e) {
+            setLookupStatus('✗ Could not reach the worker at that URL (CORS or typo?).', 'error');
+        }
+    }, 700);
+});
+
 // ==================== Initial render ====================
 // (scripts are deferred, so the DOM is ready here)
 
@@ -1479,6 +1554,7 @@ restoreAppraisalState();
 try {
     rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || '';
     melissaKeyInput.value = localStorage.getItem(MELISSA_KEY_STORAGE) || '';
+    workerUrlInput.value = localStorage.getItem(WORKER_URL_STORAGE) || '';
 } catch (e) { /* private mode */ }
 renderComps();
 recalcAppraisal();

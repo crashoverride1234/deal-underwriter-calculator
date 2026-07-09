@@ -1,8 +1,9 @@
-const CACHE_NAME = 'underwriter-v8';
+const CACHE_NAME = 'underwriter-v9';
 
 // Live data APIs — never cache these (autocomplete queries and property
 // lookups must always be fresh, and caching every keystroke bloats storage)
 const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io', 'parser-external.geo.moveaws.com', 'property.melissadata.net'];
+const NETWORK_ONLY_SUFFIXES = ['.workers.dev']; // user-deployed data proxy
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -52,6 +53,7 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
   if (NETWORK_ONLY_HOSTS.includes(url.hostname)) return; // straight to network
+  if (NETWORK_ONLY_SUFFIXES.some(s => url.hostname.endsWith(s))) return;
   const sameOrigin = url.origin === self.location.origin;
 
   if (sameOrigin) {
