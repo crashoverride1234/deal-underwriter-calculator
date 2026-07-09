@@ -128,16 +128,22 @@
                         Comps in weaker condition are adjusted upward to match.
                     </p>
                     <details class="settings-details">
-                        <summary>Property Data API (RentCast)</summary>
+                        <summary>Property Data Sources (API keys)</summary>
                         <div class="form-group" style="margin-top: 0.75rem;">
                             <label for="rentcast-api-key">RentCast API Key</label>
-                            <input type="password" id="rentcast-api-key" placeholder="Paste your API key" autocomplete="off">
+                            <input type="password" id="rentcast-api-key" placeholder="Free: 50 lookups/mo" autocomplete="off">
+                        </div>
+                        <div class="form-group" style="margin-top: 0.75rem;">
+                            <label for="melissa-api-key">Melissa API Key (optional fallback)</label>
+                            <input type="password" id="melissa-api-key" placeholder="Free: ~1,000 credits/mo" autocomplete="off">
                         </div>
                         <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 0.5rem;">
                             Auto-fill pulls beds, baths, sqft, lot, year, garage &amp; pool from public
-                            records. Get a free key (50 lookups/mo) at
-                            <a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a>.
-                            The key is stored only on this device.
+                            records — either key works; add both for best coverage. Free keys:
+                            <a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a> ·
+                            <a href="https://www.melissa.com/developer/" target="_blank" rel="noopener" style="color: #a5b4fc;">melissa.com</a>.
+                            Keys are stored only on this device, and results are cached so repeat
+                            lookups never spend a request.
                         </p>
                     </details>
                 </div>

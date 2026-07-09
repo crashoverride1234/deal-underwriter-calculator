@@ -1,8 +1,8 @@
-const CACHE_NAME = 'underwriter-v7';
+const CACHE_NAME = 'underwriter-v8';
 
 // Live data APIs — never cache these (autocomplete queries and property
 // lookups must always be fresh, and caching every keystroke bloats storage)
-const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io'];
+const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io', 'parser-external.geo.moveaws.com', 'property.melissadata.net'];
 const PRECACHE_URLS = [
   './',
   './index.html',

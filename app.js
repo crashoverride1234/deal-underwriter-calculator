@@ -554,6 +554,7 @@ const qualSettingsContainer = document.getElementById('qual-settings');
 const lookupBtn = document.getElementById('lookup-address-btn');
 const lookupStatus = document.getElementById('lookup-status');
 const rentcastKeyInput = document.getElementById('rentcast-api-key');
+const melissaKeyInput = document.getElementById('melissa-api-key');
 
 const mktActivesInput = document.getElementById('mkt-actives');
 const mktPendingsInput = document.getElementById('mkt-pendings');
@@ -579,6 +580,7 @@ const useArvBtn = document.getElementById('use-arv-btn');
 
 const APPRAISAL_STORAGE_KEY = 'underwriter-appraisal-v1';
 const RENTCAST_KEY_STORAGE = 'underwriter-rentcast-key';
+const MELISSA_KEY_STORAGE = 'underwriter-melissa-key';
 const MAX_COMPS = 6;
 
 // Appraiser-style qualitative grid: each factor is rated per comp relative
@@ -968,84 +970,232 @@ function setLookupStatus(message, kind) {
     lookupStatus.className = `lookup-status ${kind}`;
 }
 
+// ==================== Property Data Providers ====================
+// Lookup ladder: local cache → RentCast (address variants, then coordinate
+// radius — 404s are NOT billed, so retries are free) → Melissa. Records are
+// normalized to one shape and cached so a property is never fetched twice.
+
+const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v1';
+let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
+
+function cacheKeyFor(address) {
+    return address.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getCachedRecord(address) {
+    try {
+        const cache = JSON.parse(localStorage.getItem(PROPERTY_CACHE_KEY) || '{}');
+        return cache[cacheKeyFor(address)] || null;
+    } catch (e) { return null; }
+}
+
+function putCachedRecord(address, record) {
+    try {
+        const cache = JSON.parse(localStorage.getItem(PROPERTY_CACHE_KEY) || '{}');
+        const keys = Object.keys(cache);
+        if (keys.length >= 60) delete cache[keys[0]]; // keep the cache bounded
+        cache[cacheKeyFor(address)] = record;
+        localStorage.setItem(PROPERTY_CACHE_KEY, JSON.stringify(cache));
+    } catch (e) { /* storage full — cache is best-effort */ }
+}
+
+// Normalized record shape: { sqft, beds, baths, lot, year, garage, pool, stories, formattedAddress, source }
+function rentcastToRecord(p) {
+    const f = p.features || {};
+    const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
+    return {
+        sqft: p.squareFootage != null ? p.squareFootage : null,
+        beds: p.bedrooms != null ? p.bedrooms : null,
+        baths: p.bathrooms != null ? p.bathrooms : null,
+        lot: p.lotSize != null ? p.lotSize : null,
+        year: p.yearBuilt != null ? p.yearBuilt : null,
+        garage,
+        pool: (f.pool === true || f.pool === false) ? f.pool : null,
+        stories: f.floorCount != null ? f.floorCount : null,
+        formattedAddress: p.formattedAddress || null,
+        source: 'RentCast'
+    };
+}
+
+function melissaToRecord(r) {
+    const numOrNull = (v) => {
+        const n = parseFloat(v);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const room = r.IntRoomInfo || {};
+    const size = r.PropertySize || {};
+    const use = r.PropertyUseInfo || {};
+    const parking = r.Parking || {};
+    const amenities = r.ExtAmenities || {};
+    // Melissa pool signals vary by county record; treat any non-empty,
+    // non-zero pool code as "has pool", absence as unknown (not "no")
+    const poolRaw = amenities.PoolCode || amenities.Pool || '';
+    const pool = poolRaw && poolRaw !== '0' ? true : null;
+    return {
+        sqft: numOrNull(size.AreaBuilding),
+        beds: numOrNull(room.BedroomsCount),
+        baths: numOrNull(room.BathCount),
+        lot: numOrNull(size.AreaLotSF),
+        year: numOrNull(use.YearBuilt),
+        garage: numOrNull(parking.ParkingSpaceCount),
+        pool,
+        stories: numOrNull((r.IntStructInfo || {}).StoriesCount),
+        formattedAddress: null,
+        source: 'Melissa'
+    };
+}
+
+function recordHasData(rec) {
+    return rec && (rec.sqft != null || rec.beds != null);
+}
+
+// RentCast: null = no record (retryable), throw = hard error
+async function rentcastFetch(params, key) {
+    const res = await fetch(`https://api.rentcast.io/v1/properties?${params}`, {
+        headers: { 'X-Api-Key': key, 'Accept': 'application/json' }
+    });
+    if (res.status === 401 || res.status === 403) throw new Error('RentCast key rejected — double-check it.');
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`RentCast lookup failed (HTTP ${res.status}).`);
+    const data = await res.json();
+    const rec = Array.isArray(data) ? data[0] : data;
+    return (rec && (rec.squareFootage != null || rec.bedrooms != null)) ? rentcastToRecord(rec) : null;
+}
+
+async function rentcastLookup(address, key) {
+    // 1. Address variants: canonical suggestion text, then the raw typed text
+    const variants = [address];
+    if (rawTypedAddress && rawTypedAddress.toLowerCase() !== address.toLowerCase() && /\d/.test(rawTypedAddress)) {
+        variants.push(rawTypedAddress);
+    }
+    for (const variant of variants) {
+        const rec = await rentcastFetch(`address=${encodeURIComponent(variant)}`, key);
+        if (rec) return rec;
+    }
+    // 2. Coordinate radius — sidesteps address-string matching entirely
+    if (lastSelectedCoords) {
+        const { lat, lon } = lastSelectedCoords;
+        const rec = await rentcastFetch(`latitude=${lat}&longitude=${lon}&radius=0.05&limit=1`, key);
+        if (rec) return rec;
+    }
+    return null;
+}
+
+async function melissaLookup(address, key) {
+    const res = await fetch(
+        `https://property.melissadata.net/v4/WEB/LookupProperty?id=${encodeURIComponent(key)}&ff=${encodeURIComponent(address)}&format=json&cols=GrpAll`,
+        { headers: { 'Accept': 'application/json' } }
+    );
+    if (!res.ok) throw new Error(`Melissa lookup failed (HTTP ${res.status}).`);
+    const data = await res.json();
+    if (data.TransmissionResults && /GE0[1-9]/.test(data.TransmissionResults)) {
+        throw new Error('Melissa key rejected — double-check it.');
+    }
+    const rec = (data.Records || [])[0];
+    if (!rec) return null;
+    const normalized = melissaToRecord(rec);
+    return recordHasData(normalized) ? normalized : null;
+}
+
+// Apply a normalized record: only overwrite fields the record actually has;
+// everything remains editable afterward
+function applyPropertyRecord(rec, fallbackAddress) {
+    const filled = [];
+    const fill = (input, value, label) => {
+        if (value === undefined || value === null || value === '') return;
+        input.value = value;
+        filled.push(`${label} ${value}`);
+    };
+    fill(subjectSqftInput, rec.sqft, 'sqft');
+    fill(subjectBedsInput, rec.beds, 'beds');
+    fill(subjectBathsInput, rec.baths, 'baths');
+    fill(subjectLotInput, rec.lot, 'lot');
+    fill(subjectYearInput, rec.year, 'built');
+    if (rec.garage != null) fill(subjectGarageInput, rec.garage, 'garage');
+    if (rec.pool === true || rec.pool === false) {
+        subjectPoolInput.value = rec.pool ? 'yes' : 'no';
+        filled.push(`pool ${rec.pool ? 'yes' : 'no'}`);
+    }
+    if (rec.stories != null) {
+        const storyVal = rec.stories >= 3 ? '3' : String(rec.stories);
+        if ([...subjectStoriesInput.options].some(o => o.value === storyVal)) {
+            subjectStoriesInput.value = storyVal;
+            filled.push(`stories ${storyVal}`);
+        }
+    }
+    if (rec.formattedAddress) subjectAddressInput.value = rec.formattedAddress;
+    setLookupStatus(
+        filled.length
+            ? `✓ ${rec.formattedAddress || fallbackAddress} (${rec.source}): ${filled.join(' · ')}. Review and override anything below.`
+            : 'Record found, but it had no usable fields — enter details manually.',
+        'success'
+    );
+    recalcAppraisal();
+}
+
 async function lookupSubjectProperty() {
     const address = subjectAddressInput.value.trim();
     if (!address) {
         setLookupStatus('Enter the property address first.', 'error');
         return;
     }
-    const key = rentcastKeyInput.value.trim();
-    if (!key) {
-        setLookupStatus('Paste a free RentCast API key below to enable auto-fill (50 lookups/mo free).', 'error');
+    const rcKey = rentcastKeyInput.value.trim();
+    const mdKey = melissaKeyInput.value.trim();
+    if (!rcKey && !mdKey) {
+        setLookupStatus('Paste a free RentCast or Melissa API key below to enable auto-fill.', 'error');
         rentcastKeyInput.closest('details').open = true;
         rentcastKeyInput.focus();
         return;
     }
 
+    // Cache first — a property already fetched never costs another API call
+    const cached = getCachedRecord(address);
+    if (cached) {
+        applyPropertyRecord(cached, address);
+        return;
+    }
+
     lookupBtn.disabled = true;
     setLookupStatus('Looking up property records…', 'info');
+    const problems = [];
     try {
-        const res = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(address)}`, {
-            headers: { 'X-Api-Key': key, 'Accept': 'application/json' }
-        });
-        if (res.status === 401 || res.status === 403) throw new Error('API key rejected — double-check your RentCast key.');
-        if (res.status === 404) throw new Error('No property record found for that address.');
-        if (!res.ok) throw new Error(`Lookup failed (HTTP ${res.status}).`);
-        const data = await res.json();
-        const p = Array.isArray(data) ? data[0] : data;
-        if (!p || (p.squareFootage == null && p.bedrooms == null)) {
-            throw new Error('No property record found for that address.');
-        }
-
-        // Only overwrite fields the record actually has; everything stays editable
-        const filled = [];
-        const fill = (input, value, label) => {
-            if (value === undefined || value === null || value === '') return;
-            input.value = value;
-            filled.push(`${label} ${value}`);
-        };
-        fill(subjectSqftInput, p.squareFootage, 'sqft');
-        fill(subjectBedsInput, p.bedrooms, 'beds');
-        fill(subjectBathsInput, p.bathrooms, 'baths');
-        fill(subjectLotInput, p.lotSize, 'lot');
-        fill(subjectYearInput, p.yearBuilt, 'built');
-        const f = p.features || {};
-        const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
-        if (garage != null) fill(subjectGarageInput, garage, 'garage');
-        if (f.pool === true || f.pool === false) {
-            subjectPoolInput.value = f.pool ? 'yes' : 'no';
-            filled.push(`pool ${f.pool ? 'yes' : 'no'}`);
-        }
-        if (f.floorCount != null) {
-            const storyVal = f.floorCount >= 3 ? '3' : String(f.floorCount);
-            if ([...subjectStoriesInput.options].some(o => o.value === storyVal)) {
-                subjectStoriesInput.value = storyVal;
-                filled.push(`stories ${storyVal}`);
+        let rec = null;
+        if (rcKey) {
+            try {
+                rec = await rentcastLookup(address, rcKey);
+            } catch (err) {
+                problems.push(err instanceof TypeError ? 'RentCast: network error' : err.message);
             }
         }
-        if (p.formattedAddress) subjectAddressInput.value = p.formattedAddress;
-
-        setLookupStatus(
-            filled.length
-                ? `✓ ${p.formattedAddress || address}: ${filled.join(' · ')}. Review and override anything below.`
-                : 'Record found, but it had no usable fields — enter details manually.',
-            'success'
-        );
-        recalcAppraisal();
-    } catch (err) {
-        const msg = err instanceof TypeError
-            ? 'Network error — check your connection and try again.'
-            : err.message;
-        setLookupStatus(`✗ ${msg}`, 'error');
+        if (!rec && mdKey) {
+            try {
+                rec = await melissaLookup(address, mdKey);
+            } catch (err) {
+                problems.push(err instanceof TypeError ? 'Melissa: network error' : err.message);
+            }
+        }
+        if (rec) {
+            putCachedRecord(address, rec);
+            applyPropertyRecord(rec, address);
+        } else {
+            setLookupStatus(
+                problems.length
+                    ? `✗ ${problems.join(' · ')}`
+                    : '✗ No property record found for that address — enter details manually.',
+                'error'
+            );
+        }
     } finally {
         lookupBtn.disabled = false;
     }
 }
 
 // ==================== Address Autocomplete ====================
-// Two free, keyless sources queried in parallel:
+// Three free, keyless sources queried in parallel, best-first:
+// - realtor.com geo-suggest (CORS-open): canonical listing addresses with
+//   proper street suffixes — the best input for record lookups
 // - US Census Bureau geocoder (JSONP — no CORS support): authoritative
-//   house-number matches from TIGER data, listed first
+//   house-number matches from TIGER data
 // - Photon / OpenStreetMap (fetch): fuzzy partial matching as fallback
 // Selecting a suggestion auto-runs the RentCast record lookup when a key
 // is on file, and every populated field stays editable.
@@ -1057,6 +1207,7 @@ let suggestGeneration = 0; // ignore out-of-order responses while typing
 let jsonpCounter = 0;      // unique JSONP callback names (separate from generation)
 let currentSuggestions = [];
 let activeSuggestion = -1;
+let rawTypedAddress = '';  // what the user had typed before a suggestion replaced it
 
 function titleCase(s) {
     return s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
@@ -1077,6 +1228,8 @@ function highlightSuggestion(idx) {
 }
 
 function selectSuggestion(s) {
+    rawTypedAddress = subjectAddressInput.value.trim(); // keep as a lookup fallback variant
+    lastSelectedCoords = (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null;
     subjectAddressInput.value = s.text;
     hideSuggestions();
     recalcAppraisal(); // persists the chosen address
@@ -1119,6 +1272,32 @@ function renderSuggestions(list) {
     addressSuggestionsBox.classList.remove('hidden');
 }
 
+// realtor.com's public geo-suggest — canonical addresses with street suffixes
+async function realtorSuggestions(query) {
+    try {
+        const res = await fetch(
+            `https://parser-external.geo.moveaws.com/suggest?input=${encodeURIComponent(query)}&client_id=rdc-home&limit=6&area_types=address`,
+            { headers: { 'Accept': 'application/json' } }
+        );
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (data.autocomplete || [])
+            .filter(a => a.line && a.city && a.state_code)
+            .map(a => {
+                const line2 = `${a.city}, ${a.state_code}${a.postal_code ? ' ' + a.postal_code : ''}`;
+                return {
+                    text: `${a.line}, ${a.city}, ${a.state_code}${a.postal_code ? ' ' + a.postal_code : ''}`,
+                    line1: a.line,
+                    line2,
+                    lat: a.centroid ? a.centroid.lat : null,
+                    lon: a.centroid ? a.centroid.lon : null
+                };
+            });
+    } catch (e) {
+        return []; // offline or endpoint changed — other sources still answer
+    }
+}
+
 // Census geocoder only speaks JSONP — inject a script tag with a callback
 function censusSuggestions(query) {
     return new Promise((resolve) => {
@@ -1139,7 +1318,9 @@ function censusSuggestions(query) {
                 return {
                     text: [street, city, state, zip].filter(Boolean).join(', '),
                     line1: street,
-                    line2: [city, state].filter(Boolean).join(', ') + (zip ? ' ' + zip : '')
+                    line2: [city, state].filter(Boolean).join(', ') + (zip ? ' ' + zip : ''),
+                    lat: m.coordinates ? m.coordinates.y : null,
+                    lon: m.coordinates ? m.coordinates.x : null
                 };
             }));
         };
@@ -1161,15 +1342,22 @@ async function photonSuggestions(query) {
         );
         if (!res.ok) return [];
         const data = await res.json();
-        const props = (data.features || [])
-            .map(f => f.properties || {})
-            .filter(p => p.countrycode === 'US');
+        const feats = (data.features || [])
+            .filter(f => (f.properties || {}).countrycode === 'US');
         // Address-level results (with a house number) rank first
-        props.sort((a, b) => (b.housenumber ? 1 : 0) - (a.housenumber ? 1 : 0));
-        return props.map(p => {
+        feats.sort((a, b) => ((b.properties.housenumber ? 1 : 0) - (a.properties.housenumber ? 1 : 0)));
+        return feats.map(f => {
+            const p = f.properties;
+            const coords = (f.geometry && f.geometry.coordinates) || [];
             const line1 = (p.housenumber ? `${p.housenumber} ${p.street || p.name || ''}` : (p.name || p.street || '')).trim();
             const line2 = [p.city || p.county, p.state, p.postcode].filter(Boolean).join(', ');
-            return { text: [line1, line2].filter(Boolean).join(', '), line1: line1 || line2, line2: line1 ? line2 : '' };
+            return {
+                text: [line1, line2].filter(Boolean).join(', '),
+                line1: line1 || line2,
+                line2: line1 ? line2 : '',
+                lat: coords.length === 2 ? coords[1] : null,
+                lon: coords.length === 2 ? coords[0] : null
+            };
         });
     } catch (e) {
         return []; // aborted mid-typing or offline
@@ -1180,11 +1368,14 @@ async function fetchAddressSuggestions(query) {
     const generation = ++suggestGeneration;
     // Census needs a house number to match; skip it for street-only fragments
     const censusPromise = /\d/.test(query) ? censusSuggestions(query) : Promise.resolve([]);
-    const [census, photon] = await Promise.all([censusPromise, photonSuggestions(query)]);
+    const [realtor, census, photon] = await Promise.all([
+        realtorSuggestions(query), censusPromise, photonSuggestions(query)
+    ]);
     if (generation !== suggestGeneration) return; // a newer query superseded this one
-    // Census (authoritative) first, then Photon, deduped by normalized text
+    // realtor.com (canonical, suffixed) first, then Census, then Photon —
+    // deduped on street line + zip so near-identical entries collapse
     const seen = new Set();
-    const merged = [...census, ...photon].filter(s => {
+    const merged = [...realtor, ...census, ...photon].filter(s => {
         const key = s.text.toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!key || seen.has(key)) return false;
         seen.add(key);
@@ -1194,6 +1385,7 @@ async function fetchAddressSuggestions(query) {
 }
 
 subjectAddressInput.addEventListener('input', () => {
+    lastSelectedCoords = null; // typing invalidates the previously picked location
     const q = subjectAddressInput.value.trim();
     clearTimeout(suggestDebounce);
     if (q.length < 4) {
@@ -1271,6 +1463,9 @@ lookupBtn.addEventListener('click', lookupSubjectProperty);
 rentcastKeyInput.addEventListener('input', () => {
     try { localStorage.setItem(RENTCAST_KEY_STORAGE, rentcastKeyInput.value.trim()); } catch (e) { /* private mode */ }
 });
+melissaKeyInput.addEventListener('input', () => {
+    try { localStorage.setItem(MELISSA_KEY_STORAGE, melissaKeyInput.value.trim()); } catch (e) { /* private mode */ }
+});
 
 // ==================== Initial render ====================
 // (scripts are deferred, so the DOM is ready here)
@@ -1281,7 +1476,10 @@ if (window.lucide) {
 switchStrategy('flip');
 renderQualSettings();          // must exist before restore fills the % values
 restoreAppraisalState();
-try { rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || ''; } catch (e) { /* private mode */ }
+try {
+    rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || '';
+    melissaKeyInput.value = localStorage.getItem(MELISSA_KEY_STORAGE) || '';
+} catch (e) { /* private mode */ }
 renderComps();
 recalcAppraisal();
 updateAbsorption();
