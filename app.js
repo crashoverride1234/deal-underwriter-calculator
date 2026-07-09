@@ -1179,11 +1179,14 @@ async function lookupSubjectProperty() {
     const problems = [];
     try {
         let rec = null;
-        // 1. Worker + realtor.com (keyless, richest data) — needs the picked
-        //    suggestion's mpr_id, which realtor.com suggestions carry
-        if (worker && lastSelectedMprId) {
+        // 1. Worker + realtor.com (keyless, richest data): use the picked
+        //    suggestion's mpr_id when we have one, otherwise let the worker
+        //    resolve the address itself — works for Census/Photon picks too
+        if (worker) {
             try {
-                rec = await workerFetchRecord(`/property?mpr_id=${encodeURIComponent(lastSelectedMprId)}`);
+                rec = await workerFetchRecord(lastSelectedMprId
+                    ? `/property?mpr_id=${encodeURIComponent(lastSelectedMprId)}`
+                    : `/property?address=${encodeURIComponent(address)}`);
             } catch (err) {
                 problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
             }

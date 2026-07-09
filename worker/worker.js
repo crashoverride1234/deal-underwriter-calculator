@@ -8,6 +8,8 @@
  * Routes (all GET):
  *   /health                        → { ok, providers } — connectivity check
  *   /property?mpr_id=<id>          → realtor.com GraphQL (keyless), normalized
+ *   /property?address=<street...>  → same, resolving the address to an
+ *                                    mpr_id via realtor.com geo-suggest first
  *   /rentcast?address=... | ?latitude=&longitude=&radius=&limit=
  *                                  → RentCast with RENTCAST_API_KEY secret
  *   /melissa?ff=<address>          → Melissa with MELISSA_API_KEY secret
@@ -150,10 +152,26 @@ const hasData = (rec) => rec && (rec.sqft !== null || rec.beds !== null);
 
 // ---- Providers ----
 
+// Resolve a free-form address to realtor.com's property id via geo-suggest
+async function resolveMprId(address) {
+  const res = await fetch(
+    `https://parser-external.geo.moveaws.com/suggest?input=${encodeURIComponent(address)}&client_id=rdc-home&limit=1&area_types=address`,
+    { headers: { 'Accept': 'application/json', 'User-Agent': BROWSER_UA } }
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  const first = (data.autocomplete || [])[0];
+  return first && first.mpr_id ? String(first.mpr_id) : null;
+}
+
 async function handleRealtor(params, cors) {
-  const mprId = params.get('mpr_id');
+  let mprId = params.get('mpr_id');
+  if (!mprId && params.get('address')) {
+    mprId = await resolveMprId(params.get('address'));
+    if (!mprId) return json({ error: 'no record' }, 404, cors);
+  }
   if (!mprId || !/^\d+$/.test(mprId)) {
-    return json({ error: 'mpr_id (numeric) is required' }, 400, cors);
+    return json({ error: 'mpr_id (numeric) or address is required' }, 400, cors);
   }
   const res = await fetch('https://www.realtor.com/frontdoor/graphql', {
     method: 'POST',
