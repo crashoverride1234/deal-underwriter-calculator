@@ -1,0 +1,8 @@
+# Deploy with: npx wrangler deploy   (from this directory)
+name = "underwriter-proxy"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Preserve any vars set through the Cloudflare dashboard (e.g. ALLOWED_ORIGINS)
+# instead of wiping them on each deploy; secrets always persist.
+keep_vars = true
