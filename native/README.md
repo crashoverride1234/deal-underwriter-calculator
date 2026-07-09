@@ -22,7 +22,8 @@ Appraisal → exit, status-bar styling.
 ```
 capacitor.config.json   app id / name / splash + status-bar config
 build-www.mjs           stages ../index.html etc. into www/ (gitignored)
-vendor/                 pinned chart.umd.js + lucide.min.js (committed)
+vendor/                 pinned chart.umd.js + lucide.min.js + fonts (committed)
+vendor-fonts.mjs        re-downloads vendor/fonts/ if style.css fonts change
 assets/logo.png         1024px icon source for @capacitor/assets
 android/, ios/          generated native projects (committed)
 ```
