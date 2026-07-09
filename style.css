@@ -45,14 +45,19 @@ body {
     color: var(--text-primary);
     min-height: 100vh;
     overflow-x: hidden;
-    padding-bottom: 3rem;
+    padding-bottom: calc(3rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* Header & Container styling */
+/* safe-area insets keep content clear of notches/status bars in the native
+   app and installed PWA; they resolve to 0 in ordinary browsers */
 .container {
     max-width: 1400px;
     margin: 0 auto;
-    padding: 1.5rem;
+    padding: calc(1.5rem + env(safe-area-inset-top, 0px))
+             calc(1.5rem + env(safe-area-inset-right, 0px))
+             1.5rem
+             calc(1.5rem + env(safe-area-inset-left, 0px));
 }
 
 header {

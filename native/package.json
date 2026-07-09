@@ -1,0 +1,23 @@
+{
+  "name": "underwriter-native",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Capacitor native shells (iOS + Android) for the Antigravity Underwriter PWA",
+  "scripts": {
+    "build": "node build-www.mjs",
+    "sync": "node build-www.mjs && npx cap sync",
+    "sync:android": "node build-www.mjs && npx cap sync android",
+    "sync:ios": "node build-www.mjs && npx cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1",
+    "@capacitor/splash-screen": "^8.0.0",
+    "@capacitor/status-bar": "^8.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.1"
+  }
+}

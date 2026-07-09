@@ -6,6 +6,9 @@ $port = 8080
 
 $listening = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
 if (-not $listening) {
+    # serve.ps1 honors $env:PORT (for the Claude preview); pin it so an
+    # ambient PORT variable can't send the child to a different port
+    $env:PORT = "$port"
     Start-Process powershell -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
         '-File', (Join-Path $PSScriptRoot 'serve.ps1')

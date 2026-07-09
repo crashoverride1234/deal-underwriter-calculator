@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Antigravity Underwriter</string>
+    <string name="title_activity_main">Antigravity Underwriter</string>
+    <string name="package_name">io.github.crashoverride1234.underwriter</string>
+    <string name="custom_url_scheme">io.github.crashoverride1234.underwriter</string>
+</resources>

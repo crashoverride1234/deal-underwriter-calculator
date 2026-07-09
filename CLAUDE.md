@@ -24,6 +24,11 @@ framework. Deployed to GitHub Pages from `main`.
   verification instead.
 - `worker/` — Cloudflare Worker proxy for keyless property auto-fill
   (realtor.com GraphQL; optional RentCast/Melissa via Worker secrets).
+- `native/` — Capacitor 8 iOS/Android store apps wrapping the same web files
+  (see `native/README.md`). `build-www.mjs` stages `www/` (vendors the CDN
+  libs, strips the SW); native-only behavior sits at the bottom of `app.js`
+  guarded by `window.Capacitor`. Binaries build in GitHub Actions
+  (`.github/workflows/native-builds.yml`) — iOS cannot build on Windows.
 - `serve.ps1` / `launcher.ps1` — dev HTTP server (port 8080) and the desktop
   shortcut launcher (starts server hidden + opens Edge `--app` window).
 
@@ -38,6 +43,8 @@ framework. Deployed to GitHub Pages from `main`.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
+- **Native builds**: push to `main` (or Actions → "Native builds" → run) and
+  download the artifacts. Store signing/submission: `native/README.md`.
 - Project norm: verify features end-to-end in the browser preview (including
   live API calls) BEFORE pushing; then push and confirm the Pages deploy.
 

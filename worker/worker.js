@@ -25,7 +25,11 @@
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://crashoverride1234.github.io',
   'http://localhost:8080',
-  'http://127.0.0.1:8080'
+  'http://127.0.0.1:8080',
+  // Capacitor native apps (see native/): iOS serves the bundle from
+  // capacitor://localhost, Android from https://localhost
+  'capacitor://localhost',
+  'https://localhost'
 ];
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';

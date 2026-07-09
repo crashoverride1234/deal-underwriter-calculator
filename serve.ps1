@@ -1,4 +1,6 @@
-$port = 8080
+# PORT env var lets the Claude preview pick a free port (launcher.ps1 pins
+# it to 8080 for its child); non-numeric values are ignored, not fatal
+$port = if ($env:PORT -match '^\d+$') { [int]$env:PORT } else { 8080 }
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$port/")
 try {

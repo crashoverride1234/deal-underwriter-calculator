@@ -1,0 +1,93 @@
+# Builds the native app binaries in the cloud — this repo is developed on
+# Windows, where Android needs a JDK/SDK install and iOS cannot build at all.
+#
+#   android → installable debug APK + unsigned release AAB (sign for Play
+#             with the upload key — see native/README.md)
+#   ios     → compile check + unsigned App.app (store upload needs an Apple
+#             Developer account and signing — see native/README.md)
+name: Native builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'native/**'
+      - 'index.html'
+      - 'app.js'
+      - 'engine.js'
+      - 'style.css'
+      - 'manifest.json'
+      - 'icon-*.png'
+      - '.github/workflows/native-builds.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: native-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: node build-www.mjs
+      - run: npx cap sync android
+      - name: Build debug APK and release AAB
+        working-directory: native/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug bundleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: underwriter-android-debug-apk
+          path: native/android/app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: underwriter-android-release-aab-unsigned
+          path: native/android/app/build/outputs/bundle/release/app-release.aab
+
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - run: npm ci
+      - run: node build-www.mjs
+      # sync regenerates CapApp-SPM/Package.swift with macOS path separators
+      # (the committed copy comes from a Windows machine)
+      - run: npx cap sync ios
+      - name: Build (unsigned)
+        working-directory: native/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+            -destination generic/platform=iOS -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned .app
+        working-directory: native/ios/App
+        run: ditto -c -k --keepParent build/Build/Products/Release-iphoneos/App.app App-unsigned.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: underwriter-ios-app-unsigned
+          path: native/ios/App/App-unsigned.zip

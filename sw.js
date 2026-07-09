@@ -1,4 +1,4 @@
-const CACHE_NAME = 'underwriter-v9';
+const CACHE_NAME = 'underwriter-v10';
 
 // Live data APIs — never cache these (autocomplete queries and property
 // lookups must always be fresh, and caching every keystroke bloats storage)

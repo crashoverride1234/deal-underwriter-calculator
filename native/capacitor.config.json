@@ -1,0 +1,25 @@
+{
+  "appId": "io.github.crashoverride1234.underwriter",
+  "appName": "Antigravity Underwriter",
+  "webDir": "www",
+  "backgroundColor": "#0f172a",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never"
+  },
+  "plugins": {
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#0f172a",
+      "overlaysWebView": false
+    },
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#0f172a",
+      "showSpinner": false
+    }
+  }
+}

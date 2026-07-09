@@ -1563,3 +1563,32 @@ renderComps();
 recalcAppraisal();
 updateAbsorption();
 switchPage('appraisal'); // step 1 first
+
+// ==================== Native app (Capacitor) integration ====================
+// The store builds (see native/) run this same file inside a Capacitor
+// WebView, where window.Capacitor exists. Everything below is a no-op in
+// the browser/PWA.
+
+const capacitorGlobal = window.Capacitor;
+if (capacitorGlobal && capacitorGlobal.isNativePlatform && capacitorGlobal.isNativePlatform()) {
+    const nativePlugins = capacitorGlobal.Plugins || {};
+
+    // window.print() does nothing inside WKWebView / Android WebView
+    document.getElementById('export-pdf-btn').classList.add('hidden');
+
+    // Android hardware back: calculator page → appraisal page → home screen
+    if (nativePlugins.App) {
+        nativePlugins.App.addListener('backButton', () => {
+            if (calculatorPage.classList.contains('hidden')) {
+                nativePlugins.App.exitApp();
+            } else {
+                switchPage('appraisal');
+            }
+        });
+    }
+
+    // Light status-bar icons over the dark theme ('DARK' = dark background)
+    if (nativePlugins.StatusBar) {
+        nativePlugins.StatusBar.setStyle({ style: 'DARK' }).catch(() => {});
+    }
+}
