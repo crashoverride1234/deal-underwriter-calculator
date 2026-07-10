@@ -72,4 +72,7 @@ framework. Deployed to GitHub Pages from `main`.
   `underwriter-melissa-key`, `underwriter-worker-url`,
   `underwriter-property-cache-v1`.
 - Never commit `worker/.wrangler/` (gitignored) or any secrets; the repo is
-  public. Keep the deployed Worker URL out of repo files.
+  public. The deployed Worker URL is deliberately baked into `app.js` as
+  `DEFAULT_WORKER_URL` (zero-setup auto-fill was chosen over URL secrecy;
+  Workers free tier has a hard daily cap, so no billing risk — rotate the
+  worker name if abuse ever shows up).

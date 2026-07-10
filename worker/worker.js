@@ -58,6 +58,13 @@ function allowedOrigins(env) {
   return DEFAULT_ALLOWED_ORIGINS;
 }
 
+// Local development runs on arbitrary ports (dev servers with autoPort);
+// any localhost origin is as trusted as the machine it runs on
+function isOriginAllowed(origin, origins) {
+  if (origins.includes(origin)) return true;
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+}
+
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
@@ -249,7 +256,7 @@ export default {
     const origins = allowedOrigins(env);
 
     // Browsers send Origin; requests without one (curl, health checks) pass
-    if (origin && !origins.includes(origin)) {
+    if (origin && !isOriginAllowed(origin, origins)) {
       return json({ error: 'origin not allowed' }, 403, corsHeaders(origins[0]));
     }
     const cors = corsHeaders(origin || origins[0]);

@@ -128,10 +128,10 @@
                         Comps in weaker condition are adjusted upward to match.
                     </p>
                     <details class="settings-details">
-                        <summary>Property Data Sources</summary>
+                        <summary>Property Data Sources (optional — auto-fill works out of the box)</summary>
                         <div class="form-group" style="margin-top: 0.75rem;">
-                            <label for="worker-url">Cloudflare Worker URL (keyless auto-fill)</label>
-                            <input type="text" id="worker-url" placeholder="https://underwriter-proxy.you.workers.dev" autocomplete="off" spellcheck="false">
+                            <label for="worker-url">Data Proxy URL (leave blank for built-in)</label>
+                            <input type="text" id="worker-url" placeholder="Built-in proxy active" autocomplete="off" spellcheck="false">
                         </div>
                         <div class="form-group" style="margin-top: 0.75rem;">
                             <label for="rentcast-api-key">RentCast API Key</label>
@@ -143,13 +143,13 @@
                         </div>
                         <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 0.5rem;">
                             Auto-fill pulls beds, baths, sqft, lot, year, garage &amp; pool from public
-                            records. Best option: deploy the free
-                            <a href="https://github.com/crashoverride1234/deal-underwriter-calculator/tree/main/worker" target="_blank" rel="noopener" style="color: #a5b4fc;">Cloudflare Worker</a>
-                            (5 min, no keys needed in the app). Or paste a free API key:
-                            <a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a> ·
-                            <a href="https://www.melissa.com/developer/" target="_blank" rel="noopener" style="color: #a5b4fc;">melissa.com</a>.
-                            Everything is stored only on this device, and results are cached so
-                            repeat lookups never spend a request.
+                            records automatically — nothing to set up. These fields are optional:
+                            add a free API key (<a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a> ·
+                            <a href="https://www.melissa.com/developer/" target="_blank" rel="noopener" style="color: #a5b4fc;">melissa.com</a>)
+                            for extra coverage, or point to your own
+                            <a href="https://github.com/crashoverride1234/deal-underwriter-calculator/tree/main/worker" target="_blank" rel="noopener" style="color: #a5b4fc;">self-hosted proxy</a>.
+                            Keys stay on this device; results are cached so repeat lookups never
+                            spend a request.
                         </p>
                     </details>
                 </div>

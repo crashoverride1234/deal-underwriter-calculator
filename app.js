@@ -981,11 +981,13 @@ const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v1';
 let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
 let lastSelectedMprId = null;  // realtor.com property id from the picked suggestion
 
-// Optional self-hosted Cloudflare Worker (see worker/README.md): keyless
-// realtor.com records plus server-side key storage for RentCast/Melissa
+// Built-in data proxy (worker/ in the repo) — auto-fill works out of the box
+// with zero setup. The settings field overrides it for self-hosters.
+const DEFAULT_WORKER_URL = 'https://underwriter-proxy.jamesthorneiii.workers.dev';
+
 function workerBase() {
     const raw = workerUrlInput.value.trim().replace(/\/+$/, '');
-    return /^https?:\/\/.+/i.test(raw) ? raw : '';
+    return /^https?:\/\/.+/i.test(raw) ? raw : DEFAULT_WORKER_URL;
 }
 
 // null = no record / provider not configured (both fall through the ladder)
