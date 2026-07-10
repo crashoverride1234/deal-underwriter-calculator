@@ -28,11 +28,14 @@
             
             <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
                 <div class="strategy-selector">
-                    <button id="page-appraisal-btn" class="tab-btn active">
-                        <i data-lucide="search"></i> 1 · ARV Appraisal
+                    <button id="page-subject-btn" class="tab-btn active">
+                        <i data-lucide="map-pin"></i> 1 · Subject Property
+                    </button>
+                    <button id="page-arv-btn" class="tab-btn">
+                        <i data-lucide="search"></i> 2 · ARV Estimation
                     </button>
                     <button id="page-calculator-btn" class="tab-btn">
-                        <i data-lucide="calculator"></i> 2 · Deal Calculator
+                        <i data-lucide="calculator"></i> 3 · Deal Calculator
                     </button>
                 </div>
                 <div class="strategy-selector hidden" id="strategy-selector">
@@ -49,11 +52,10 @@
             </div>
         </header>
 
-        <!-- ============ PAGE 1: ARV Desktop Appraisal ============ -->
-        <div class="app-grid" id="appraisal-page">
+        <!-- ============ PAGE 1: Subject Property Info ============ -->
+        <div class="app-grid" id="subject-page">
 
-            <!-- Subject & Adjustment Settings (Left Column) -->
-            <div class="panel-card">
+            <div class="panel-card" style="max-width: 640px; margin: 0 auto; grid-column: 1 / -1;">
                 <div class="input-section-title">
                     <i data-lucide="map-pin"></i> Subject Property
                 </div>
@@ -69,6 +71,10 @@
                         <i data-lucide="download-cloud"></i> Auto-Fill Property Data
                     </button>
                     <div id="lookup-status" class="lookup-status hidden"></div>
+                    <div class="form-group">
+                        <label for="subject-subdivision">Subdivision Name</label>
+                        <input type="text" id="subject-subdivision" placeholder="e.g. Oakwood Estates">
+                    </div>
                     <div class="input-row">
                         <div class="form-group">
                             <label for="subject-sqft">Living Area</label>
@@ -84,9 +90,15 @@
                     </div>
                     <div class="input-row">
                         <div class="form-group">
-                            <label for="subject-baths">Bathrooms</label>
-                            <input type="number" id="subject-baths" value="2" min="0" max="12" step="0.5">
+                            <label for="subject-baths-full">Full Baths</label>
+                            <input type="number" id="subject-baths-full" value="2" min="0" max="12" step="1">
                         </div>
+                        <div class="form-group">
+                            <label for="subject-baths-half">Half Baths</label>
+                            <input type="number" id="subject-baths-half" value="0" min="0" max="4" step="1">
+                        </div>
+                    </div>
+                    <div class="input-row">
                         <div class="form-group">
                             <label for="subject-lot">Lot Size</label>
                             <div class="input-wrapper has-suffix">
@@ -94,18 +106,16 @@
                                 <span class="input-suffix">sqft</span>
                             </div>
                         </div>
-                    </div>
-                    <div class="input-row">
                         <div class="form-group">
                             <label for="subject-year">Year Built</label>
                             <input type="number" id="subject-year" value="1980" min="1800" max="2030" step="1">
                         </div>
+                    </div>
+                    <div class="input-row">
                         <div class="form-group">
                             <label for="subject-garage">Garage / Covered Spaces</label>
                             <input type="number" id="subject-garage" value="2" min="0" max="8" step="1">
                         </div>
-                    </div>
-                    <div class="input-row">
                         <div class="form-group">
                             <label for="subject-stories">Stories</label>
                             <select id="subject-stories">
@@ -115,6 +125,8 @@
                                 <option value="3">3+ Story</option>
                             </select>
                         </div>
+                    </div>
+                    <div class="input-row">
                         <div class="form-group">
                             <label for="subject-pool">Pool</label>
                             <select id="subject-pool">
@@ -122,12 +134,15 @@
                                 <option value="yes">Pool</option>
                             </select>
                         </div>
+                        <div class="form-group">
+                            <label for="subject-hoa">HOA</label>
+                            <select id="subject-hoa">
+                                <option value="no">No HOA</option>
+                                <option value="yes">HOA</option>
+                            </select>
+                        </div>
                     </div>
-                    <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
-                        The subject is valued in <strong>after-repair (renovated) condition</strong>.
-                        Comps in weaker condition are adjusted upward to match.
-                    </p>
-                    <details class="settings-details">
+                    <details class="settings-details hidden">
                         <summary>Property Data Sources (optional — auto-fill works out of the box)</summary>
                         <div class="form-group" style="margin-top: 0.75rem;">
                             <label for="worker-url">Data Proxy URL (leave blank for built-in)</label>
@@ -141,19 +156,19 @@
                             <label for="melissa-api-key">Melissa API Key (optional fallback)</label>
                             <input type="password" id="melissa-api-key" placeholder="Free: ~1,000 credits/mo" autocomplete="off">
                         </div>
-                        <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 0.5rem;">
-                            Auto-fill pulls beds, baths, sqft, lot, year, garage &amp; pool from public
-                            records automatically — nothing to set up. These fields are optional:
-                            add a free API key (<a href="https://app.rentcast.io/app/api" target="_blank" rel="noopener" style="color: #a5b4fc;">rentcast.io</a> ·
-                            <a href="https://www.melissa.com/developer/" target="_blank" rel="noopener" style="color: #a5b4fc;">melissa.com</a>)
-                            for extra coverage, or point to your own
-                            <a href="https://github.com/crashoverride1234/deal-underwriter-calculator/tree/main/worker" target="_blank" rel="noopener" style="color: #a5b4fc;">self-hosted proxy</a>.
-                            Keys stay on this device; results are cached so repeat lookups never
-                            spend a request.
-                        </p>
                     </details>
                 </div>
+                <button id="continue-to-arv-btn" class="btn" style="width: 100%; margin-top: 0.5rem; padding: 0.9rem;">
+                    Continue to ARV Estimation →
+                </button>
+            </div>
+        </div>
 
+        <!-- ============ PAGE 2: ARV Estimation (Adjustments & Comps) ============ -->
+        <div class="app-grid hidden" id="arv-page">
+
+            <!-- Adjustment Settings (Left Column) -->
+            <div class="panel-card">
                 <div class="input-section-title">
                     <i data-lucide="settings-2"></i> Adjustment Settings
                 </div>
@@ -206,6 +221,10 @@
                             </div>
                         </div>
                     </div>
+                    <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
+                        The subject is valued in <strong>after-repair (renovated) condition</strong>.
+                        Comps in weaker condition are adjusted upward to match.
+                    </p>
                     <details class="settings-details" id="advanced-adjustments">
                         <summary>Advanced Adjustments (lot, garage, pool, age, quality)</summary>
                         <div class="inputs-group" style="margin-top: 1rem; margin-bottom: 0;">
@@ -369,7 +388,7 @@
             </div>
         </div>
 
-        <!-- ============ PAGE 2: Deal Calculator ============ -->
+        <!-- ============ PAGE 3: Deal Calculator ============ -->
         <div class="app-grid hidden" id="calculator-page">
 
             <!-- Inputs Panel (Left Column) -->

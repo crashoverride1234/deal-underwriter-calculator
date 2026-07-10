@@ -522,22 +522,28 @@ document.getElementById('export-pdf-btn').addEventListener('click', () => window
 
 // ==================== ARV Desktop Appraisal (Page 1) ====================
 
-const appraisalPage = document.getElementById('appraisal-page');
+const subjectPage = document.getElementById('subject-page');
+const arvPage = document.getElementById('arv-page');
 const calculatorPage = document.getElementById('calculator-page');
-const pageAppraisalBtn = document.getElementById('page-appraisal-btn');
+const pageSubjectBtn = document.getElementById('page-subject-btn');
+const pageArvBtn = document.getElementById('page-arv-btn');
 const pageCalculatorBtn = document.getElementById('page-calculator-btn');
+const continueToArvBtn = document.getElementById('continue-to-arv-btn');
 const strategySelector = document.getElementById('strategy-selector');
 const calcAddressNote = document.getElementById('calc-address-note');
 
 const subjectAddressInput = document.getElementById('subject-address');
+const subjectSubdivisionInput = document.getElementById('subject-subdivision');
 const subjectSqftInput = document.getElementById('subject-sqft');
 const subjectBedsInput = document.getElementById('subject-beds');
-const subjectBathsInput = document.getElementById('subject-baths');
+const subjectBathsFullInput = document.getElementById('subject-baths-full');
+const subjectBathsHalfInput = document.getElementById('subject-baths-half');
 const subjectLotInput = document.getElementById('subject-lot');
 const subjectYearInput = document.getElementById('subject-year');
 const subjectGarageInput = document.getElementById('subject-garage');
 const subjectStoriesInput = document.getElementById('subject-stories');
 const subjectPoolInput = document.getElementById('subject-pool');
+const subjectHoaInput = document.getElementById('subject-hoa');
 const adjPriceSqftInput = document.getElementById('adj-price-sqft');
 const adjBedInput = document.getElementById('adj-bed');
 const adjBathInput = document.getElementById('adj-bath');
@@ -627,11 +633,23 @@ let appraisalComps = DEFAULT_COMPS.map(c => normalizeComp(c));
 let lastAppraisal = null;
 const qualSettingInputs = {}; // factor key -> generated % input
 
+// Full/half baths combine into one decimal total for the engine and comps
+// (e.g. 2 full + 1 half = 2.5) — matches how comps already store baths.
+function totalBaths(fullInput, halfInput) {
+    return Engine.num(fullInput.value) + Engine.num(halfInput.value) * 0.5;
+}
+
+function splitBaths(total) {
+    const rounded = Math.round(Engine.num(total) * 2) / 2;
+    const full = Math.floor(rounded);
+    return { full, half: rounded - full >= 0.5 ? 1 : 0 };
+}
+
 // Shared field lists so save/restore can't drift apart (key -> input element)
 const SUBJECT_STATE_FIELDS = {
-    address: subjectAddressInput, sqft: subjectSqftInput, beds: subjectBedsInput,
-    baths: subjectBathsInput, lot: subjectLotInput, year: subjectYearInput,
-    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput
+    address: subjectAddressInput, subdivision: subjectSubdivisionInput, sqft: subjectSqftInput, beds: subjectBedsInput,
+    bathsFull: subjectBathsFullInput, bathsHalf: subjectBathsHalfInput, lot: subjectLotInput, year: subjectYearInput,
+    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput, hoa: subjectHoaInput
 };
 const SETTINGS_STATE_FIELDS = {
     pricePerSqft: adjPriceSqftInput, bed: adjBedInput, bath: adjBathInput,
@@ -842,7 +860,7 @@ function readAppraisalInputs() {
         subject: {
             sqft: subjectSqftInput.value,
             beds: subjectBedsInput.value,
-            baths: subjectBathsInput.value,
+            baths: totalBaths(subjectBathsFullInput, subjectBathsHalfInput),
             lotSqft: subjectLotInput.value,
             garageSpaces: subjectGarageInput.value,
             yearBuilt: subjectYearInput.value,
@@ -1129,7 +1147,12 @@ function applyPropertyRecord(rec, fallbackAddress) {
     };
     fill(subjectSqftInput, rec.sqft, 'sqft');
     fill(subjectBedsInput, rec.beds, 'beds');
-    fill(subjectBathsInput, rec.baths, 'baths');
+    if (rec.baths != null) {
+        const { full, half } = splitBaths(rec.baths);
+        subjectBathsFullInput.value = full;
+        subjectBathsHalfInput.value = half;
+        filled.push(`baths ${rec.baths}`);
+    }
     fill(subjectLotInput, rec.lot, 'lot');
     fill(subjectYearInput, rec.year, 'built');
     if (rec.garage != null) fill(subjectGarageInput, rec.garage, 'garage');
@@ -1461,20 +1484,23 @@ subjectAddressInput.addEventListener('blur', () => {
 // ==================== Page switching ====================
 
 function switchPage(page) {
-    const onAppraisal = page === 'appraisal';
-    pageAppraisalBtn.classList.toggle('active', onAppraisal);
-    pageCalculatorBtn.classList.toggle('active', !onAppraisal);
-    appraisalPage.classList.toggle('hidden', !onAppraisal);
-    calculatorPage.classList.toggle('hidden', onAppraisal);
-    strategySelector.classList.toggle('hidden', onAppraisal);
-    if (!onAppraisal && chart) {
+    pageSubjectBtn.classList.toggle('active', page === 'subject');
+    pageArvBtn.classList.toggle('active', page === 'arv');
+    pageCalculatorBtn.classList.toggle('active', page === 'calculator');
+    subjectPage.classList.toggle('hidden', page !== 'subject');
+    arvPage.classList.toggle('hidden', page !== 'arv');
+    calculatorPage.classList.toggle('hidden', page !== 'calculator');
+    strategySelector.classList.toggle('hidden', page !== 'calculator');
+    if (page === 'calculator' && chart) {
         // Chart may have been created while its container was hidden
         requestAnimationFrame(() => chart.resize());
     }
 }
 
-pageAppraisalBtn.addEventListener('click', () => switchPage('appraisal'));
+pageSubjectBtn.addEventListener('click', () => switchPage('subject'));
+pageArvBtn.addEventListener('click', () => switchPage('arv'));
 pageCalculatorBtn.addEventListener('click', () => switchPage('calculator'));
+continueToArvBtn.addEventListener('click', () => switchPage('arv'));
 useArvBtn.addEventListener('click', useAppraisedArv);
 addCompBtn.addEventListener('click', () => {
     if (appraisalComps.length >= MAX_COMPS) return;
@@ -1482,7 +1508,7 @@ addCompBtn.addEventListener('click', () => {
     appraisalComps.push({
         ...compTemplate(),
         sqft: Engine.num(subjectSqftInput.value), beds: Engine.num(subjectBedsInput.value),
-        baths: Engine.num(subjectBathsInput.value), lotSqft: Engine.num(subjectLotInput.value),
+        baths: totalBaths(subjectBathsFullInput, subjectBathsHalfInput), lotSqft: Engine.num(subjectLotInput.value),
         garageSpaces: Engine.num(subjectGarageInput.value), yearBuilt: Engine.num(subjectYearInput.value),
         pool: subjectPoolInput.value, stories: subjectStoriesInput.value
     });
@@ -1491,14 +1517,15 @@ addCompBtn.addEventListener('click', () => {
 });
 
 [
-    subjectAddressInput, subjectSqftInput, subjectBedsInput, subjectBathsInput,
+    subjectAddressInput, subjectSubdivisionInput, subjectSqftInput, subjectBedsInput,
+    subjectBathsFullInput, subjectBathsHalfInput,
     subjectLotInput, subjectYearInput, subjectGarageInput,
     adjPriceSqftInput, adjBedInput, adjBathInput, adjCondAvgInput,
     adjCondDatedInput, adjAppreciationInput, adjLotInput, adjGarageInput,
     adjPoolInput, adjYearInput, adjStoryInput
 ].forEach(input => input.addEventListener('input', recalcAppraisal));
 
-[subjectStoriesInput, subjectPoolInput].forEach(sel => sel.addEventListener('change', recalcAppraisal));
+[subjectStoriesInput, subjectPoolInput, subjectHoaInput].forEach(sel => sel.addEventListener('change', recalcAppraisal));
 [mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
 
 lookupBtn.addEventListener('click', lookupSubjectProperty);
@@ -1548,7 +1575,7 @@ try {
 renderComps();
 recalcAppraisal();
 updateAbsorption();
-switchPage('appraisal'); // step 1 first
+switchPage('subject'); // step 1 first
 
 // ==================== Native app (Capacitor) integration ====================
 // The store builds (see native/) run this same file inside a Capacitor
@@ -1562,13 +1589,15 @@ if (capacitorGlobal && capacitorGlobal.isNativePlatform && capacitorGlobal.isNat
     // window.print() does nothing inside WKWebView / Android WebView
     document.getElementById('export-pdf-btn').classList.add('hidden');
 
-    // Android hardware back: calculator page → appraisal page → home screen
+    // Android hardware back: calculator → ARV estimation → subject → home screen
     if (nativePlugins.App) {
         nativePlugins.App.addListener('backButton', () => {
-            if (calculatorPage.classList.contains('hidden')) {
-                nativePlugins.App.exitApp();
+            if (!calculatorPage.classList.contains('hidden')) {
+                switchPage('arv');
+            } else if (!arvPage.classList.contains('hidden')) {
+                switchPage('subject');
             } else {
-                switchPage('appraisal');
+                nativePlugins.App.exitApp();
             }
         });
     }

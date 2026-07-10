@@ -1,9 +1,10 @@
 # Deal Underwriter Calculator (PWA)
 
-Real-estate deal underwriting app: **Step 1** ARV desktop appraisal (subject +
-comps adjustment grid + market absorption meter) → **Step 2** fix&flip / rental
-deal calculator with stress-test sliders. Vanilla JS, no build system, no
-framework. Deployed to GitHub Pages from `main`.
+Real-estate deal underwriting app: **Step 1** subject property info (address +
+physical details) → **Step 2** ARV estimation (adjustment grid + comps +
+market absorption meter) → **Step 3** fix&flip / rental deal calculator with
+stress-test sliders. Vanilla JS, no build system, no framework. Deployed to
+GitHub Pages from `main`.
 
 ## Files
 
@@ -14,7 +15,7 @@ framework. Deployed to GitHub Pages from `main`.
   per keystroke). Dynamic icons are inline SVG constants — Lucide's
   `createIcons()` runs once at load and replaces `<i>` tags with static SVGs,
   so swapping `data-lucide` afterwards does nothing.
-- `index.html` — both pages; CDN deps pinned + deferred
+- `index.html` — all three pages; CDN deps pinned + deferred
   (`chart.js@4.4.3`, `lucide@0.462.0`).
 - `sw.js` — service worker. **RULE: bump `CACHE_NAME` on every deployable
   change.** Same-origin = network-first; CDN = cache-first; live API hosts and
