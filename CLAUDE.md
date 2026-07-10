@@ -56,10 +56,14 @@ framework. Deployed to GitHub Pages from `main`.
   geocoder (JSONP only — no CORS) → Photon/OSM (CORS-open, weak US
   house-number coverage).
 - **Property record ladder** (in `lookupSubjectProperty`): localStorage cache
-  → Worker `/property` (realtor.com GraphQL — `operationName` is REQUIRED in
-  the POST body or it 400s) → RentCast direct (CORS-open, key in browser,
-  50/mo free, only HTTP-200s billed, lat/long radius fallback) → Worker
-  `/rentcast` → Melissa direct (~1,000 credits/mo) → Worker `/melissa`.
+  → browser-pasted keys as deliberate overrides (RentCast direct with
+  variant + lat/long-radius retries, then Melissa direct) → Worker `/lookup`,
+  which runs the canonical server-side order in ONE round trip:
+  RentCast (secret) → Melissa (secret) → realtor.com GraphQL (keyless;
+  `operationName` is REQUIRED in the POST body or it 400s). Providers whose
+  secret is unset are skipped. RentCast: 50/mo free, only HTTP-200s billed.
+  Melissa: ~1,000 credits/mo free. Worker also keeps `/property`, `/rentcast`,
+  `/melissa`, `/health` as individual debug routes.
 - **Dead ends — do not retry**: Zillow & Redfin unofficial APIs
   (TLS-fingerprint WAF blocks even server-side); realtor.com detail endpoints
   are CORS-blocked from browsers (that's why the Worker exists).
