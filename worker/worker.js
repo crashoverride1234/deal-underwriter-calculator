@@ -7,6 +7,10 @@
  *
  * Routes (all GET):
  *   /health                        → { ok, providers } — connectivity check
+ *   /lookup?address=...[&mpr_id=][&latitude=&longitude=]
+ *                                  → unified ladder: RentCast (secret) →
+ *                                    Melissa (secret) → realtor.com (keyless);
+ *                                    first hit wins, source labeled
  *   /property?mpr_id=<id>          → realtor.com GraphQL (keyless), normalized
  *   /property?address=<street...>  → same, resolving the address to an
  *                                    mpr_id via realtor.com geo-suggest first
@@ -175,15 +179,10 @@ async function resolveMprId(address) {
   return first && first.mpr_id ? String(first.mpr_id) : null;
 }
 
-async function handleRealtor(params, cors) {
-  let mprId = params.get('mpr_id');
-  if (!mprId && params.get('address')) {
-    mprId = await resolveMprId(params.get('address'));
-    if (!mprId) return json({ error: 'no record' }, 404, cors);
-  }
-  if (!mprId || !/^\d+$/.test(mprId)) {
-    return json({ error: 'mpr_id (numeric) or address is required' }, 400, cors);
-  }
+// Record-or-null fetchers (throw on upstream failure) — shared by the
+// individual routes and the unified /lookup ladder
+
+async function realtorRecord(mprId) {
   const res = await fetch('https://www.realtor.com/frontdoor/graphql', {
     method: 'POST',
     headers: {
@@ -198,14 +197,98 @@ async function handleRealtor(params, cors) {
       variables: { property_id: String(mprId) }
     })
   });
-  if (!res.ok) {
-    return json({ error: `realtor.com upstream HTTP ${res.status}` }, 502, cors);
-  }
+  if (!res.ok) throw new Error(`realtor.com upstream HTTP ${res.status}`);
   const data = await res.json();
   const home = data && data.data && data.data.home;
-  if (!home) return json({ error: 'no record' }, 404, cors);
+  if (!home) return null;
   const rec = realtorToRecord(home);
-  return hasData(rec) ? json(rec, 200, cors) : json({ error: 'no usable fields' }, 404, cors);
+  return hasData(rec) ? rec : null;
+}
+
+async function rentcastRecord(upstreamParams, env) {
+  const res = await fetch(`https://api.rentcast.io/v1/properties?${upstreamParams}`, {
+    headers: { 'X-Api-Key': env.RENTCAST_API_KEY, 'Accept': 'application/json' }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`RentCast upstream HTTP ${res.status}`);
+  const data = await res.json();
+  const p = Array.isArray(data) ? data[0] : data;
+  if (!p) return null;
+  const rec = rentcastToRecord(p);
+  return hasData(rec) ? rec : null;
+}
+
+async function melissaRecord(ff, env) {
+  const res = await fetch(
+    `https://property.melissadata.net/v4/WEB/LookupProperty?id=${encodeURIComponent(env.MELISSA_API_KEY)}&ff=${encodeURIComponent(ff)}&format=json&cols=GrpAll`,
+    { headers: { 'Accept': 'application/json' } }
+  );
+  if (!res.ok) throw new Error(`Melissa upstream HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.TransmissionResults && /GE0[1-9]/.test(data.TransmissionResults)) {
+    throw new Error('Melissa key rejected');
+  }
+  const r = (data.Records || [])[0];
+  if (!r) return null;
+  const rec = melissaToRecord(r);
+  return hasData(rec) ? rec : null;
+}
+
+// Unified provider ladder: RentCast (primary) → Melissa (secondary) →
+// realtor.com (tertiary, keyless). Providers without a configured secret
+// are skipped; the first record wins and carries its source label.
+async function handleLookup(params, env, cors) {
+  const address = params.get('address');
+  if (!address) return json({ error: 'address is required' }, 400, cors);
+  const providerErrors = [];
+
+  if (env.RENTCAST_API_KEY) {
+    try {
+      let rec = await rentcastRecord(new URLSearchParams({ address }), env);
+      if (!rec && params.get('latitude') && params.get('longitude')) {
+        rec = await rentcastRecord(new URLSearchParams({
+          latitude: params.get('latitude'), longitude: params.get('longitude'),
+          radius: '0.05', limit: '1'
+        }), env);
+      }
+      if (rec) return json(rec, 200, cors);
+    } catch (e) { providerErrors.push('RentCast: ' + e.message); }
+  }
+
+  if (env.MELISSA_API_KEY) {
+    try {
+      const rec = await melissaRecord(address, env);
+      if (rec) return json(rec, 200, cors);
+    } catch (e) { providerErrors.push('Melissa: ' + e.message); }
+  }
+
+  try {
+    let mprId = params.get('mpr_id');
+    if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
+    if (mprId && /^\d+$/.test(mprId)) {
+      const rec = await realtorRecord(mprId);
+      if (rec) return json(rec, 200, cors);
+    }
+  } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
+
+  return json({ error: 'no record', providerErrors }, 404, cors);
+}
+
+async function handleRealtor(params, cors) {
+  let mprId = params.get('mpr_id');
+  if (!mprId && params.get('address')) {
+    mprId = await resolveMprId(params.get('address'));
+    if (!mprId) return json({ error: 'no record' }, 404, cors);
+  }
+  if (!mprId || !/^\d+$/.test(mprId)) {
+    return json({ error: 'mpr_id (numeric) or address is required' }, 400, cors);
+  }
+  try {
+    const rec = await realtorRecord(mprId);
+    return rec ? json(rec, 200, cors) : json({ error: 'no record' }, 404, cors);
+  } catch (e) {
+    return json({ error: e.message }, 502, cors);
+  }
 }
 
 async function handleRentcast(params, env, cors) {
@@ -216,35 +299,24 @@ async function handleRentcast(params, env, cors) {
     if (params.get(k)) upstream.set(k, params.get(k));
   }
   if (![...upstream.keys()].length) return json({ error: 'address or latitude/longitude required' }, 400, cors);
-  const res = await fetch(`https://api.rentcast.io/v1/properties?${upstream}`, {
-    headers: { 'X-Api-Key': env.RENTCAST_API_KEY, 'Accept': 'application/json' }
-  });
-  if (res.status === 404) return json({ error: 'no record' }, 404, cors);
-  if (!res.ok) return json({ error: `RentCast upstream HTTP ${res.status}` }, 502, cors);
-  const data = await res.json();
-  const p = Array.isArray(data) ? data[0] : data;
-  if (!p) return json({ error: 'no record' }, 404, cors);
-  const rec = rentcastToRecord(p);
-  return hasData(rec) ? json(rec, 200, cors) : json({ error: 'no usable fields' }, 404, cors);
+  try {
+    const rec = await rentcastRecord(upstream, env);
+    return rec ? json(rec, 200, cors) : json({ error: 'no record' }, 404, cors);
+  } catch (e) {
+    return json({ error: e.message }, 502, cors);
+  }
 }
 
 async function handleMelissa(params, env, cors) {
   if (!env.MELISSA_API_KEY) return json({ error: 'MELISSA_API_KEY not configured' }, 501, cors);
   const ff = params.get('ff');
   if (!ff) return json({ error: 'ff (free-form address) required' }, 400, cors);
-  const res = await fetch(
-    `https://property.melissadata.net/v4/WEB/LookupProperty?id=${encodeURIComponent(env.MELISSA_API_KEY)}&ff=${encodeURIComponent(ff)}&format=json&cols=GrpAll`,
-    { headers: { 'Accept': 'application/json' } }
-  );
-  if (!res.ok) return json({ error: `Melissa upstream HTTP ${res.status}` }, 502, cors);
-  const data = await res.json();
-  if (data.TransmissionResults && /GE0[1-9]/.test(data.TransmissionResults)) {
-    return json({ error: 'Melissa key rejected' }, 502, cors);
+  try {
+    const rec = await melissaRecord(ff, env);
+    return rec ? json(rec, 200, cors) : json({ error: 'no record' }, 404, cors);
+  } catch (e) {
+    return json({ error: e.message }, 502, cors);
   }
-  const r = (data.Records || [])[0];
-  if (!r) return json({ error: 'no record' }, 404, cors);
-  const rec = melissaToRecord(r);
-  return hasData(rec) ? json(rec, 200, cors) : json({ error: 'no usable fields' }, 404, cors);
 }
 
 // ---- Entry ----
@@ -279,6 +351,8 @@ export default {
               melissa: Boolean(env.MELISSA_API_KEY)
             }
           }, 200, cors);
+        case '/lookup':
+          return await handleLookup(url.searchParams, env, cors);
         case '/property':
           return await handleRealtor(url.searchParams, cors);
         case '/rentcast':

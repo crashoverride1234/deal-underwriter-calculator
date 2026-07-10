@@ -1181,38 +1181,15 @@ async function lookupSubjectProperty() {
     const problems = [];
     try {
         let rec = null;
-        // 1. Worker + realtor.com (keyless, richest data): use the picked
-        //    suggestion's mpr_id when we have one, otherwise let the worker
-        //    resolve the address itself — works for Census/Photon picks too
-        if (worker) {
-            try {
-                rec = await workerFetchRecord(lastSelectedMprId
-                    ? `/property?mpr_id=${encodeURIComponent(lastSelectedMprId)}`
-                    : `/property?address=${encodeURIComponent(address)}`);
-            } catch (err) {
-                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
-            }
-        }
-        // 2. RentCast with a browser-side key
-        if (!rec && rcKey) {
+        // 1-2. Browser-pasted keys are deliberate user overrides — they run
+        //      before the worker so a power user controls their own quota
+        if (rcKey) {
             try {
                 rec = await rentcastLookup(address, rcKey);
             } catch (err) {
                 problems.push(err instanceof TypeError ? 'RentCast: network error' : err.message);
             }
         }
-        // 3. RentCast through the worker (server-side key, if configured)
-        if (!rec && worker && !rcKey) {
-            try {
-                rec = await workerFetchRecord(`/rentcast?address=${encodeURIComponent(address)}`);
-                if (!rec && lastSelectedCoords) {
-                    rec = await workerFetchRecord(`/rentcast?latitude=${lastSelectedCoords.lat}&longitude=${lastSelectedCoords.lon}&radius=0.05&limit=1`);
-                }
-            } catch (err) {
-                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker RentCast: ' + err.message);
-            }
-        }
-        // 4. Melissa with a browser-side key
         if (!rec && mdKey) {
             try {
                 rec = await melissaLookup(address, mdKey);
@@ -1220,12 +1197,19 @@ async function lookupSubjectProperty() {
                 problems.push(err instanceof TypeError ? 'Melissa: network error' : err.message);
             }
         }
-        // 5. Melissa through the worker (server-side key, if configured)
-        if (!rec && worker && !mdKey) {
+        // 3. Worker unified ladder (one round trip): RentCast → Melissa
+        //    (server-side secrets, skipped when unset) → realtor.com keyless
+        if (!rec && worker) {
             try {
-                rec = await workerFetchRecord(`/melissa?ff=${encodeURIComponent(address)}`);
+                const q = new URLSearchParams({ address });
+                if (lastSelectedMprId) q.set('mpr_id', lastSelectedMprId);
+                if (lastSelectedCoords) {
+                    q.set('latitude', String(lastSelectedCoords.lat));
+                    q.set('longitude', String(lastSelectedCoords.lon));
+                }
+                rec = await workerFetchRecord(`/lookup?${q}`);
             } catch (err) {
-                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker Melissa: ' + err.message);
+                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
             }
         }
         if (rec) {
