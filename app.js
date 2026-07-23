@@ -1110,14 +1110,16 @@ const CONFIDENCE_STYLES = {
 function updateSubjectSummary() {
     const street = subjectAddressInput.value.split(',')[0].trim();
     const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
-    subjectSummaryEl.textContent = [
-        street || 'Subject property',
+    // Static tag via innerHTML, user-typed address via text node (no injection)
+    subjectSummaryEl.innerHTML = '<span class="subject-summary-tag">SUBJECT PROP</span>';
+    subjectSummaryEl.appendChild(document.createTextNode([
+        street || 'no address set',
         `${Engine.num(subjectSqftInput.value).toLocaleString()} sqft`,
         `${Engine.num(subjectLotInput.value).toLocaleString()} sqft lot`,
         `built ${subjectYearInput.value || '—'}`,
         `${subjectStoriesInput.value} story`,
         `${subjectBedsInput.value} bd / ${baths} ba / ${subjectGarageInput.value} gar`
-    ].join('  ·  ');
+    ].join('  ·  ')));
     subjectSummaryEl.classList.remove('hidden');
 }
 
