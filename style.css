@@ -729,6 +729,63 @@ input[type="range"]::-webkit-slider-thumb:active {
     -webkit-text-fill-color: transparent;
 }
 
+/* Site map & influence scan */
+.site-map {
+    height: 280px;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    margin-top: 0.25rem;
+    z-index: 0; /* keep Leaflet panes under the address autocomplete */
+}
+
+.site-influences {
+    margin-top: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+}
+
+.influence-chip {
+    padding: 0.4rem 0.7rem;
+    border-radius: 0.4rem;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.influence-chip.bad {
+    background: rgba(239, 68, 68, 0.08);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: var(--accent-danger);
+}
+
+.influence-chip.good {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: var(--accent-success);
+}
+
+.influence-disclaimer {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+    margin-top: 0.2rem;
+}
+
+.comp-site-scan {
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.4rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+}
+
 /* Comp suggestion candidates panel */
 .comp-candidates {
     margin-bottom: 1rem;

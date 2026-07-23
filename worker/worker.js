@@ -195,6 +195,8 @@ function realtorToRecord(home) {
     ownerType: null,
     ownerOccupied: null,
     ownerMailing: null,
+    lat: addr.coordinate ? addr.coordinate.lat : null,
+    lon: addr.coordinate ? addr.coordinate.lon : null,
     formattedAddress: formatted,
     source: 'realtor.com',
     extra: {
@@ -255,6 +257,8 @@ function rentcastToRecord(p) {
     ownerType: owner.type || null,
     ownerOccupied: (p.ownerOccupied === true || p.ownerOccupied === false) ? p.ownerOccupied : null,
     ownerMailing: owner.mailingAddress && owner.mailingAddress.formattedAddress ? owner.mailingAddress.formattedAddress : null,
+    lat: p.latitude != null ? p.latitude : null,
+    lon: p.longitude != null ? p.longitude : null,
     formattedAddress: p.formattedAddress || null,
     source: 'RentCast'
   };

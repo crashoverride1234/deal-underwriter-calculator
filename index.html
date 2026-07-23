@@ -8,6 +8,8 @@
     <!-- Pinned CDN dependencies, deferred off the critical path -->
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js"></script>
     <script defer src="https://unpkg.com/lucide@0.462.0/dist/umd/lucide.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <!-- Application scripts (engine must load before app) -->
     <script defer src="engine.js"></script>
     <script defer src="app.js"></script>
@@ -141,6 +143,14 @@
                                 <option value="yes">HOA</option>
                             </select>
                         </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Site Map &amp; Influences</label>
+                        <div id="site-map" class="site-map hidden"></div>
+                        <button id="scan-site-btn" class="btn btn-secondary" style="width: 100%; margin-top: 0.5rem;">
+                            🛰 Scan Site (roads · rail · power · commercial · parks · pools)
+                        </button>
+                        <div id="site-influences" class="site-influences hidden"></div>
                     </div>
                     <details class="settings-details">
                         <summary>Property Facts</summary>

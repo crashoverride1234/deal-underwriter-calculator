@@ -643,7 +643,8 @@ function compTemplate() {
         subdivision: '', propType: '', county: '', zoning: '', apn: '',
         garageType: '', foundation: '', roof: '', exterior: '', heating: '', cooling: '',
         assessedValue: '', annualTaxes: '', lastSaleDate: '', lastSalePrice: '', hoaFee: '',
-        ownerNames: '', ownerType: '', ownerOccupied: '', ownerMailing: ''
+        ownerNames: '', ownerType: '', ownerOccupied: '', ownerMailing: '',
+        lat: '', lon: '', siteScan: ''
     };
 }
 
@@ -1028,6 +1029,11 @@ function renderComps() {
                             <input type="text" data-field="ownerMailing">
                         </div>
                     </div>
+                    <div class="comp-ratings-title">Site</div>
+                    <button class="btn btn-secondary" data-action="site-scan" style="width: 100%; padding: 0.4rem; font-size: 0.78rem;">
+                        🛰 Scan Site Influences
+                    </button>
+                    <div class="comp-site-scan ${comp.siteScan ? '' : 'hidden'}" data-site-scan></div>
                     <div class="comp-ratings-title">Location &amp; Quality (comp vs subject)</div>
                     ${QUALITATIVE_FACTORS.map(f => `
                     <div class="comp-rating-row">
@@ -1068,10 +1074,46 @@ function renderComps() {
             card.querySelector('.address-suggestions'),
             (s) => {
                 comp.label = s.line1 || s.text;
+                if (s.lat != null) { comp.lat = s.lat; comp.lon = s.lon; }
                 lookupCompProperty(comp, s.text, s.mprId || null,
                     (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null);
             }
         );
+        // Site influence scan for this comp — informs the Adverse Location /
+        // Lot Placement ratings right below it
+        const scanEl = card.querySelector('[data-site-scan]');
+        if (comp.siteScan) scanEl.textContent = comp.siteScan;
+        card.querySelector('[data-action="site-scan"]').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true;
+            btn.textContent = 'Scanning…';
+            try {
+                let lat = parseFloat(comp.lat), lon = parseFloat(comp.lon);
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+                    // Street-only label + the subject's city/state tail for context
+                    const tail = subjectAddressInput.value.split(',').slice(1).join(',').trim();
+                    const list = await realtorSuggestions(tail ? `${comp.label}, ${tail}` : comp.label);
+                    if (list.length && list[0].lat != null) {
+                        lat = list[0].lat; lon = list[0].lon;
+                        comp.lat = lat; comp.lon = lon;
+                    }
+                }
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+                    comp.siteScan = 'Could not locate this address on the map — pick it from the autocomplete first.';
+                } else {
+                    const nearest = await overpassScan(lat, lon);
+                    const chips = influenceChips(nearest);
+                    comp.siteScan = chips.length
+                        ? chips.map(c => (c.kind === 'bad' ? '⚠ ' : c.kind === 'good' ? '✓ ' : '') + c.text).join('  ·  ')
+                        : 'No mapped influences within ~1,300 ft.';
+                    if (nearest.pool) comp.pool = 'yes';
+                }
+            } catch (err) {
+                comp.siteScan = 'Scan failed — Overpass may be busy; try again shortly.';
+            }
+            renderComps();
+            recalcAppraisal();
+        });
         compsContainer.appendChild(card);
     });
     addCompBtn.disabled = appraisalComps.length >= MAX_COMPS;
@@ -1197,6 +1239,7 @@ function addCandidateAsComp(c) {
         appraisalComps.push(comp);
     }
     comp.label = c.address;
+    if (c.lat != null && c.lon != null) { comp.lat = c.lat; comp.lon = c.lon; }
     if (c.price > 0) comp.salePrice = c.price;
     if (c.sqft) comp.sqft = c.sqft;
     if (c.beds != null) comp.beds = c.beds;
@@ -1262,6 +1305,175 @@ function renderCandidates(list) {
 }
 
 suggestCompsBtn.addEventListener('click', suggestComps);
+
+// ==================== Site Map & Influence Scan ====================
+// Leaflet + Esri imagery for the eyeball read (pools, greenbelts, what the
+// lot actually backs to); Overpass (OSM, keyless + CORS-open) for the
+// programmatic read: nearest major road / rail / power line / commercial
+// and parks or green space, plus mapped swimming pools on the parcel.
+
+const siteMapEl = document.getElementById('site-map');
+const scanSiteBtn = document.getElementById('scan-site-btn');
+const siteInfluencesEl = document.getElementById('site-influences');
+let siteMap = null;
+let siteMarker = null;
+
+function metersToFeet(m) { return Math.round(m * 3.28084); }
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+    const rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad;
+    const dLon = (lon2 - lon1) * rad;
+    const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+    return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function resolveSubjectCoords() {
+    if (lastSelectedCoords) return lastSelectedCoords;
+    const address = subjectAddressInput.value.trim();
+    if (!address) return null;
+    const list = await realtorSuggestions(address);
+    if (list.length && list[0].lat != null) {
+        lastSelectedCoords = { lat: list[0].lat, lon: list[0].lon };
+        return lastSelectedCoords;
+    }
+    return null;
+}
+
+function showSiteMap(lat, lon) {
+    if (typeof L === 'undefined') return; // CDN unavailable — scan still works
+    siteMapEl.classList.remove('hidden');
+    if (!siteMap) {
+        siteMap = L.map(siteMapEl).setView([lat, lon], 18);
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19,
+            attribution: 'Imagery © Esri'
+        }).addTo(siteMap);
+        siteMarker = L.marker([lat, lon]).addTo(siteMap);
+    } else {
+        siteMap.setView([lat, lon], 18);
+        siteMarker.setLatLng([lat, lon]);
+    }
+    // Container may have been hidden when Leaflet measured it
+    setTimeout(() => siteMap.invalidateSize(), 60);
+}
+
+// Nearest mapped feature per category around a point (~1,300 ft radius;
+// pools only within ~115 ft so a neighbor's pool doesn't read as ours)
+async function overpassScan(lat, lon) {
+    const q = `[out:json][timeout:25];(
+way(around:400,${lat},${lon})[highway~"^(motorway|trunk|primary|secondary)$"];
+way(around:400,${lat},${lon})[railway=rail];
+way(around:400,${lat},${lon})[power=line];
+node(around:400,${lat},${lon})[power=tower];
+way(around:400,${lat},${lon})[landuse~"^(commercial|retail|industrial)$"];
+way(around:400,${lat},${lon})[leisure~"^(park|nature_reserve|golf_course)$"];
+way(around:400,${lat},${lon})[landuse=recreation_ground];
+way(around:35,${lat},${lon})[leisure=swimming_pool];
+);out tags geom 80;`;
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(q)
+    });
+    if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+    const data = await res.json();
+
+    const nearest = {}; // category -> { dist (m), name }
+    const consider = (cat, dist, name) => {
+        if (!nearest[cat] || dist < nearest[cat].dist) nearest[cat] = { dist, name };
+    };
+    for (const el of data.elements || []) {
+        const t = el.tags || {};
+        let dist = Infinity;
+        if (el.type === 'node' && el.lat != null) {
+            dist = haversineMeters(lat, lon, el.lat, el.lon);
+        } else if (el.geometry) {
+            for (const p of el.geometry) {
+                const d = haversineMeters(lat, lon, p.lat, p.lon);
+                if (d < dist) dist = d;
+            }
+        }
+        if (!Number.isFinite(dist)) continue;
+        if (t.highway) consider('road', dist, t.name || 'major road');
+        else if (t.railway) consider('rail', dist, t.name || 'railroad');
+        else if (t.power) consider('power', dist, 'power line');
+        else if (t.landuse === 'commercial' || t.landuse === 'retail' || t.landuse === 'industrial') {
+            consider('commercial', dist, t.name || t.landuse);
+        } else if (t.leisure === 'swimming_pool') consider('pool', dist, 'pool');
+        else if (t.leisure || t.landuse) consider('green', dist, t.name || 'park / green space');
+    }
+    return nearest;
+}
+
+// Chips: bad = likely external obsolescence, good = value-positive backing
+function influenceChips(nearest) {
+    const chips = [];
+    const ft = (d) => `${metersToFeet(d).toLocaleString()} ft`;
+    if (nearest.road) chips.push({ kind: nearest.road.dist < 120 ? 'bad' : 'note', text: `Major road: ${nearest.road.name} · ${ft(nearest.road.dist)}` });
+    if (nearest.rail) chips.push({ kind: nearest.rail.dist < 200 ? 'bad' : 'note', text: `Railroad · ${ft(nearest.rail.dist)}` });
+    if (nearest.power) chips.push({ kind: nearest.power.dist < 100 ? 'bad' : 'note', text: `Power line · ${ft(nearest.power.dist)}` });
+    if (nearest.commercial) chips.push({ kind: nearest.commercial.dist < 120 ? 'bad' : 'note', text: `Commercial: ${nearest.commercial.name} · ${ft(nearest.commercial.dist)}` });
+    if (nearest.green) {
+        const backs = nearest.green.dist < 100;
+        chips.push({ kind: backs ? 'good' : 'note', text: `${nearest.green.name} · ${ft(nearest.green.dist)}${backs ? ' — backs to green space' : ''}` });
+    }
+    if (nearest.pool) chips.push({ kind: 'good', text: 'Pool mapped on parcel' });
+    return chips;
+}
+
+function renderSiteInfluences(nearest) {
+    siteInfluencesEl.innerHTML = '';
+    siteInfluencesEl.classList.remove('hidden');
+    const chips = influenceChips(nearest);
+    if (!chips.length) {
+        const none = document.createElement('div');
+        none.className = 'influence-chip note';
+        none.textContent = 'No mapped influences within ~1,300 ft.';
+        siteInfluencesEl.appendChild(none);
+    }
+    chips.forEach(c => {
+        const div = document.createElement('div');
+        div.className = `influence-chip ${c.kind}`;
+        div.textContent = (c.kind === 'bad' ? '⚠ ' : c.kind === 'good' ? '✓ ' : '') + c.text;
+        siteInfluencesEl.appendChild(div);
+    });
+    const note = document.createElement('div');
+    note.className = 'influence-disclaimer';
+    note.textContent = 'OpenStreetMap data — absence of a feature is not proof it isn\'t there. '
+        + 'Use these for the Adverse Location / Lot Placement ratings on the comp cards.';
+    siteInfluencesEl.appendChild(note);
+}
+
+async function scanSubjectSite() {
+    scanSiteBtn.disabled = true;
+    siteInfluencesEl.classList.remove('hidden');
+    siteInfluencesEl.textContent = 'Reading map data…';
+    try {
+        const coords = await resolveSubjectCoords();
+        if (!coords) {
+            siteInfluencesEl.textContent = 'Set the property address first — the scan reads the map around it.';
+            return;
+        }
+        showSiteMap(coords.lat, coords.lon);
+        const nearest = await overpassScan(coords.lat, coords.lon);
+        renderSiteInfluences(nearest);
+        if (nearest.pool && subjectPoolInput.value !== 'yes') {
+            subjectPoolInput.value = 'yes';
+            recalcAppraisal();
+            const auto = document.createElement('div');
+            auto.className = 'influence-chip good';
+            auto.textContent = '✓ Pool field auto-set to Yes from the map';
+            siteInfluencesEl.appendChild(auto);
+        }
+    } catch (e) {
+        siteInfluencesEl.textContent = 'Map scan failed — Overpass may be busy; try again in a minute.';
+    } finally {
+        scanSiteBtn.disabled = false;
+    }
+}
+
+scanSiteBtn.addEventListener('click', scanSubjectSite);
 
 function readAppraisalInputs() {
     const qualitativeAdjPct = {};
@@ -1536,6 +1748,8 @@ function rentcastToRecord(p) {
         ownerType: owner.type || null,
         ownerOccupied: (p.ownerOccupied === true || p.ownerOccupied === false) ? p.ownerOccupied : null,
         ownerMailing: owner.mailingAddress && owner.mailingAddress.formattedAddress ? owner.mailingAddress.formattedAddress : null,
+        lat: p.latitude != null ? p.latitude : null,
+        lon: p.longitude != null ? p.longitude : null,
         formattedAddress: p.formattedAddress || null,
         source: 'RentCast'
     };
@@ -1747,6 +1961,11 @@ function applyPropertyRecord(rec, fallbackAddress) {
     }
 
     if (rec.formattedAddress) subjectAddressInput.value = rec.formattedAddress;
+    // A record with coordinates unlocks the site map/scan even when the
+    // address came from cache rather than a picked suggestion
+    if (!lastSelectedCoords && rec.lat != null && rec.lon != null) {
+        lastSelectedCoords = { lat: rec.lat, lon: rec.lon };
+    }
     setLookupStatus(
         filled.length
             ? `✓ ${rec.formattedAddress || fallbackAddress} (${rec.source}): ${filled.join(' · ')}. Review and override anything below.`
@@ -1862,6 +2081,7 @@ function applyRecordToComp(comp, rec) {
         comp.ownerOccupied = rec.ownerOccupied ? 'yes' : 'no';
     }
     set('ownerMailing', rec.ownerMailing);
+    if (rec.lat != null && rec.lon != null) { comp.lat = rec.lat; comp.lon = rec.lon; }
     if (rec.lastSalePrice > 0) comp.salePrice = rec.lastSalePrice;
     if (rec.lastSaleDate) {
         const months = Math.round((Date.now() - new Date(rec.lastSaleDate).getTime()) / (1000 * 60 * 60 * 24 * 30.44));
@@ -2098,6 +2318,7 @@ attachAddressAutocomplete(subjectAddressInput, addressSuggestionsBox, (s) => {
     lastSelectedCoords = (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null;
     lastSelectedMprId = s.mprId || null;
     subjectAddressInput.value = s.text;
+    if (lastSelectedCoords) showSiteMap(lastSelectedCoords.lat, lastSelectedCoords.lon);
     recalcAppraisal(); // persists the chosen address
     const anyProvider = rentcastKeyInput.value.trim() || melissaKeyInput.value.trim() || workerBase();
     if (anyProvider) {

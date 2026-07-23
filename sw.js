@@ -1,8 +1,9 @@
-const CACHE_NAME = 'underwriter-v22';
+const CACHE_NAME = 'underwriter-v23';
 
 // Live data APIs — never cache these (autocomplete queries and property
-// lookups must always be fresh, and caching every keystroke bloats storage)
-const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io', 'parser-external.geo.moveaws.com', 'property.melissadata.net'];
+// lookups must always be fresh, and caching every keystroke bloats storage).
+// Map tiles are network-only too: caching every viewed tile bloats storage.
+const NETWORK_ONLY_HOSTS = ['api.rentcast.io', 'photon.komoot.io', 'parser-external.geo.moveaws.com', 'property.melissadata.net', 'overpass-api.de', 'server.arcgisonline.com'];
 const NETWORK_ONLY_SUFFIXES = ['.workers.dev']; // user-deployed data proxy
 const PRECACHE_URLS = [
   './',

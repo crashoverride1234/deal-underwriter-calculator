@@ -74,6 +74,12 @@ GitHub Pages from `main`.
   similarity to the live subject. TX non-disclosure: prices are list-at-sale
   proxies — the UI says to verify against MLS. NTREIS BBO (Trestle) remains
   the endgame for true sold prices.
+- **Site map & influence scan**: Leaflet 1.9.4 (pinned unpkg CDN) + Esri
+  World Imagery tiles (keyless) on the subject page; Overpass API
+  (`overpass-api.de`, keyless, CORS-open) reads nearest major road / rail /
+  power line / commercial / park-green-space and parcel-mapped pools within
+  ~400 m. Subject scan + per-comp scan buttons; comp coords ride along on
+  records/candidates (`lat`/`lon`). OSM absence ≠ absence in reality.
 - **Dead ends — do not retry**: Zillow & Redfin unofficial APIs
   (TLS-fingerprint WAF blocks even server-side); realtor.com detail endpoints
   are CORS-blocked from browsers (that's why the Worker exists).
