@@ -1,0 +1,61 @@
+# TestFlight upload lane — runs in CI (macos) with App Store Connect API key
+# auth only; no certificates or profiles are stored anywhere. Cloud signing
+# (-allowProvisioningUpdates) creates/refreshes them on Apple's side.
+#
+# Required env (GitHub secrets): ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8,
+# APPLE_TEAM_ID. Build number comes from GITHUB_RUN_NUMBER.
+
+APP_ID = "io.github.crashoverride1234.underwriter"
+APP_NAME = "Antigravity Underwriter"
+
+default_platform(:ios)
+
+platform :ios do
+  lane :beta do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_KEY_P8")
+    )
+
+    # Create the App Store Connect app record + bundle id if missing
+    # (idempotent). Tolerated on failure: if the record already exists or
+    # produce hits an API quirk, the upload step gives the definitive error.
+    begin
+      produce(
+        api_key: api_key,
+        app_identifier: APP_ID,
+        app_name: APP_NAME,
+        language: "en-US",
+        sku: "underwriter-001"
+      )
+    rescue => e
+      UI.important("produce skipped/failed (fine if the app record already exists): #{e.message}")
+    end
+
+    key_path = File.absolute_path("AuthKey_#{ENV.fetch('ASC_KEY_ID')}.p8")
+    File.write(key_path, ENV.fetch("ASC_KEY_P8"))
+
+    build_app(
+      project: "../App/App.xcodeproj",
+      scheme: "App",
+      configuration: "Release",
+      export_method: "app-store",
+      output_directory: "build",
+      xcargs: [
+        "-allowProvisioningUpdates",
+        "-authenticationKeyPath #{key_path}",
+        "-authenticationKeyID #{ENV.fetch('ASC_KEY_ID')}",
+        "-authenticationKeyIssuerID #{ENV.fetch('ASC_ISSUER_ID')}",
+        "DEVELOPMENT_TEAM=#{ENV.fetch('APPLE_TEAM_ID')}",
+        "CODE_SIGN_STYLE=Automatic",
+        "CURRENT_PROJECT_VERSION=#{ENV.fetch('GITHUB_RUN_NUMBER', '1')}"
+      ].join(" ")
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

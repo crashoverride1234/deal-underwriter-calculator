@@ -81,19 +81,24 @@ The Android `applicationId` is `io.github.crashoverride1234.underwriter`
 permanent after the first Play upload** — to change it, do so everywhere
 before then (`grep -r io.github.crashoverride1234` from `native/`).
 
-## Shipping to the App Store
+## Shipping to the App Store (automated — no Mac needed)
 
 1. [Apple Developer Program](https://developer.apple.com/programs/enroll/) —
-   $99/year. iOS builds require macOS + Xcode; without a Mac the practical
-   options are a cloud Mac (MacStadium and similar) or GitHub Actions signing with
-   fastlane (certificates + provisioning profile as repo secrets — set up on
-   request once the Apple account exists).
-2. On the Mac: `npx cap open ios`, set the signing team on the App target,
-   Product → Archive → Distribute to App Store Connect.
-3. App Store Connect: listing, screenshots (6.7" iPhone + 13" iPad
-   required), privacy-policy URL, App Privacy questionnaire ("Data Not
-   Collected" fits — see above).
-4. Review note: Apple guideline 4.2 dislikes thin web wrappers. This app is
+   $99/year.
+2. In [App Store Connect → Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api),
+   generate a Team Key (role: Admin), then add four repo secrets:
+   `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (the .p8 file's content),
+   `APPLE_TEAM_ID` (10-char Team ID from
+   [developer.apple.com/account](https://developer.apple.com/account) →
+   Membership details).
+3. Every push to `main` then signs and uploads to TestFlight automatically
+   (`testflight` job → `ios/fastlane/Fastfile` `beta` lane; cloud signing via
+   the API key, no certificates stored). Until the secrets exist the job
+   no-ops with a notice. Build number = the workflow run number.
+4. App Store listing when ready to go public: screenshots (6.7" iPhone +
+   13" iPad required), privacy-policy URL, App Privacy questionnaire ("Data
+   Not Collected" fits — see above).
+5. Review note: Apple guideline 4.2 dislikes thin web wrappers. This app is
    a full standalone tool (works offline, native navigation/status bar); in
    the Review Notes describe it as a real-estate underwriting calculator,
    not a website companion.

@@ -34,6 +34,14 @@ const REWRITES = [
   {
     find: 'https://unpkg.com/lucide@0.462.0/dist/umd/lucide.min.js',
     replace: 'vendor/lucide.min.js'
+  },
+  {
+    find: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+    replace: 'vendor/leaflet/leaflet.css'
+  },
+  {
+    find: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    replace: 'vendor/leaflet/leaflet.js'
   }
 ];
 
@@ -53,6 +61,17 @@ if (!SW_BLOCK.test(html)) {
   throw new Error('service worker registration block not found in index.html — update build-www.mjs');
 }
 html = html.replace(SW_BLOCK, '');
+// Catch-all: a CDN <script>/<link> added to index.html without a matching
+// REWRITES entry must fail the build, not silently ship a network dependency
+// (nothing caught it when Leaflet was added — hence this guard). Plain <a>
+// links are fine — they're user navigation, not load-time assets.
+const leftover = [
+  ...html.matchAll(/<script[^>]*\ssrc="(https?:\/\/[^"]+)"/g),
+  ...html.matchAll(/<link[^>]*\shref="(https?:\/\/[^"]+)"/g)
+].map(m => m[1]);
+if (leftover.length) {
+  throw new Error(`index.html loads external assets with no vendor rewrite: ${leftover.join(', ')} — vendor them and add REWRITES entries`);
+}
 writeFileSync(join(www, 'index.html'), html);
 
 let css = readFileSync(join(root, 'style.css'), 'utf8');
