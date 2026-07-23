@@ -653,11 +653,22 @@ function normalizeComp(c) {
     return { ...t, ...c, ratings: { ...t.ratings, ...(c.ratings || {}) } };
 }
 
+// A slot that renders as a card but stays out of the blend until priced
+// (the engine drops zero-price comps, and blank fields adjust nothing)
+function emptyCompSlot() {
+    return {
+        ...compTemplate(),
+        salePrice: '', sqft: '', beds: '', baths: '',
+        lotSqft: '', garageSpaces: '', yearBuilt: ''
+    };
+}
+
 const DEFAULT_COMPS = [
     { ...compTemplate(), label: '412 Oak Ave', salePrice: 325000, sqft: 1520, lotSqft: 7200, yearBuilt: 1982, monthsAgo: 2 },
     { ...compTemplate(), label: '88 Birch Ln', salePrice: 310000, sqft: 1450, lotSqft: 6800, yearBuilt: 1978, monthsAgo: 4 },
     { ...compTemplate(), label: '205 Cedar Ct', salePrice: 289000, sqft: 1400, baths: 1, garageSpaces: 1, yearBuilt: 1975, condition: 'average', monthsAgo: 6,
-      ratings: { ...defaultRatings(), locationInfluence: 'inferior' } }
+      ratings: { ...defaultRatings(), locationInfluence: 'inferior' } },
+    emptyCompSlot()
 ];
 
 let appraisalComps = DEFAULT_COMPS.map(c => normalizeComp(c));
@@ -739,6 +750,9 @@ function restoreAppraisalState() {
         if (s.market) apply(MARKET_STATE_FIELDS, s.market);
         if (Array.isArray(s.comps) && s.comps.length) {
             appraisalComps = s.comps.slice(0, MAX_COMPS).map(normalizeComp);
+            // Keep a spare slot visible (min 4 cards); empty slots stay out
+            // of the blend until priced
+            while (appraisalComps.length < 4) appraisalComps.push(emptyCompSlot());
         }
     } catch (e) { /* corrupted state — fall back to defaults */ }
 }
@@ -827,7 +841,7 @@ function renderComps() {
         card.className = 'comp-card';
         card.innerHTML = `
             <div class="comp-card-header">
-                <span>Comp ${idx + 1}</span>
+                <span>Comp ${idx + 1}${Engine.num(comp.salePrice) > 0 ? '' : ' <em class="comp-unpriced">unpriced · not in blend</em>'}</span>
                 <button class="comp-remove" title="Remove comp" ${appraisalComps.length <= 1 ? 'disabled' : ''}>&times;</button>
             </div>
             <div class="form-group">
@@ -836,6 +850,7 @@ function renderComps() {
                     <input type="text" data-field="label" placeholder="Type address to auto-fill…" autocomplete="off" spellcheck="false">
                     <div class="address-suggestions hidden" role="listbox"></div>
                 </div>
+                <div class="comp-subdivision hidden" data-subdiv></div>
             </div>
             <div class="input-row">
                 <div class="form-group">
@@ -1062,6 +1077,164 @@ function renderComps() {
     addCompBtn.disabled = appraisalComps.length >= MAX_COMPS;
 }
 
+// Subdivision line under each comp's address — highlighted when it matches
+// the subject's subdivision (a same-subdivision comp is the gold standard)
+function refreshCompSubdivisions() {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const subjectSub = norm(subjectSubdivisionInput.value);
+    [...compsContainer.children].forEach((card, i) => {
+        const el = card.querySelector('[data-subdiv]');
+        const comp = appraisalComps[i];
+        if (!el || !comp) return;
+        const sub = String(comp.subdivision || '').trim();
+        el.classList.toggle('hidden', !sub);
+        if (!sub) return;
+        const match = Boolean(subjectSub) && norm(sub) === subjectSub;
+        el.textContent = match ? `${sub} · ✓ matches subject` : sub;
+        el.classList.toggle('match', match);
+    });
+}
+
+// ==================== Comp Suggestions ====================
+// Worker /comps merges realtor.com recent solds (keyless) with RentCast AVM
+// comparables; ranking happens here so it always reflects the live subject.
+
+const suggestCompsBtn = document.getElementById('suggest-comps-btn');
+const compCandidatesPanel = document.getElementById('comp-candidates');
+
+// 0–100 similarity: sqft delta, bed/bath match, vintage, distance, recency
+function candidateScore(c) {
+    const sSqft = Engine.num(subjectSqftInput.value);
+    const sBeds = Engine.num(subjectBedsInput.value);
+    const sBaths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
+    const sYear = Engine.num(subjectYearInput.value);
+    let s = 100;
+    if (sSqft > 0 && c.sqft) s -= Math.min(40, Math.abs(c.sqft - sSqft) / sSqft * 100);
+    else s -= 15; // unknown size is a real similarity risk
+    if (c.beds != null && sBeds) s -= Math.min(15, Math.abs(c.beds - sBeds) * 7.5);
+    if (c.baths != null && sBaths) s -= Math.min(10, Math.abs(c.baths - sBaths) * 5);
+    if (c.yearBuilt && sYear) s -= Math.min(15, Math.abs(c.yearBuilt - sYear) / 2);
+    if (c.distanceMi != null) s -= Math.min(10, c.distanceMi * 5);
+    if (c.soldDate) {
+        const months = (Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
+        s -= Math.min(10, Math.max(0, months - 3)); // stale sales lose support value
+    }
+    return Math.max(0, Math.round(s));
+}
+
+async function suggestComps() {
+    const address = subjectAddressInput.value.trim();
+    const q = new URLSearchParams();
+    if (lastSelectedCoords) {
+        q.set('latitude', String(lastSelectedCoords.lat));
+        q.set('longitude', String(lastSelectedCoords.lon));
+    } else if (address) {
+        q.set('address', address);
+    } else {
+        compCandidatesPanel.innerHTML = '<div class="appraisal-warning">Set the subject address on step 1 first — comp suggestions search around it.</div>';
+        compCandidatesPanel.classList.remove('hidden');
+        return;
+    }
+    const sqft = Engine.num(subjectSqftInput.value);
+    if (sqft > 0) q.set('sqft', String(sqft));
+    const beds = Engine.num(subjectBedsInput.value);
+    if (beds > 0) q.set('beds', String(beds));
+    const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
+    if (baths > 0) q.set('baths', String(baths));
+
+    suggestCompsBtn.disabled = true;
+    compCandidatesPanel.innerHTML = '<div class="candidates-note">Searching recent solds near the subject…</div>';
+    compCandidatesPanel.classList.remove('hidden');
+    try {
+        const res = await fetch(`${workerBase()}/comps?${q}`, { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const ranked = (data.candidates || [])
+            .map(c => ({ ...c, score: candidateScore(c) }))
+            .sort((a, b) => b.score - a.score);
+        renderCandidates(ranked);
+    } catch (e) {
+        compCandidatesPanel.innerHTML = '<div class="appraisal-warning">Comp search failed — check the connection and try again.</div>';
+    } finally {
+        suggestCompsBtn.disabled = false;
+    }
+}
+
+function addCandidateAsComp(c) {
+    // Fill the first truly empty slot, else append (bounded by MAX_COMPS)
+    let comp = appraisalComps.find(x => !Engine.num(x.salePrice) && !x.label);
+    if (!comp) {
+        if (appraisalComps.length >= MAX_COMPS) return;
+        comp = emptyCompSlot();
+        appraisalComps.push(comp);
+    }
+    comp.label = c.address;
+    if (c.price > 0) comp.salePrice = c.price;
+    if (c.sqft) comp.sqft = c.sqft;
+    if (c.beds != null) comp.beds = c.beds;
+    if (c.baths != null) comp.baths = c.baths;
+    if (c.lotSqft) comp.lotSqft = c.lotSqft;
+    if (c.yearBuilt) comp.yearBuilt = c.yearBuilt;
+    if (c.propType) comp.propType = c.propType;
+    if (c.soldDate) {
+        comp.lastSaleDate = String(c.soldDate).slice(0, 10);
+        const months = Math.round((Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44));
+        if (months >= 0 && months <= 24) comp.monthsAgo = months;
+    }
+    renderComps();
+    recalcAppraisal();
+}
+
+function renderCandidates(list) {
+    compCandidatesPanel.innerHTML = '';
+    const head = document.createElement('div');
+    head.className = 'candidates-head';
+    head.innerHTML = '<span>Suggested comps — recent nearby solds ranked by similarity to the subject. '
+        + 'Prices are list-at-sale (TX non-disclosure); verify against MLS before relying on them.</span>'
+        + '<button class="comp-remove" title="Close">&times;</button>';
+    head.querySelector('button').addEventListener('click', () => compCandidatesPanel.classList.add('hidden'));
+    compCandidatesPanel.appendChild(head);
+    if (!list.length) {
+        const none = document.createElement('div');
+        none.className = 'candidates-note';
+        none.textContent = 'No recent solds found nearby — add comps manually from MLS.';
+        compCandidatesPanel.appendChild(none);
+        return;
+    }
+    list.forEach(c => {
+        const row = document.createElement('div');
+        row.className = 'candidate-row';
+        const specs = [
+            c.price ? formatCurrency(c.price) : 'no price',
+            c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null,
+            c.sqft ? `${c.sqft.toLocaleString()} sqft` : null,
+            (c.beds != null && c.baths != null) ? `${c.beds} bd / ${c.baths} ba` : null,
+            c.yearBuilt ? `blt ${c.yearBuilt}` : null,
+            c.distanceMi != null ? `${c.distanceMi} mi` : null,
+            c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null
+        ].filter(Boolean).join(' · ');
+        row.innerHTML = `
+            <div class="candidate-main">
+                <div class="candidate-addr"></div>
+                <div class="candidate-specs"></div>
+            </div>
+            <span class="candidate-score" title="similarity to subject (0–100)"></span>
+            <button class="btn btn-secondary candidate-add">Add</button>`;
+        row.querySelector('.candidate-addr').textContent = c.address;
+        row.querySelector('.candidate-specs').textContent = specs;
+        row.querySelector('.candidate-score').textContent = c.score;
+        const btn = row.querySelector('.candidate-add');
+        btn.addEventListener('click', () => {
+            addCandidateAsComp(c);
+            btn.disabled = true;
+            btn.textContent = 'Added ✓';
+        });
+        compCandidatesPanel.appendChild(row);
+    });
+}
+
+suggestCompsBtn.addEventListener('click', suggestComps);
+
 function readAppraisalInputs() {
     const qualitativeAdjPct = {};
     QUALITATIVE_FACTORS.forEach(f => {
@@ -1128,6 +1301,7 @@ function recalcAppraisal() {
     lastAppraisal = a;
     updateWeightImpacts(a);
     updateSubjectSummary();
+    refreshCompSubdivisions();
 
     arvEstimateValue.textContent = formatCurrency(a.arv);
     arvPpsfNote.textContent = a.subjectPricePerSqft > 0

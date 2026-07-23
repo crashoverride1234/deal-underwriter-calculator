@@ -66,6 +66,14 @@ GitHub Pages from `main`.
   secret is unset are skipped. RentCast: 50/mo free, only HTTP-200s billed.
   Melissa: ~1,000 credits/mo free. Worker also keeps `/property`, `/rentcast`,
   `/melissa`, `/health` as individual debug routes.
+- **Comp suggestions** (`/comps` route + "Suggest Comps" button): realtor.com
+  `home_search` sold listings (keyless; `nearby.coordinates` is GeoJSON
+  [lon, lat], radius pattern "1mi", filters verified live 2026-07-23) merged
+  with RentCast AVM `/avm/value` comparables (1 billed request per call,
+  correlation-ranked), deduped by street address; client ranks 0–100 by
+  similarity to the live subject. TX non-disclosure: prices are list-at-sale
+  proxies — the UI says to verify against MLS. NTREIS BBO (Trestle) remains
+  the endgame for true sold prices.
 - **Dead ends — do not retry**: Zillow & Redfin unofficial APIs
   (TLS-fingerprint WAF blocks even server-side); realtor.com detail endpoints
   are CORS-blocked from browsers (that's why the Worker exists).

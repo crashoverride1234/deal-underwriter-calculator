@@ -11,6 +11,12 @@
  *                                  → unified ladder: RentCast (secret) →
  *                                    Melissa (secret) → realtor.com (keyless);
  *                                    first hit wins, source labeled
+ *   /comps?address=... | latitude=&longitude=
+ *          [&sqft=&beds=&baths=&radius=&months=&limit=]
+ *                                  → comp candidates near the subject:
+ *                                    realtor.com sold search (keyless) merged
+ *                                    with RentCast AVM comparables (secret,
+ *                                    correlation-ranked), deduped by address
  *   /property?mpr_id=<id>          → realtor.com GraphQL (keyless), normalized
  *   /property?address=<street...>  → same, resolving the address to an
  *                                    mpr_id via realtor.com geo-suggest first
@@ -54,6 +60,25 @@ const REALTOR_QUERY = `query GetHome($property_id: ID!) {
       address { line city state_code postal_code coordinate { lat lon } }
       county { name }
       neighborhoods { name }
+    }
+  }
+}`;
+
+// Sold-comp search; filter set verified live 2026-07-23 (nearby.coordinates
+// is GeoJSON [lon, lat], radius needs the "1mi" pattern, sold_date.min is
+// yyyy-mm-dd). TX is non-disclosure: last_sold_price is usually null, so
+// list price at sale is the standard proxy.
+const REALTOR_SEARCH_QUERY = `query CompSearch($query: HomeSearchCriteria!, $limit: Int, $sort: [SearchAPISort]) {
+  home_search(query: $query, limit: $limit, sort: $sort) {
+    total
+    results {
+      property_id
+      status
+      list_price
+      last_sold_price
+      last_sold_date
+      description { beds baths sqft lot_sqft year_built type }
+      location { address { line city state_code postal_code coordinate { lat lon } } }
     }
   }
 }`;
@@ -295,8 +320,8 @@ const hasData = (rec) => rec && (rec.sqft !== null || rec.beds !== null);
 
 // ---- Providers ----
 
-// Resolve a free-form address to realtor.com's property id via geo-suggest
-async function resolveMprId(address) {
+// Resolve a free-form address via realtor.com geo-suggest: property id + centroid
+async function resolveGeo(address) {
   const res = await fetch(
     `https://parser-external.geo.moveaws.com/suggest?input=${encodeURIComponent(address)}&client_id=rdc-home&limit=1&area_types=address`,
     { headers: { 'Accept': 'application/json', 'User-Agent': BROWSER_UA } }
@@ -304,7 +329,26 @@ async function resolveMprId(address) {
   if (!res.ok) return null;
   const data = await res.json();
   const first = (data.autocomplete || [])[0];
-  return first && first.mpr_id ? String(first.mpr_id) : null;
+  if (!first) return null;
+  return {
+    mprId: first.mpr_id ? String(first.mpr_id) : null,
+    lat: first.centroid ? first.centroid.lat : null,
+    lon: first.centroid ? first.centroid.lon : null
+  };
+}
+
+async function resolveMprId(address) {
+  const geo = await resolveGeo(address);
+  return geo ? geo.mprId : null;
+}
+
+function milesBetween(lat1, lon1, lat2, lon2) {
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 // Record-or-null fetchers (throw on upstream failure) — shared by the
@@ -402,6 +446,144 @@ async function handleLookup(params, env, cors) {
   return json({ error: 'no record', providerErrors }, 404, cors);
 }
 
+// Comp candidates near a point: realtor.com sold listings (keyless) merged
+// with RentCast AVM comparables (correlation-ranked). Dedupe favors the
+// first-seen entry (realtor solds carry true sale dates) and grafts
+// RentCast's correlation onto duplicates.
+async function handleComps(params, env, cors) {
+  let lat = parseFloat(params.get('latitude'));
+  let lon = parseFloat(params.get('longitude'));
+  const address = params.get('address') || '';
+  if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && address) {
+    const geo = await resolveGeo(address);
+    if (geo && geo.lat != null) { lat = geo.lat; lon = geo.lon; }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude or a resolvable address is required' }, 400, cors);
+  }
+  const radius = Math.min(5, parseFloat(params.get('radius')) || 1);
+  const months = Math.min(24, parseInt(params.get('months'), 10) || 12);
+  const limit = Math.min(20, parseInt(params.get('limit'), 10) || 12);
+  const providerErrors = [];
+  const candidates = [];
+
+  try {
+    const minDate = new Date(Date.now() - months * 30.44 * 86400000).toISOString().slice(0, 10);
+    const res = await fetch('https://www.realtor.com/frontdoor/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'rdc-client-name': 'RDC_WEB_DETAILS_PAGE',
+        'rdc-client-version': '3.x.x',
+        'User-Agent': BROWSER_UA
+      },
+      body: JSON.stringify({
+        operationName: 'CompSearch',
+        query: REALTOR_SEARCH_QUERY,
+        variables: {
+          query: {
+            status: ['sold'],
+            type: ['single_family'],
+            sold_date: { min: minDate },
+            nearby: { coordinates: [lon, lat], radius: `${radius}mi` }
+          },
+          limit,
+          sort: [{ field: 'sold_date', direction: 'desc' }]
+        }
+      })
+    });
+    if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
+    const data = await res.json();
+    const results = data && data.data && data.data.home_search ? (data.data.home_search.results || []) : [];
+    for (const r of results) {
+      const d = r.description || {};
+      const addr = (r.location && r.location.address) || {};
+      const coord = addr.coordinate || {};
+      if (!addr.line) continue;
+      candidates.push({
+        address: addr.line,
+        city: addr.city || null,
+        state: addr.state_code || null,
+        zip: addr.postal_code || null,
+        lat: coord.lat != null ? coord.lat : null,
+        lon: coord.lon != null ? coord.lon : null,
+        price: numOrNull(r.last_sold_price) || numOrNull(r.list_price),
+        priceType: r.last_sold_price ? 'sold' : 'list',
+        soldDate: r.last_sold_date || null,
+        sqft: numOrNull(d.sqft),
+        beds: numOrNull(d.beds),
+        baths: numOrNull(d.baths),
+        lotSqft: numOrNull(d.lot_sqft),
+        yearBuilt: numOrNull(d.year_built),
+        propType: d.type || null,
+        distanceMi: (coord.lat != null && coord.lon != null)
+          ? Math.round(milesBetween(lat, lon, coord.lat, coord.lon) * 100) / 100 : null,
+        correlation: null,
+        source: 'realtor.com'
+      });
+    }
+  } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
+
+  if (env.RENTCAST_API_KEY) {
+    try {
+      const q = new URLSearchParams({
+        latitude: String(lat), longitude: String(lon),
+        propertyType: 'Single Family',
+        compCount: '10', maxRadius: String(radius), daysOld: String(months * 30)
+      });
+      if (params.get('sqft')) q.set('squareFootage', params.get('sqft'));
+      if (params.get('beds')) q.set('bedrooms', params.get('beds'));
+      if (params.get('baths')) q.set('bathrooms', params.get('baths'));
+      const res = await fetch(`https://api.rentcast.io/v1/avm/value?${q}`, {
+        headers: { 'X-Api-Key': env.RENTCAST_API_KEY, 'Accept': 'application/json' }
+      });
+      if (!res.ok && res.status !== 404) throw new Error(`upstream HTTP ${res.status}`);
+      const data = res.ok ? await res.json() : {};
+      for (const c of data.comparables || []) {
+        candidates.push({
+          address: c.addressLine1 || (c.formattedAddress || '').split(',')[0],
+          city: c.city || null,
+          state: c.state || null,
+          zip: c.zipCode || null,
+          lat: c.latitude != null ? c.latitude : null,
+          lon: c.longitude != null ? c.longitude : null,
+          price: numOrNull(c.price),
+          priceType: 'list',
+          soldDate: c.removedDate || c.listedDate || null,
+          sqft: numOrNull(c.squareFootage),
+          beds: numOrNull(c.bedrooms),
+          baths: numOrNull(c.bathrooms),
+          lotSqft: numOrNull(c.lotSize),
+          yearBuilt: numOrNull(c.yearBuilt),
+          propType: c.propertyType || null,
+          distanceMi: c.distance != null ? Math.round(c.distance * 100) / 100 : null,
+          correlation: c.correlation != null ? c.correlation : null,
+          source: 'RentCast'
+        });
+      }
+    } catch (e) { providerErrors.push('RentCast: ' + e.message); }
+  }
+
+  const byKey = new Map();
+  for (const c of candidates) {
+    const key = (c.address || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!key) continue;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, c);
+    } else {
+      if (existing.correlation == null && c.correlation != null) existing.correlation = c.correlation;
+      if (existing.price == null && c.price != null) { existing.price = c.price; existing.priceType = c.priceType; }
+      if (existing.source.indexOf(c.source) === -1) existing.source += ' + ' + c.source;
+    }
+  }
+  return json({
+    subject: { latitude: lat, longitude: lon },
+    candidates: [...byKey.values()],
+    providerErrors
+  }, 200, cors);
+}
+
 async function handleRealtor(params, cors) {
   let mprId = params.get('mpr_id');
   if (!mprId && params.get('address')) {
@@ -481,6 +663,8 @@ export default {
           }, 200, cors);
         case '/lookup':
           return await handleLookup(url.searchParams, env, cors);
+        case '/comps':
+          return await handleComps(url.searchParams, env, cors);
         case '/property':
           return await handleRealtor(url.searchParams, cors);
         case '/rentcast':
