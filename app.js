@@ -1313,10 +1313,36 @@ suggestCompsBtn.addEventListener('click', suggestComps);
 // and parks or green space, plus mapped swimming pools on the parcel.
 
 const siteMapEl = document.getElementById('site-map');
+const siteFrontEl = document.getElementById('site-front');
+const siteFrontImg = document.getElementById('site-front-img');
+const siteFrontEmpty = document.getElementById('site-front-empty');
+const gmapsKeyInput = document.getElementById('gmaps-key');
 const scanSiteBtn = document.getElementById('scan-site-btn');
 const siteInfluencesEl = document.getElementById('site-influences');
+const GMAPS_KEY_STORAGE = 'underwriter-gmaps-key';
 let siteMap = null;
 let siteMarker = null;
+
+// Street View Static URL, or null without a key (Google keys are designed
+// to ship client-side, restricted by referrer in the Google console)
+function frontViewUrl(lat, lon) {
+    const key = gmapsKeyInput.value.trim();
+    if (!key) return null;
+    return `https://maps.googleapis.com/maps/api/streetview?size=500x280&location=${lat},${lon}&fov=80&key=${encodeURIComponent(key)}`;
+}
+
+function updateFrontView(lat, lon) {
+    siteFrontEl.classList.remove('hidden');
+    const url = frontViewUrl(lat, lon);
+    if (url) {
+        siteFrontImg.src = url;
+        siteFrontImg.classList.remove('hidden');
+        siteFrontEmpty.classList.add('hidden');
+    } else {
+        siteFrontImg.classList.add('hidden');
+        siteFrontEmpty.classList.remove('hidden');
+    }
+}
 
 function metersToFeet(m) { return Math.round(m * 3.28084); }
 
@@ -1357,6 +1383,7 @@ function showSiteMap(lat, lon) {
     }
     // Container may have been hidden when Leaflet measured it
     setTimeout(() => siteMap.invalidateSize(), 60);
+    updateFrontView(lat, lon);
 }
 
 // Nearest mapped feature per category around a point (~1,300 ft radius;
@@ -1456,14 +1483,66 @@ async function scanSubjectSite() {
             return;
         }
         showSiteMap(coords.lat, coords.lon);
-        const nearest = await overpassScan(coords.lat, coords.lon);
-        renderSiteInfluences(nearest);
-        if (nearest.pool && subjectPoolInput.value !== 'yes') {
+        // Measured pass (Overpass) and vision pass are independent — a busy
+        // Overpass must not take the AI read down with it
+        let poolSeen = false;
+        try {
+            const nearest = await overpassScan(coords.lat, coords.lon);
+            renderSiteInfluences(nearest);
+            poolSeen = Boolean(nearest.pool);
+        } catch (overpassErr) {
+            siteInfluencesEl.innerHTML = '';
+            const busy = document.createElement('div');
+            busy.className = 'influence-chip note';
+            busy.textContent = 'Measured scan unavailable (Overpass busy) — AI vision read below.';
+            siteInfluencesEl.appendChild(busy);
+        }
+
+        // AI vision pass — the app looks at the imagery itself and judges
+        // adjacency, instead of only measuring distances to mapped features
+        const pending = document.createElement('div');
+        pending.className = 'influence-chip note';
+        pending.textContent = '🤖 AI vision reading the imagery…';
+        siteInfluencesEl.appendChild(pending);
+        try {
+            const vq = new URLSearchParams({
+                latitude: String(coords.lat),
+                longitude: String(coords.lon)
+            });
+            const sv = frontViewUrl(coords.lat, coords.lon);
+            if (sv) vq.set('photo', sv);
+            const vres = await fetch(`${workerBase()}/vision?${vq}`, { headers: { 'Accept': 'application/json' } });
+            const v = vres.ok ? await vres.json() : null;
+            pending.remove();
+            const visionChips = [];
+            const s = (v && v.satellite) || {};
+            if (s.pool === 'yes') { visionChips.push({ kind: 'good', text: 'AI sees: pool on the parcel' }); poolSeen = true; }
+            if (s.road === 'yes') visionChips.push({ kind: 'bad', text: 'AI sees: major road adjacent' });
+            if (s.rail === 'yes') visionChips.push({ kind: 'bad', text: 'AI sees: railroad nearby' });
+            if (s.commercial === 'yes') visionChips.push({ kind: 'bad', text: 'AI sees: commercial buildings adjacent' });
+            if (s.green === 'yes') visionChips.push({ kind: 'good', text: 'AI sees: backs to green space' });
+            const p = (v && v.photo) || {};
+            if (p.powerlines === 'yes') visionChips.push({ kind: 'bad', text: 'AI sees: overhead power lines (street view)' });
+            if (p.road === 'yes') visionChips.push({ kind: 'bad', text: 'AI sees: busy / multi-lane street (street view)' });
+            if (!visionChips.length) {
+                visionChips.push({ kind: 'note', text: v ? 'AI vision: nothing flagged in the imagery' : 'AI vision unavailable right now' });
+            }
+            visionChips.forEach(c => {
+                const div = document.createElement('div');
+                div.className = `influence-chip ${c.kind}`;
+                div.textContent = (c.kind === 'bad' ? '⚠ ' : c.kind === 'good' ? '✓ ' : '') + c.text;
+                siteInfluencesEl.appendChild(div);
+            });
+        } catch (e) {
+            pending.textContent = 'AI vision unavailable right now — measured results above still stand.';
+        }
+
+        if (poolSeen && subjectPoolInput.value !== 'yes') {
             subjectPoolInput.value = 'yes';
             recalcAppraisal();
             const auto = document.createElement('div');
             auto.className = 'influence-chip good';
-            auto.textContent = '✓ Pool field auto-set to Yes from the map';
+            auto.textContent = '✓ Pool field auto-set to Yes from the imagery';
             siteInfluencesEl.appendChild(auto);
         }
     } catch (e) {
@@ -1474,6 +1553,10 @@ async function scanSubjectSite() {
 }
 
 scanSiteBtn.addEventListener('click', scanSubjectSite);
+gmapsKeyInput.addEventListener('input', () => {
+    try { localStorage.setItem(GMAPS_KEY_STORAGE, gmapsKeyInput.value.trim()); } catch (e) { /* private mode */ }
+    if (lastSelectedCoords) updateFrontView(lastSelectedCoords.lat, lastSelectedCoords.lon);
+});
 
 function readAppraisalInputs() {
     const qualitativeAdjPct = {};
@@ -2432,6 +2515,7 @@ try {
     rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || '';
     melissaKeyInput.value = localStorage.getItem(MELISSA_KEY_STORAGE) || '';
     workerUrlInput.value = localStorage.getItem(WORKER_URL_STORAGE) || '';
+    gmapsKeyInput.value = localStorage.getItem(GMAPS_KEY_STORAGE) || '';
 } catch (e) { /* private mode */ }
 renderComps();
 recalcAppraisal();

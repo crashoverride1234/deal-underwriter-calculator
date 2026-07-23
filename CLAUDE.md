@@ -80,6 +80,15 @@ GitHub Pages from `main`.
   power line / commercial / park-green-space and parcel-mapped pools within
   ~400 m. Subject scan + per-comp scan buttons; comp coords ride along on
   records/candidates (`lat`/`lon`). OSM absence ≠ absence in reality.
+- **AI vision** (worker `/vision`, Workers AI `[ai]` binding in wrangler.toml,
+  free daily allocation): llava-1.5-7b judges adjacency from imagery — Esri
+  keyless `export` snapshot (~150 m box) for pool / road-adjacency / rail /
+  commercial / green, plus an optional street photo (host-allowlisted:
+  maps.googleapis.com, ap.rdcpix.com) for power lines / street character.
+  GOTCHA: llava ignores multi-question formats — one question per AI.run
+  call, parallel. Front view = Google Street View Static behind an optional
+  browser key (`underwriter-gmaps-key`); realtor.com photos are DEAD (nulled
+  once listings close, verified 2026-07-23).
 - **Dead ends — do not retry**: Zillow & Redfin unofficial APIs
   (TLS-fingerprint WAF blocks even server-side); realtor.com detail endpoints
   are CORS-blocked from browsers (that's why the Worker exists).

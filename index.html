@@ -145,10 +145,21 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <label>Site Map &amp; Influences</label>
-                        <div id="site-map" class="site-map hidden"></div>
+                        <label>Site Map &amp; Front View</label>
+                        <div class="site-visuals">
+                            <div id="site-map" class="site-map hidden"></div>
+                            <div id="site-front" class="site-front hidden">
+                                <img id="site-front-img" class="hidden" alt="Street view of the property">
+                                <div id="site-front-empty" class="site-front-empty">
+                                    <div>Front view uses Google Street View. Paste a free Google Maps API key
+                                    (Street View Static API; monthly free credit covers this) — stored only on
+                                    this device.</div>
+                                    <input type="password" id="gmaps-key" placeholder="Google Maps API key" autocomplete="off">
+                                </div>
+                            </div>
+                        </div>
                         <button id="scan-site-btn" class="btn btn-secondary" style="width: 100%; margin-top: 0.5rem;">
-                            🛰 Scan Site (roads · rail · power · commercial · parks · pools)
+                            🛰 Scan Site — measured distances + AI vision read
                         </button>
                         <div id="site-influences" class="site-influences hidden"></div>
                     </div>

@@ -17,6 +17,11 @@
  *                                    realtor.com sold search (keyless) merged
  *                                    with RentCast AVM comparables (secret,
  *                                    correlation-ranked), deduped by address
+ *   /vision?latitude=&longitude=[&photo=<https url, allowlisted hosts>]
+ *                                  → Workers AI vision verdicts: satellite
+ *                                    (pool / road adjacency / rail /
+ *                                    commercial / green) + optional street
+ *                                    photo (power lines / road character)
  *   /property?mpr_id=<id>          → realtor.com GraphQL (keyless), normalized
  *   /property?address=<street...>  → same, resolving the address to an
  *                                    mpr_id via realtor.com geo-suggest first
@@ -592,6 +597,89 @@ async function handleComps(params, env, cors) {
   }, 200, cors);
 }
 
+// ---- Vision: the app "looks" at imagery instead of measuring distances ----
+// Workers AI (free daily allocation). Satellite snapshot answers parcel
+// adjacency questions; an optional street-level photo answers what's
+// visible from the curb.
+
+const VISION_MODEL = '@cf/llava-hf/llava-1.5-7b-hf';
+
+// llava answers single questions reliably but ignores multi-line answer
+// formats, so each aspect is its own (parallel) model call
+const SATELLITE_QUESTIONS = {
+  pool: 'Is there a swimming pool on the property at the exact center of this satellite image? Answer with only one word: yes, no, or unsure.',
+  road: 'Is the property at the exact center of this satellite image directly adjacent to a major road with multiple lanes of traffic or a painted center divider line? Answer with only one word: yes, no, or unsure.',
+  rail: 'Are railroad tracks visible in this satellite image near the center property? Answer with only one word: yes, no, or unsure.',
+  commercial: 'Are commercial buildings with large flat roofs or big parking lots directly adjacent to the property at the center of this satellite image? Answer with only one word: yes, no, or unsure.',
+  green: 'Does the property at the exact center of this satellite image back onto a park, golf course, greenbelt, or open green space? Answer with only one word: yes, no, or unsure.'
+};
+
+const PHOTO_QUESTIONS = {
+  powerlines: 'Are overhead power lines or utility poles visible near the house in this photo? Answer with only one word: yes, no, or unsure.',
+  road: 'Does the street in front of this house appear busy or multi-lane, with a painted center line or wide pavement? Answer with only one word: yes, no, or unsure.'
+};
+
+const VISION_PHOTO_HOSTS = ['maps.googleapis.com', 'ap.rdcpix.com'];
+
+async function askVision(env, imageArray, question) {
+  try {
+    const res = await env.AI.run(VISION_MODEL, {
+      image: imageArray,
+      prompt: question,
+      max_tokens: 12
+    });
+    const text = (res && (res.description || res.response)) || '';
+    const m = /(yes|no|unsure)/i.exec(text);
+    return m ? m[1].toLowerCase() : 'unsure';
+  } catch (e) {
+    return 'unsure';
+  }
+}
+
+async function visionVerdicts(env, imageBytes, questions) {
+  const imageArray = [...new Uint8Array(imageBytes)];
+  const keys = Object.keys(questions);
+  const answers = await Promise.all(keys.map(k => askVision(env, imageArray, questions[k])));
+  const out = {};
+  keys.forEach((k, i) => { out[k] = answers[i]; });
+  return out;
+}
+
+async function handleVision(params, env, cors) {
+  if (!env.AI) return json({ error: 'Workers AI binding not configured' }, 501, cors);
+  const lat = parseFloat(params.get('latitude'));
+  const lon = parseFloat(params.get('longitude'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude and longitude are required' }, 400, cors);
+  }
+  const result = { satellite: null, photo: null, errors: [] };
+
+  // ~150 m box centered on the parcel; Esri export is keyless
+  const d = 0.0007;
+  const satUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export'
+    + `?bbox=${lon - d},${lat - d},${lon + d},${lat + d}&bboxSR=4326&size=512,512&format=jpg&f=image`;
+  try {
+    const img = await fetch(satUrl);
+    if (!img.ok) throw new Error(`imagery HTTP ${img.status}`);
+    result.satellite = await visionVerdicts(env, await img.arrayBuffer(), SATELLITE_QUESTIONS);
+  } catch (e) { result.errors.push('satellite: ' + e.message); }
+
+  // Optional street-level photo (host-allowlisted so this isn't an open proxy)
+  const photoUrl = params.get('photo');
+  if (photoUrl) {
+    try {
+      const u = new URL(photoUrl);
+      if (u.protocol !== 'https:' || !VISION_PHOTO_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h))) {
+        throw new Error('photo host not allowed');
+      }
+      const img = await fetch(photoUrl);
+      if (!img.ok) throw new Error(`photo HTTP ${img.status}`);
+      result.photo = await visionVerdicts(env, await img.arrayBuffer(), PHOTO_QUESTIONS);
+    } catch (e) { result.errors.push('photo: ' + e.message); }
+  }
+  return json(result, 200, cors);
+}
+
 async function handleRealtor(params, cors) {
   let mprId = params.get('mpr_id');
   if (!mprId && params.get('address')) {
@@ -666,13 +754,16 @@ export default {
             providers: {
               realtor: true,
               rentcast: Boolean(env.RENTCAST_API_KEY),
-              melissa: Boolean(env.MELISSA_API_KEY)
+              melissa: Boolean(env.MELISSA_API_KEY),
+              vision: Boolean(env.AI)
             }
           }, 200, cors);
         case '/lookup':
           return await handleLookup(url.searchParams, env, cors);
         case '/comps':
           return await handleComps(url.searchParams, env, cors);
+        case '/vision':
+          return await handleVision(url.searchParams, env, cors);
         case '/property':
           return await handleRealtor(url.searchParams, cors);
         case '/rentcast':

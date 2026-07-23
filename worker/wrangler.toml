@@ -6,3 +6,7 @@ compatibility_date = "2026-01-01"
 # Preserve any vars set through the Cloudflare dashboard (e.g. ALLOWED_ORIGINS)
 # instead of wiping them on each deploy; secrets always persist.
 keep_vars = true
+
+# Workers AI (free daily allocation) — vision model for the /vision route
+[ai]
+binding = "AI"
