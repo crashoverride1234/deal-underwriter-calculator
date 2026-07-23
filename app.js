@@ -995,7 +995,9 @@ function setLookupStatus(message, kind) {
 // radius — 404s are NOT billed, so retries are free) → Melissa. Records are
 // normalized to one shape and cached so a property is never fetched twice.
 
-const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v1';
+// v2: records gained subdivision/hoa — v1 entries predate them and would
+// silently auto-fill without those fields forever
+const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v2';
 let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
 let lastSelectedMprId = null;  // realtor.com property id from the picked suggestion
 
@@ -1038,7 +1040,8 @@ function putCachedRecord(address, record) {
     } catch (e) { /* storage full — cache is best-effort */ }
 }
 
-// Normalized record shape: { sqft, beds, baths, lot, year, garage, pool, stories, formattedAddress, source }
+// Normalized record shape: { sqft, beds, baths, lot, year, garage, pool, stories,
+// subdivision, hoa, formattedAddress, source } — subdivision/hoa are null when unknown
 function rentcastToRecord(p) {
     const f = p.features || {};
     const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
@@ -1051,6 +1054,9 @@ function rentcastToRecord(p) {
         garage,
         pool: (f.pool === true || f.pool === false) ? f.pool : null,
         stories: f.floorCount != null ? f.floorCount : null,
+        subdivision: p.subdivision || null,
+        // Absence of HOA data is unknown, not "no HOA"
+        hoa: (p.hoa && p.hoa.fee > 0) ? true : null,
         formattedAddress: p.formattedAddress || null,
         source: 'RentCast'
     };
@@ -1079,6 +1085,8 @@ function melissaToRecord(r) {
         garage: numOrNull(parking.ParkingSpaceCount),
         pool,
         stories: numOrNull((r.IntStructInfo || {}).StoriesCount),
+        subdivision: (r.Legal || {}).Subdivision || null,
+        hoa: null,
         formattedAddress: null,
         source: 'Melissa'
     };
@@ -1145,6 +1153,11 @@ function applyPropertyRecord(rec, fallbackAddress) {
         input.value = value;
         filled.push(`${label} ${value}`);
     };
+    fill(subjectSubdivisionInput, rec.subdivision, 'subdivision');
+    if (rec.hoa === true) {
+        subjectHoaInput.value = 'yes';
+        filled.push('hoa yes');
+    }
     fill(subjectSqftInput, rec.sqft, 'sqft');
     fill(subjectBedsInput, rec.beds, 'beds');
     if (rec.baths != null) {

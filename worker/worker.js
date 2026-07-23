@@ -48,9 +48,11 @@ const REALTOR_QUERY = `query GetHome($property_id: ID!) {
     last_sold_price
     last_sold_date
     description { beds baths baths_full baths_half sqft lot_sqft year_built garage stories pool type }
+    details { category text }
     location {
       address { line city state_code postal_code coordinate { lat lon } }
       county { name }
+      neighborhoods { name }
     }
   }
 }`;
@@ -102,6 +104,21 @@ function realtorToRecord(home) {
   const formatted = addr.line
     ? `${addr.line}, ${addr.city}, ${addr.state_code} ${addr.postal_code || ''}`.trim()
     : null;
+  // Subdivision: prefer an explicit "Subdivision: X" line in the details
+  // categories (true platted name, when the listing carries it); fall back
+  // to the first (most specific) neighborhood name
+  let subdivision = null;
+  for (const detail of home.details || []) {
+    for (const line of detail.text || []) {
+      const m = /^Subdivision:?\s*(.+)/i.exec(line);
+      if (m) { subdivision = m[1].trim(); break; }
+    }
+    if (subdivision) break;
+  }
+  if (!subdivision) {
+    const hoods = (home.location && home.location.neighborhoods) || [];
+    subdivision = hoods.length && hoods[0].name ? hoods[0].name : null;
+  }
   return {
     sqft: numOrNull(d.sqft),
     beds: numOrNull(d.beds),
@@ -111,6 +128,8 @@ function realtorToRecord(home) {
     garage: numOrNull(d.garage),
     pool: (d.pool === true || d.pool === false) ? d.pool : null,
     stories: numOrNull(d.stories),
+    subdivision,
+    hoa: null,
     formattedAddress: formatted,
     source: 'realtor.com',
     extra: {
@@ -137,6 +156,8 @@ function rentcastToRecord(p) {
     garage,
     pool: (f.pool === true || f.pool === false) ? f.pool : null,
     stories: f.floorCount != null ? f.floorCount : null,
+    subdivision: p.subdivision || null,
+    hoa: (p.hoa && p.hoa.fee > 0) ? true : null,
     formattedAddress: p.formattedAddress || null,
     source: 'RentCast'
   };
@@ -158,6 +179,8 @@ function melissaToRecord(r) {
     garage: numOrNull(parking.ParkingSpaceCount),
     pool: poolRaw && poolRaw !== '0' ? true : null,
     stories: numOrNull((r.IntStructInfo || {}).StoriesCount),
+    subdivision: (r.Legal || {}).Subdivision || null,
+    hoa: null,
     formattedAddress: null,
     source: 'Melissa'
   };
