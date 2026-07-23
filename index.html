@@ -142,6 +142,169 @@
                             </select>
                         </div>
                     </div>
+                    <details class="settings-details">
+                        <summary>Property Facts</summary>
+                        <div class="inputs-group" style="margin-top: 0.75rem; margin-bottom: 0;">
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-prop-type">Property Type</label>
+                                    <input type="text" id="subject-prop-type" placeholder="Single Family">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-county">County</label>
+                                    <input type="text" id="subject-county" placeholder="Dallas">
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-zoning">Zoning</label>
+                                    <input type="text" id="subject-zoning" placeholder="e.g. R-7.5">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-apn">Parcel ID (APN)</label>
+                                    <input type="text" id="subject-apn" placeholder="Assessor parcel #">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="subject-legal">Legal Description</label>
+                                <input type="text" id="subject-legal" placeholder="From county records">
+                            </div>
+                        </div>
+                    </details>
+                    <details class="settings-details">
+                        <summary>Construction</summary>
+                        <div class="inputs-group" style="margin-top: 0.75rem; margin-bottom: 0;">
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-garage-type">Garage Type</label>
+                                    <input type="text" id="subject-garage-type" placeholder="Attached / Detached">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-foundation">Foundation</label>
+                                    <input type="text" id="subject-foundation" placeholder="Slab / Pier &amp; Beam">
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-roof">Roof</label>
+                                    <input type="text" id="subject-roof" placeholder="Composition Shingle">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-exterior">Exterior</label>
+                                    <input type="text" id="subject-exterior" placeholder="Brick / Siding / Stone">
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-heating">Heating</label>
+                                    <input type="text" id="subject-heating" placeholder="Central (blank = unknown)">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-cooling">Cooling</label>
+                                    <input type="text" id="subject-cooling" placeholder="Central (blank = unknown)">
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+                    <details class="settings-details">
+                        <summary>Financial &amp; Sale History</summary>
+                        <div class="inputs-group" style="margin-top: 0.75rem; margin-bottom: 0;">
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-assessed-value">Assessed Value (latest)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-assessed-value" min="0" step="1000">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-annual-taxes">Annual Property Taxes</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-annual-taxes" min="0" step="100">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-assessed-land">Assessed Land</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-assessed-land" min="0" step="1000">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-assessed-improv">Assessed Improvements</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-assessed-improv" min="0" step="1000">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-last-sale-date">Last Sale Date</label>
+                                    <input type="date" id="subject-last-sale-date">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-last-sale-price">Last Sold Price</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-last-sale-price" min="0" step="1000">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-list-price">Current List Price</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="subject-list-price" min="0" step="1000">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-listing-status">Listing Status</label>
+                                    <input type="text" id="subject-listing-status" placeholder="off market / for sale">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="subject-hoa-fee">HOA Fee (monthly)</label>
+                                <div class="input-wrapper has-prefix">
+                                    <span class="input-prefix">$</span>
+                                    <input type="number" id="subject-hoa-fee" min="0" step="10">
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+                    <details class="settings-details">
+                        <summary>Owner Info</summary>
+                        <div class="inputs-group" style="margin-top: 0.75rem; margin-bottom: 0;">
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-owner-names">Owner Name(s)</label>
+                                    <input type="text" id="subject-owner-names" placeholder="From county records">
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-owner-type">Owner Type</label>
+                                    <input type="text" id="subject-owner-type" placeholder="Individual / LLC">
+                                </div>
+                            </div>
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="subject-owner-occupied">Owner-Occupied</label>
+                                    <select id="subject-owner-occupied">
+                                        <option value="">Unknown</option>
+                                        <option value="yes">Yes</option>
+                                        <option value="no">No</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="subject-owner-mailing">Owner Mailing Address</label>
+                                    <input type="text" id="subject-owner-mailing" placeholder="Differs = absentee owner">
+                                </div>
+                            </div>
+                        </div>
+                    </details>
                     <details class="settings-details hidden">
                         <summary>Property Data Sources (optional — auto-fill works out of the box)</summary>
                         <div class="form-group" style="margin-top: 0.75rem;">

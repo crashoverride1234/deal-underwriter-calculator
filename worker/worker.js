@@ -49,6 +49,7 @@ const REALTOR_QUERY = `query GetHome($property_id: ID!) {
     last_sold_date
     description { beds baths baths_full baths_half sqft lot_sqft year_built garage stories pool type }
     details { category text }
+    tax_history { year tax assessment { total land building } }
     location {
       address { line city state_code postal_code coordinate { lat lon } }
       county { name }
@@ -104,21 +105,36 @@ function realtorToRecord(home) {
   const formatted = addr.line
     ? `${addr.line}, ${addr.city}, ${addr.state_code} ${addr.postal_code || ''}`.trim()
     : null;
-  // Subdivision: prefer an explicit "Subdivision: X" line in the details
-  // categories (true platted name, when the listing carries it); fall back
-  // to the first (most specific) neighborhood name
-  let subdivision = null;
+  // Mine the details categories for labeled facts; subdivision falls back
+  // to the first (most specific) neighborhood name when no explicit line
+  const DETAIL_PATTERNS = {
+    subdivision: /^Subdivision:?\s*(.+)/i,
+    zoning: /^Zoning:?\s*(.+)/i,
+    roof: /^Roofing:?\s*(.+)/i,
+    foundation: /^Foundation:?\s*(.+)/i,
+    heating: /^Heating features:?\s*(.+)/i,
+    cooling: /^Cooling features:?\s*(.+)/i
+  };
+  const mined = {};
   for (const detail of home.details || []) {
     for (const line of detail.text || []) {
-      const m = /^Subdivision:?\s*(.+)/i.exec(line);
-      if (m) { subdivision = m[1].trim(); break; }
+      for (const [key, re] of Object.entries(DETAIL_PATTERNS)) {
+        if (mined[key] === undefined) {
+          const m = re.exec(line);
+          if (m) mined[key] = m[1].trim();
+        }
+      }
     }
-    if (subdivision) break;
   }
-  if (!subdivision) {
+  if (mined.subdivision === undefined) {
     const hoods = (home.location && home.location.neighborhoods) || [];
-    subdivision = hoods.length && hoods[0].name ? hoods[0].name : null;
+    if (hoods.length && hoods[0].name) mined.subdivision = hoods[0].name;
   }
+  // Latest assessment/tax year on record
+  const taxYears = (home.tax_history || []).filter(t => t && t.year);
+  taxYears.sort((a, b) => b.year - a.year);
+  const latestTax = taxYears[0] || null;
+  const assessment = latestTax && latestTax.assessment ? latestTax.assessment : null;
   return {
     sqft: numOrNull(d.sqft),
     beds: numOrNull(d.beds),
@@ -128,8 +144,32 @@ function realtorToRecord(home) {
     garage: numOrNull(d.garage),
     pool: (d.pool === true || d.pool === false) ? d.pool : null,
     stories: numOrNull(d.stories),
-    subdivision,
+    subdivision: mined.subdivision || null,
     hoa: null,
+    propType: d.type || null,
+    county: home.location && home.location.county ? home.location.county.name : null,
+    zoning: mined.zoning || null,
+    apn: null,
+    legal: null,
+    garageType: null,
+    foundation: mined.foundation || null,
+    roof: mined.roof || null,
+    exterior: null,
+    heating: mined.heating || null,
+    cooling: mined.cooling || null,
+    assessedValue: assessment ? numOrNull(assessment.total) : null,
+    assessedLand: assessment ? numOrNull(assessment.land) : null,
+    assessedImprov: assessment ? numOrNull(assessment.building) : null,
+    annualTaxes: latestTax ? numOrNull(latestTax.tax) : null,
+    lastSaleDate: home.last_sold_date || null,
+    lastSalePrice: numOrNull(home.last_sold_price),
+    listPrice: numOrNull(home.list_price),
+    listingStatus: home.status || null,
+    hoaFee: null,
+    ownerNames: null,
+    ownerType: null,
+    ownerOccupied: null,
+    ownerMailing: null,
     formattedAddress: formatted,
     source: 'realtor.com',
     extra: {
@@ -144,9 +184,17 @@ function realtorToRecord(home) {
   };
 }
 
+function latestByYear(byYear) {
+  const years = Object.keys(byYear || {}).map(Number).filter(Number.isFinite);
+  return years.length ? byYear[String(Math.max(...years))] : null;
+}
+
 function rentcastToRecord(p) {
   const f = p.features || {};
   const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
+  const assessment = latestByYear(p.taxAssessments);
+  const taxes = latestByYear(p.propertyTaxes);
+  const owner = p.owner || {};
   return {
     sqft: p.squareFootage != null ? p.squareFootage : null,
     beds: p.bedrooms != null ? p.bedrooms : null,
@@ -158,6 +206,30 @@ function rentcastToRecord(p) {
     stories: f.floorCount != null ? f.floorCount : null,
     subdivision: p.subdivision || null,
     hoa: (p.hoa && p.hoa.fee > 0) ? true : null,
+    propType: p.propertyType || null,
+    county: p.county || null,
+    zoning: p.zoning || null,
+    apn: p.assessorID || null,
+    legal: p.legalDescription || null,
+    garageType: f.garageType || null,
+    foundation: f.foundationType || null,
+    roof: f.roofType || null,
+    exterior: f.exteriorType || null,
+    heating: f.heatingType || (f.heating === true ? 'Yes' : null),
+    cooling: f.coolingType || (f.cooling === true ? 'Yes' : null),
+    assessedValue: assessment ? assessment.value : null,
+    assessedLand: assessment ? assessment.land : null,
+    assessedImprov: assessment ? assessment.improvements : null,
+    annualTaxes: taxes ? taxes.total : null,
+    lastSaleDate: p.lastSaleDate || null,
+    lastSalePrice: p.lastSalePrice != null ? p.lastSalePrice : null,
+    listPrice: null,
+    listingStatus: null,
+    hoaFee: (p.hoa && p.hoa.fee > 0) ? p.hoa.fee : null,
+    ownerNames: Array.isArray(owner.names) && owner.names.length ? owner.names.join(', ') : null,
+    ownerType: owner.type || null,
+    ownerOccupied: (p.ownerOccupied === true || p.ownerOccupied === false) ? p.ownerOccupied : null,
+    ownerMailing: owner.mailingAddress && owner.mailingAddress.formattedAddress ? owner.mailingAddress.formattedAddress : null,
     formattedAddress: p.formattedAddress || null,
     source: 'RentCast'
   };
@@ -170,6 +242,15 @@ function melissaToRecord(r) {
   const parking = r.Parking || {};
   const amenities = r.ExtAmenities || {};
   const poolRaw = amenities.PoolCode || amenities.Pool || '';
+  const legal = r.Legal || {};
+  const parcel = r.Parcel || {};
+  const sale = r.SaleInfo || {};
+  const tax = r.Tax || {};
+  const primOwner = r.PrimaryOwner || {};
+  const ownerAddr = r.OwnerAddress || {};
+  const ext = r.ExtStructInfo || {};
+  const mailing = [ownerAddr.Address, ownerAddr.City, ownerAddr.State, ownerAddr.Zip]
+    .filter(Boolean).join(', ') || null;
   return {
     sqft: numOrNull(size.AreaBuilding),
     beds: numOrNull(room.BedroomsCount),
@@ -179,8 +260,32 @@ function melissaToRecord(r) {
     garage: numOrNull(parking.ParkingSpaceCount),
     pool: poolRaw && poolRaw !== '0' ? true : null,
     stories: numOrNull((r.IntStructInfo || {}).StoriesCount),
-    subdivision: (r.Legal || {}).Subdivision || null,
+    subdivision: legal.Subdivision || null,
     hoa: null,
+    propType: use.PropertyUseGroup || null,
+    county: parcel.County || null,
+    zoning: use.ZoningCode || null,
+    apn: parcel.FormattedAPN || parcel.UnformattedAPN || null,
+    legal: legal.LegalDescription || null,
+    garageType: parking.GarageType || null,
+    foundation: (r.IntStructInfo || {}).Foundation || null,
+    roof: ext.RoofMaterial || ext.RoofCover || null,
+    exterior: ext.Exterior1Code || null,
+    heating: (r.UtilitiesInfo || {}).HVACHeatingDetail || null,
+    cooling: (r.UtilitiesInfo || {}).HVACCoolingDetail || null,
+    assessedValue: numOrNull(tax.AssessedValueTotal),
+    assessedLand: numOrNull(tax.AssessedValueLand),
+    assessedImprov: numOrNull(tax.AssessedValueImprovements),
+    annualTaxes: numOrNull(tax.TaxBilledAmount),
+    lastSaleDate: sale.DeedLastSaleDate || null,
+    lastSalePrice: numOrNull(sale.DeedLastSalePrice),
+    listPrice: null,
+    listingStatus: null,
+    hoaFee: null,
+    ownerNames: primOwner.Name1Full || null,
+    ownerType: primOwner.Type || null,
+    ownerOccupied: null,
+    ownerMailing: mailing,
     formattedAddress: null,
     source: 'Melissa'
   };

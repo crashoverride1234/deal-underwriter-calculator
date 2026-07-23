@@ -544,6 +544,30 @@ const subjectGarageInput = document.getElementById('subject-garage');
 const subjectStoriesInput = document.getElementById('subject-stories');
 const subjectPoolInput = document.getElementById('subject-pool');
 const subjectHoaInput = document.getElementById('subject-hoa');
+const subjectPropTypeInput = document.getElementById('subject-prop-type');
+const subjectCountyInput = document.getElementById('subject-county');
+const subjectZoningInput = document.getElementById('subject-zoning');
+const subjectApnInput = document.getElementById('subject-apn');
+const subjectLegalInput = document.getElementById('subject-legal');
+const subjectGarageTypeInput = document.getElementById('subject-garage-type');
+const subjectFoundationInput = document.getElementById('subject-foundation');
+const subjectRoofInput = document.getElementById('subject-roof');
+const subjectExteriorInput = document.getElementById('subject-exterior');
+const subjectHeatingInput = document.getElementById('subject-heating');
+const subjectCoolingInput = document.getElementById('subject-cooling');
+const subjectAssessedValueInput = document.getElementById('subject-assessed-value');
+const subjectAssessedLandInput = document.getElementById('subject-assessed-land');
+const subjectAssessedImprovInput = document.getElementById('subject-assessed-improv');
+const subjectAnnualTaxesInput = document.getElementById('subject-annual-taxes');
+const subjectLastSaleDateInput = document.getElementById('subject-last-sale-date');
+const subjectLastSalePriceInput = document.getElementById('subject-last-sale-price');
+const subjectListPriceInput = document.getElementById('subject-list-price');
+const subjectListingStatusInput = document.getElementById('subject-listing-status');
+const subjectHoaFeeInput = document.getElementById('subject-hoa-fee');
+const subjectOwnerNamesInput = document.getElementById('subject-owner-names');
+const subjectOwnerTypeInput = document.getElementById('subject-owner-type');
+const subjectOwnerOccupiedInput = document.getElementById('subject-owner-occupied');
+const subjectOwnerMailingInput = document.getElementById('subject-owner-mailing');
 const adjPriceSqftInput = document.getElementById('adj-price-sqft');
 const adjBedInput = document.getElementById('adj-bed');
 const adjBathInput = document.getElementById('adj-bath');
@@ -649,7 +673,17 @@ function splitBaths(total) {
 const SUBJECT_STATE_FIELDS = {
     address: subjectAddressInput, subdivision: subjectSubdivisionInput, sqft: subjectSqftInput, beds: subjectBedsInput,
     bathsFull: subjectBathsFullInput, bathsHalf: subjectBathsHalfInput, lot: subjectLotInput, year: subjectYearInput,
-    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput, hoa: subjectHoaInput
+    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput, hoa: subjectHoaInput,
+    propType: subjectPropTypeInput, county: subjectCountyInput, zoning: subjectZoningInput,
+    apn: subjectApnInput, legal: subjectLegalInput,
+    garageType: subjectGarageTypeInput, foundation: subjectFoundationInput, roof: subjectRoofInput,
+    exterior: subjectExteriorInput, heating: subjectHeatingInput, cooling: subjectCoolingInput,
+    assessedValue: subjectAssessedValueInput, assessedLand: subjectAssessedLandInput,
+    assessedImprov: subjectAssessedImprovInput, annualTaxes: subjectAnnualTaxesInput,
+    lastSaleDate: subjectLastSaleDateInput, lastSalePrice: subjectLastSalePriceInput,
+    listPrice: subjectListPriceInput, listingStatus: subjectListingStatusInput, hoaFee: subjectHoaFeeInput,
+    ownerNames: subjectOwnerNamesInput, ownerType: subjectOwnerTypeInput,
+    ownerOccupied: subjectOwnerOccupiedInput, ownerMailing: subjectOwnerMailingInput
 };
 const SETTINGS_STATE_FIELDS = {
     pricePerSqft: adjPriceSqftInput, bed: adjBedInput, bath: adjBathInput,
@@ -995,9 +1029,10 @@ function setLookupStatus(message, kind) {
 // radius — 404s are NOT billed, so retries are free) → Melissa. Records are
 // normalized to one shape and cached so a property is never fetched twice.
 
-// v2: records gained subdivision/hoa — v1 entries predate them and would
-// silently auto-fill without those fields forever
-const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v2';
+// Bump the version whenever records gain fields — older cached entries
+// would otherwise silently auto-fill without the new fields forever
+// (v2: subdivision/hoa; v3: facts/construction/financial/owner details)
+const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v3';
 let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
 let lastSelectedMprId = null;  // realtor.com property id from the picked suggestion
 
@@ -1040,11 +1075,25 @@ function putCachedRecord(address, record) {
     } catch (e) { /* storage full — cache is best-effort */ }
 }
 
-// Normalized record shape: { sqft, beds, baths, lot, year, garage, pool, stories,
-// subdivision, hoa, formattedAddress, source } — subdivision/hoa are null when unknown
+// Latest-year entry from RentCast's { "2024": {...}, "2025": {...} } maps
+function latestByYear(byYear) {
+    const years = Object.keys(byYear || {}).map(Number).filter(Number.isFinite);
+    return years.length ? byYear[String(Math.max(...years))] : null;
+}
+
+// Normalized record shape — every key is null when the provider doesn't know:
+// { sqft, beds, baths, lot, year, garage, pool, stories, subdivision, hoa,
+//   propType, county, zoning, apn, legal, garageType, foundation, roof,
+//   exterior, heating, cooling, assessedValue, assessedLand, assessedImprov,
+//   annualTaxes, lastSaleDate, lastSalePrice, listPrice, listingStatus,
+//   hoaFee, ownerNames, ownerType, ownerOccupied, ownerMailing,
+//   formattedAddress, source }
 function rentcastToRecord(p) {
     const f = p.features || {};
     const garage = (f.garageSpaces != null) ? f.garageSpaces : (f.garage === true ? 1 : (f.garage === false ? 0 : null));
+    const assessment = latestByYear(p.taxAssessments);
+    const taxes = latestByYear(p.propertyTaxes);
+    const owner = p.owner || {};
     return {
         sqft: p.squareFootage != null ? p.squareFootage : null,
         beds: p.bedrooms != null ? p.bedrooms : null,
@@ -1057,6 +1106,30 @@ function rentcastToRecord(p) {
         subdivision: p.subdivision || null,
         // Absence of HOA data is unknown, not "no HOA"
         hoa: (p.hoa && p.hoa.fee > 0) ? true : null,
+        propType: p.propertyType || null,
+        county: p.county || null,
+        zoning: p.zoning || null,
+        apn: p.assessorID || null,
+        legal: p.legalDescription || null,
+        garageType: f.garageType || null,
+        foundation: f.foundationType || null,
+        roof: f.roofType || null,
+        exterior: f.exteriorType || null,
+        heating: f.heatingType || (f.heating === true ? 'Yes' : null),
+        cooling: f.coolingType || (f.cooling === true ? 'Yes' : null),
+        assessedValue: assessment ? assessment.value : null,
+        assessedLand: assessment ? assessment.land : null,
+        assessedImprov: assessment ? assessment.improvements : null,
+        annualTaxes: taxes ? taxes.total : null,
+        lastSaleDate: p.lastSaleDate || null,
+        lastSalePrice: p.lastSalePrice != null ? p.lastSalePrice : null,
+        listPrice: null,
+        listingStatus: null,
+        hoaFee: (p.hoa && p.hoa.fee > 0) ? p.hoa.fee : null,
+        ownerNames: Array.isArray(owner.names) && owner.names.length ? owner.names.join(', ') : null,
+        ownerType: owner.type || null,
+        ownerOccupied: (p.ownerOccupied === true || p.ownerOccupied === false) ? p.ownerOccupied : null,
+        ownerMailing: owner.mailingAddress && owner.mailingAddress.formattedAddress ? owner.mailingAddress.formattedAddress : null,
         formattedAddress: p.formattedAddress || null,
         source: 'RentCast'
     };
@@ -1076,6 +1149,15 @@ function melissaToRecord(r) {
     // non-zero pool code as "has pool", absence as unknown (not "no")
     const poolRaw = amenities.PoolCode || amenities.Pool || '';
     const pool = poolRaw && poolRaw !== '0' ? true : null;
+    const legal = r.Legal || {};
+    const parcel = r.Parcel || {};
+    const sale = r.SaleInfo || {};
+    const tax = r.Tax || {};
+    const primOwner = r.PrimaryOwner || {};
+    const ownerAddr = r.OwnerAddress || {};
+    const ext = r.ExtStructInfo || {};
+    const mailing = [ownerAddr.Address, ownerAddr.City, ownerAddr.State, ownerAddr.Zip]
+        .filter(Boolean).join(', ') || null;
     return {
         sqft: numOrNull(size.AreaBuilding),
         beds: numOrNull(room.BedroomsCount),
@@ -1085,8 +1167,32 @@ function melissaToRecord(r) {
         garage: numOrNull(parking.ParkingSpaceCount),
         pool,
         stories: numOrNull((r.IntStructInfo || {}).StoriesCount),
-        subdivision: (r.Legal || {}).Subdivision || null,
+        subdivision: legal.Subdivision || null,
         hoa: null,
+        propType: use.PropertyUseGroup || null,
+        county: parcel.County || null,
+        zoning: use.ZoningCode || null,
+        apn: parcel.FormattedAPN || parcel.UnformattedAPN || null,
+        legal: legal.LegalDescription || null,
+        garageType: parking.GarageType || null,
+        foundation: (r.IntStructInfo || {}).Foundation || null,
+        roof: ext.RoofMaterial || ext.RoofCover || null,
+        exterior: ext.Exterior1Code || null,
+        heating: (r.UtilitiesInfo || {}).HVACHeatingDetail || null,
+        cooling: (r.UtilitiesInfo || {}).HVACCoolingDetail || null,
+        assessedValue: numOrNull(tax.AssessedValueTotal),
+        assessedLand: numOrNull(tax.AssessedValueLand),
+        assessedImprov: numOrNull(tax.AssessedValueImprovements),
+        annualTaxes: numOrNull(tax.TaxBilledAmount),
+        lastSaleDate: sale.DeedLastSaleDate || null,
+        lastSalePrice: numOrNull(sale.DeedLastSalePrice),
+        listPrice: null,
+        listingStatus: null,
+        hoaFee: null,
+        ownerNames: primOwner.Name1Full || null,
+        ownerType: primOwner.Type || null,
+        ownerOccupied: null,
+        ownerMailing: mailing,
         formattedAddress: null,
         source: 'Melissa'
     };
@@ -1180,6 +1286,60 @@ function applyPropertyRecord(rec, fallbackAddress) {
             filled.push(`stories ${storyVal}`);
         }
     }
+
+    // Detail fields fill silently (the status line stays readable) and are
+    // counted; each one remains editable like everything else
+    let extraCount = 0;
+    const fillQuiet = (input, value) => {
+        if (value === undefined || value === null || value === '') return;
+        input.value = value;
+        extraCount++;
+    };
+    fillQuiet(subjectPropTypeInput, rec.propType);
+    fillQuiet(subjectCountyInput, rec.county);
+    fillQuiet(subjectZoningInput, rec.zoning);
+    fillQuiet(subjectApnInput, rec.apn);
+    fillQuiet(subjectLegalInput, rec.legal);
+    fillQuiet(subjectGarageTypeInput, rec.garageType);
+    fillQuiet(subjectFoundationInput, rec.foundation);
+    fillQuiet(subjectRoofInput, rec.roof);
+    fillQuiet(subjectExteriorInput, rec.exterior);
+    fillQuiet(subjectHeatingInput, rec.heating);
+    fillQuiet(subjectCoolingInput, rec.cooling);
+    fillQuiet(subjectAssessedValueInput, rec.assessedValue);
+    fillQuiet(subjectAssessedLandInput, rec.assessedLand);
+    fillQuiet(subjectAssessedImprovInput, rec.assessedImprov);
+    fillQuiet(subjectAnnualTaxesInput, rec.annualTaxes);
+    // Date inputs need yyyy-mm-dd, providers send ISO timestamps
+    fillQuiet(subjectLastSaleDateInput, rec.lastSaleDate ? String(rec.lastSaleDate).slice(0, 10) : null);
+    fillQuiet(subjectLastSalePriceInput, rec.lastSalePrice);
+    fillQuiet(subjectListPriceInput, rec.listPrice);
+    fillQuiet(subjectListingStatusInput, rec.listingStatus);
+    fillQuiet(subjectHoaFeeInput, rec.hoaFee);
+    fillQuiet(subjectOwnerNamesInput, rec.ownerNames);
+    fillQuiet(subjectOwnerTypeInput, rec.ownerType);
+    if (rec.ownerOccupied === true || rec.ownerOccupied === false) {
+        subjectOwnerOccupiedInput.value = rec.ownerOccupied ? 'yes' : 'no';
+        extraCount++;
+    }
+    fillQuiet(subjectOwnerMailingInput, rec.ownerMailing);
+    if (extraCount) filled.push(`+${extraCount} detail fields`);
+
+    // Seed the calculator's monthly Taxes/Ins/HOA from real tax + HOA data
+    if (rec.annualTaxes > 0) {
+        const monthly = Math.round(rec.annualTaxes / 12 + (rec.hoaFee || 0));
+        monthlyTaxesInsInput.value = monthly;
+        filled.push(`est. taxes+HOA $${monthly}/mo`);
+    }
+
+    // Absentee signal: tax bill mails somewhere other than the property
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const propAddr = norm(rec.formattedAddress || fallbackAddress);
+    if (rec.ownerOccupied === false ||
+        (rec.ownerMailing && propAddr && norm(rec.ownerMailing) !== propAddr)) {
+        filled.push('ABSENTEE OWNER');
+    }
+
     if (rec.formattedAddress) subjectAddressInput.value = rec.formattedAddress;
     setLookupStatus(
         filled.length
@@ -1533,12 +1693,20 @@ addCompBtn.addEventListener('click', () => {
     subjectAddressInput, subjectSubdivisionInput, subjectSqftInput, subjectBedsInput,
     subjectBathsFullInput, subjectBathsHalfInput,
     subjectLotInput, subjectYearInput, subjectGarageInput,
+    subjectPropTypeInput, subjectCountyInput, subjectZoningInput, subjectApnInput, subjectLegalInput,
+    subjectGarageTypeInput, subjectFoundationInput, subjectRoofInput, subjectExteriorInput,
+    subjectHeatingInput, subjectCoolingInput,
+    subjectAssessedValueInput, subjectAssessedLandInput, subjectAssessedImprovInput,
+    subjectAnnualTaxesInput, subjectLastSaleDateInput, subjectLastSalePriceInput,
+    subjectListPriceInput, subjectListingStatusInput, subjectHoaFeeInput,
+    subjectOwnerNamesInput, subjectOwnerTypeInput, subjectOwnerMailingInput,
     adjPriceSqftInput, adjBedInput, adjBathInput, adjCondAvgInput,
     adjCondDatedInput, adjAppreciationInput, adjLotInput, adjGarageInput,
     adjPoolInput, adjYearInput, adjStoryInput
 ].forEach(input => input.addEventListener('input', recalcAppraisal));
 
-[subjectStoriesInput, subjectPoolInput, subjectHoaInput].forEach(sel => sel.addEventListener('change', recalcAppraisal));
+[subjectStoriesInput, subjectPoolInput, subjectHoaInput, subjectOwnerOccupiedInput]
+    .forEach(sel => sel.addEventListener('change', recalcAppraisal));
 [mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
 
 lookupBtn.addEventListener('click', lookupSubjectProperty);

@@ -75,7 +75,7 @@ GitHub Pages from `main`.
 - Missing comp data must produce NO adjustment, not a phantom one.
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
-  `underwriter-property-cache-v2`.
+  `underwriter-property-cache-v3`.
 - Never commit `worker/.wrangler/` (gitignored) or any secrets; the repo is
   public. The deployed Worker URL is deliberately baked into `app.js` as
   `DEFAULT_WORKER_URL` (zero-setup auto-fill was chosen over URL secrecy;
