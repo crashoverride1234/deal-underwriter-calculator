@@ -77,7 +77,7 @@ const REALTOR_SEARCH_QUERY = `query CompSearch($query: HomeSearchCriteria!, $lim
       list_price
       last_sold_price
       last_sold_date
-      description { beds baths sqft lot_sqft year_built type }
+      description { beds baths sqft lot_sqft year_built type garage stories }
       location { address { line city state_code postal_code coordinate { lat lon } } }
     }
   }
@@ -515,6 +515,8 @@ async function handleComps(params, env, cors) {
         baths: numOrNull(d.baths),
         lotSqft: numOrNull(d.lot_sqft),
         yearBuilt: numOrNull(d.year_built),
+        garage: numOrNull(d.garage),
+        stories: numOrNull(d.stories),
         propType: d.type || null,
         distanceMi: (coord.lat != null && coord.lon != null)
           ? Math.round(milesBetween(lat, lon, coord.lat, coord.lon) * 100) / 100 : null,
@@ -555,6 +557,8 @@ async function handleComps(params, env, cors) {
           baths: numOrNull(c.bathrooms),
           lotSqft: numOrNull(c.lotSize),
           yearBuilt: numOrNull(c.yearBuilt),
+          garage: null,
+          stories: null,
           propType: c.propertyType || null,
           distanceMi: c.distance != null ? Math.round(c.distance * 100) / 100 : null,
           correlation: c.correlation != null ? c.correlation : null,

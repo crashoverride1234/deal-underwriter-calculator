@@ -1102,24 +1102,52 @@ function refreshCompSubdivisions() {
 const suggestCompsBtn = document.getElementById('suggest-comps-btn');
 const compCandidatesPanel = document.getElementById('comp-candidates');
 
-// 0–100 similarity: sqft delta, bed/bath match, vintage, distance, recency
+// Proximity-first ranking (0–100): location and sale recency carry 70 of
+// 100 points — the closest, freshest solds lead. Material similarity earns
+// the last 30, and hard dissimilarity GATES multiply the total down so a
+// next-door sale that's the wrong house (2,000 sqft bigger, 50 years newer)
+// can never ride proximity to the top.
 function candidateScore(c) {
     const sSqft = Engine.num(subjectSqftInput.value);
     const sBeds = Engine.num(subjectBedsInput.value);
     const sBaths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
     const sYear = Engine.num(subjectYearInput.value);
-    let s = 100;
-    if (sSqft > 0 && c.sqft) s -= Math.min(40, Math.abs(c.sqft - sSqft) / sSqft * 100);
-    else s -= 15; // unknown size is a real similarity risk
-    if (c.beds != null && sBeds) s -= Math.min(15, Math.abs(c.beds - sBeds) * 7.5);
-    if (c.baths != null && sBaths) s -= Math.min(10, Math.abs(c.baths - sBaths) * 5);
-    if (c.yearBuilt && sYear) s -= Math.min(15, Math.abs(c.yearBuilt - sYear) / 2);
-    if (c.distanceMi != null) s -= Math.min(10, c.distanceMi * 5);
+    const sGarage = Engine.num(subjectGarageInput.value);
+    const sSingleStory = Engine.num(subjectStoriesInput.value) === 1;
+
+    // 1. Location — 40 pts, fading to 0 at 2 miles
+    let score = (c.distanceMi != null)
+        ? 40 * Math.max(0, 1 - c.distanceMi / 2)
+        : 15; // unknown location = middling, never top-tier
+
+    // 2. Time — 30 pts, fading to 0 at 12 months
     if (c.soldDate) {
         const months = (Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
-        s -= Math.min(10, Math.max(0, months - 3)); // stale sales lose support value
+        score += 30 * Math.max(0, 1 - months / 12);
+    } else {
+        score += 10;
     }
-    return Math.max(0, Math.round(s));
+
+    // 3. Material similarity — 30 pts (sqft 14, beds 5, baths 4, vintage 7)
+    if (sSqft > 0 && c.sqft) score += 14 * Math.max(0, 1 - (Math.abs(c.sqft - sSqft) / sSqft) / 0.35);
+    else score += 5;
+    if (sBeds && c.beds != null) score += 5 * Math.max(0, 1 - Math.abs(c.beds - sBeds) / 2);
+    if (sBaths && c.baths != null) score += 4 * Math.max(0, 1 - Math.abs(c.baths - sBaths) / 2);
+    if (sYear && c.yearBuilt) score += 7 * Math.max(0, 1 - Math.abs(c.yearBuilt - sYear) / 30);
+
+    // 4. Common-sense gates — material wrongness caps what proximity can buy
+    let gate = 1;
+    if (sSqft > 0 && c.sqft) {
+        const dev = Math.abs(c.sqft - sSqft) / sSqft;
+        if (dev > 0.5) gate *= 0.3;        // different class of house
+        else if (dev > 0.3) gate *= 0.6;   // stretch comp at best
+    }
+    if (sBeds && c.beds != null && Math.abs(c.beds - sBeds) >= 3) gate *= 0.6;
+    if (sYear && c.yearBuilt && Math.abs(c.yearBuilt - sYear) > 40) gate *= 0.6;
+    if (sGarage > 0 && c.garage != null && Math.abs(c.garage - sGarage) >= 2) gate *= 0.85;
+    if (c.stories != null && (c.stories === 1) !== sSingleStory) gate *= 0.9;
+
+    return Math.max(0, Math.round(score * gate));
 }
 
 async function suggestComps() {
