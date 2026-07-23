@@ -376,6 +376,7 @@
                                     <th>Sale Price</th>
                                     <th>Net Adj</th>
                                     <th>Adjusted Value</th>
+                                    <th>Gross Adj</th>
                                     <th>Weight</th>
                                 </tr>
                             </thead>
@@ -401,7 +402,11 @@
                             Only change them with market-derived support (paired sales, local
                             $/sqft studies) — a wrong weight silently skews every valuation.
                             The subject is valued in <strong>after-repair (renovated) condition</strong>;
-                            comps in weaker condition adjust upward to match.
+                            comps in weaker condition adjust upward to match. Sequencing follows
+                            appraiser practice: % adjustments apply to each comp's
+                            <strong>time-adjusted</strong> price; renovated comps take no age
+                            adjustment (renovation resets effective age); the sqft line is net
+                            of bedroom/bath footprints so rooms aren't paid for twice.
                         </div>
 
                         <div class="weights-section-title">Physical Differences (dollar-based)</div>
@@ -485,7 +490,7 @@
                             </div>
                             <div class="weight-row">
                                 <div class="weight-head">
-                                    <label for="adj-story">1-Story Premium (− = 2-story mkt)</label>
+                                    <label for="adj-story">Single-Story Premium (− = multi-story mkt)</label>
                                     <div class="input-wrapper has-prefix">
                                         <span class="input-prefix">$</span>
                                         <input type="number" id="adj-story" value="0" step="500">

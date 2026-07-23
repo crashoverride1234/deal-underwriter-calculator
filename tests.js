@@ -215,22 +215,26 @@ test('appraise: sqft, bed, condition and time adjustments are itemized', () => {
     const comp = { salePrice: 280000, sqft: 1400, beds: 2, baths: 2, condition: 'average', monthsAgo: 6 };
     const a = Engine.appraise({ ...APPRAISE_BASE, comps: [comp] });
     const adj = a.comps[0].adjustments;
-    assertNear(adj.sqft, (1500 - 1400) * 50, 1e-9, 'sqft adj');            // +5,000
+    // GLA nets out the missing bedroom's ~120 sqft footprint: 100 - 120 = -20
+    assertNear(adj.sqft, ((1500 - 1400) - 120) * 50, 1e-9, 'sqft adj (net of bedroom footprint)'); // -1,000
     assertNear(adj.beds, 5000, 1e-9, 'bed adj');
     assertNear(adj.baths, 0, 1e-9, 'bath adj');
-    assertNear(adj.condition, 280000 * 0.08, 1e-9, 'condition adj');       // +22,400
+    // Condition applies to the time-adjusted basis, not the stale nominal price
+    const basis = 280000 * (1 + 0.06 * 0.5);                               // 288,400
+    assertNear(adj.condition, basis * 0.08, 1e-9, 'condition adj on basis'); // +23,072
     assertNear(adj.time, 280000 * 0.06 * 0.5, 1e-9, 'time adj');           // +8,400
-    assertNear(a.comps[0].adjustedValue, 320800, 1e-9, 'adjustedValue');
-    assertNear(a.comps[0].grossAdjPct, (40800 / 280000) * 100, 1e-9, 'grossAdjPct');
+    assertNear(a.comps[0].adjustedValue, 280000 - 1000 + 5000 + 23072 + 8400, 1e-9, 'adjustedValue');
+    assertNear(a.comps[0].grossAdjPct, ((1000 + 5000 + 23072 + 8400) / 280000) * 100, 1e-9, 'grossAdjPct');
 });
 
 test('appraise: heavily-adjusted comps get less weight in the blend', () => {
     const adjustedComp = { salePrice: 280000, sqft: 1400, beds: 2, baths: 2, condition: 'average', monthsAgo: 6 };
     const a = Engine.appraise({ ...APPRAISE_BASE, comps: [IDENTICAL_COMP, adjustedComp] });
-    const w2 = 1 - ((40800 / 280000) * 100) / 50;
-    const expected = Math.round(((300000 * 1 + 320800 * w2) / (1 + w2)) / 1000) * 1000;
+    const adjusted = 280000 - 1000 + 5000 + 23072 + 8400;                  // 315,472
+    const w2 = 1 - (((1000 + 5000 + 23072 + 8400) / 280000) * 100) / 50;
+    const expected = Math.round(((300000 * 1 + adjusted * w2) / (1 + w2)) / 1000) * 1000;
     assertNear(a.arv, expected, 1e-9, 'weighted arv');
-    assert(a.arv > 300000 && a.arv < 320800, 'blend must land between the comps');
+    assert(a.arv > 300000 && a.arv < adjusted, 'blend must land between the comps');
     assert(a.comps[1].weight < a.comps[0].weight, 'adjusted comp weighs less');
 });
 
@@ -293,15 +297,59 @@ const FULL_TWIN = {
 };
 
 test('appraise: lot, garage, pool, age and story adjustments are itemized', () => {
-    const comp = { ...FULL_TWIN, lotSqft: 6000, garageSpaces: 1, yearBuilt: 1980, pool: 'no', stories: 2 };
+    // Average condition so the age line fires (renovated resets effective age)
+    const comp = { ...FULL_TWIN, lotSqft: 6000, garageSpaces: 1, yearBuilt: 1980, pool: 'no', stories: 2, condition: 'average' };
     const a = Engine.appraise({ ...APPRAISE_FULL, comps: [comp] });
     const adj = a.comps[0].adjustments;
     assertNear(adj.lot, (8000 - 6000) * 1.5, 1e-9, 'lot adj');             // +3,000
     assertNear(adj.garage, 7500, 1e-9, 'garage adj');
     assertNear(adj.year, (1990 - 1980) * 500, 1e-9, 'age adj');            // +5,000
     assertNear(adj.pool, 15000, 1e-9, 'pool adj (subject has, comp lacks)');
-    assertNear(adj.stories, 5000, 1e-9, '2-story comp vs 1-story premium');
-    assertNear(a.comps[0].netAdjustment, 35500, 1e-9, 'net');
+    assertNear(adj.stories, 5000, 1e-9, 'multi-story comp vs single-story premium');
+    assertNear(adj.condition, 300000 * 0.08, 1e-9, 'average condition (0 months → basis = price)');
+    assertNear(a.comps[0].netAdjustment, 3000 + 7500 + 5000 + 15000 + 5000 + 24000, 1e-9, 'net');
+});
+
+test('appraise: renovated comp takes NO age adjustment (effective age reset)', () => {
+    const oldButRenovated = { ...FULL_TWIN, yearBuilt: 1975 };              // condition: 'renovated'
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [oldButRenovated] });
+    assertNear(a.comps[0].adjustments.year, 0, 1e-9, 'renovation resets effective age');
+    assertNear(a.arv, 300000, 1e-9, 'otherwise-identical comp appraises clean');
+});
+
+test('appraise: GLA nets out room footprints — no bedroom double-count', () => {
+    // Comp is exactly one bedroom-footprint smaller: the sqft line goes to 0
+    // and the full bedroom value is carried once, by the bed adjustment
+    const comp = { salePrice: 300000, sqft: 1380, beds: 2, baths: 2, condition: 'renovated', monthsAgo: 0 };
+    const a = Engine.appraise({ ...APPRAISE_BASE, comps: [comp] });
+    assertNear(a.comps[0].adjustments.sqft, 0, 1e-9, '120 sqft deficit = the bedroom itself');
+    assertNear(a.comps[0].adjustments.beds, 5000, 1e-9, 'bedroom paid once');
+    assertNear(a.comps[0].netAdjustment, 5000, 1e-9, 'net is just the bedroom');
+});
+
+test('appraise: story premium prices stairs, not floor count', () => {
+    const threeStoryComp = { ...FULL_TWIN, stories: 3 };
+    const oneAndAHalf = { ...FULL_TWIN, stories: 1.5 };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [threeStoryComp, oneAndAHalf] });
+    assertNear(a.comps[0].adjustments.stories, 5000, 1e-9, '1-vs-3 = full premium');
+    assertNear(a.comps[1].adjustments.stories, 5000, 1e-9, '1-vs-1.5 = same premium (stairs are stairs)');
+    // Multi-vs-multi is a wash
+    const subj2Story = { ...APPRAISE_FULL.subject, stories: 2 };
+    const b = Engine.appraise({ ...APPRAISE_FULL, subject: subj2Story, comps: [threeStoryComp] });
+    assertNear(b.comps[0].adjustments.stories, 0, 1e-9, '2-vs-3 stories = no adjustment');
+});
+
+test('appraise: overlap advisories flag likely double-counts per comp', () => {
+    const doubled = {
+        ...FULL_TWIN, lotSqft: 6000, condition: 'dated',
+        ratings: { curbAppeal: 'inferior', lotUsability: 'inferior' }
+    };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [doubled] });
+    assert(a.comps[0].overlaps.length === 2, `expected 2 overlaps, got ${a.comps[0].overlaps.length}`);
+    assert(a.comps[0].overlaps[0].includes('curb appeal'), 'condition+curb appeal flagged');
+    assert(a.comps[0].overlaps[1].includes('lot usability'), 'lot size+usability flagged');
+    const clean = Engine.appraise({ ...APPRAISE_FULL, comps: [FULL_TWIN] });
+    assert(clean.comps[0].overlaps.length === 0, 'twin has no overlap advisories');
 });
 
 test('appraise: pool and story adjustments reverse direction correctly', () => {
@@ -320,6 +368,14 @@ test('appraise: qualitative ratings adjust by % of sale price, signed', () => {
     assertNear(adj.schools, 300000 * 0.04, 1e-9, 'inferior schools → +4%');
     assertNear(adj.curbAppeal, -(300000 * 0.02), 1e-9, 'superior curb appeal → -2%');
     assertNear(adj.locationInfluence, 0, 1e-9, 'similar → 0');
+});
+
+test('appraise: percentage adjustments use the time-adjusted basis', () => {
+    const comp = { ...FULL_TWIN, monthsAgo: 12, ratings: { schools: 'inferior' } };
+    const a = Engine.appraise({ ...APPRAISE_FULL, comps: [comp] });
+    const basis = 300000 * 1.06;                       // 6%/yr × 12 months
+    assertNear(a.comps[0].adjustments.time, 18000, 1e-9, 'time establishes the basis');
+    assertNear(a.comps[0].adjustments.schools, basis * 0.04, 1e-9, 'qualitative % on basis, not nominal'); // 12,720
 });
 
 test('appraise: missing comp data means no adjustment (not a phantom one)', () => {

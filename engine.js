@@ -17,7 +17,12 @@
         hardMoneyArvCapRatio: 0.75,      // hard money loans capped at 75% of ARV
         flipSellingCostRate: 0.08,       // agent commissions + title ~8% of sale price
         refiClosingCostRate: 0.02,       // BRRRR refinance closing costs ~2% of loan
-        amortYears: 30
+        amortYears: 30,
+        // GLA a room typically occupies — netted out of the sqft adjustment so
+        // a bedroom/bath difference isn't paid twice (once as generic area,
+        // once as the flat room value)
+        bedroomFootprintSqft: 120,
+        bathFootprintSqft: 50
     };
 
     // Coerce any input to a finite non-negative number
@@ -206,8 +211,18 @@
      *
      * Rating semantics (comp relative to subject): an INFERIOR comp sold for
      * less than the subject deserves, so its price adjusts UP; SUPERIOR down.
-     * storyAdj > 0 encodes a 1-story premium: comps with more stories than
-     * the subject adjust up, comps with fewer adjust down.
+     *
+     * Sequencing follows appraiser practice: the time adjustment establishes a
+     * current-market basis first, and every percentage adjustment (condition,
+     * qualitative) applies to that basis, not the stale nominal price.
+     *
+     * storyAdj > 0 encodes a single-story premium — what the market actually
+     * prices is stairs vs no stairs, so the adjustment fires only when exactly
+     * one side is single-story (2-vs-3 story is a wash). Negative storyAdj
+     * encodes a multi-story-premium market.
+     *
+     * Age uses EFFECTIVE age: a renovated comp takes no year adjustment
+     * (renovation resets it); average/dated comps keep their vintage penalty.
      */
     function appraise(inputs) {
         const subject = inputs.subject || {};
@@ -233,39 +248,74 @@
         const apprPct = Number.isFinite(apprRaw) ? apprRaw : 0;
         const qualPct = settings.qualitativeAdjPct || {};
 
+        const bedFt = settings.bedroomFootprintSqft !== undefined
+            ? num(settings.bedroomFootprintSqft) : DEFAULTS.bedroomFootprintSqft;
+        const bathFt = settings.bathFootprintSqft !== undefined
+            ? num(settings.bathFootprintSqft) : DEFAULTS.bathFootprintSqft;
+        const isSingleStory = (v) => num(v) === 1; // 1.5+ has stairs
+
         const comps = (Array.isArray(inputs.comps) ? inputs.comps : [])
             .map(c => {
                 const salePrice = num(c.salePrice);
                 const cPool = boolish(c.pool);
+                const compCondition = c.condition || 'renovated';
+                const ratings = c.ratings || {};
+
+                // A blank field on either side means NO adjustment for that
+                // factor, never a phantom against 0
+                const sqftOk = has(subject.sqft) && has(c.sqft);
+                const bedsOk = has(subject.beds) && has(c.beds);
+                const bathsOk = has(subject.baths) && has(c.baths);
+
+                // Time first: percentage adjustments below apply to the
+                // time-adjusted (current market) basis, per appraiser practice
+                const timeAdj = salePrice * (apprPct / 100) * (num(c.monthsAgo) / 12);
+                const basis = salePrice + timeAdj;
+
+                // GLA netted of room footprints: the area a bedroom/bath
+                // occupies is paid once, inside the flat room adjustment
+                let sqftDiff = sqftOk ? (sSqft - num(c.sqft)) : 0;
+                if (sqftOk && bedsOk) sqftDiff -= (sBeds - num(c.beds)) * bedFt;
+                if (sqftOk && bathsOk) sqftDiff -= (sBaths - num(c.baths)) * bathFt;
+
                 const adjustments = {
-                    // Guarded like lot/garage below: a blank field on either
-                    // side means NO adjustment, never a phantom against 0
-                    sqft: (has(subject.sqft) && has(c.sqft))
-                        ? (sSqft - num(c.sqft)) * adjPerSqft : 0,
-                    beds: (has(subject.beds) && has(c.beds))
-                        ? (sBeds - num(c.beds)) * bedAdj : 0,
-                    baths: (has(subject.baths) && has(c.baths))
-                        ? (sBaths - num(c.baths)) * bathAdj : 0,
+                    sqft: sqftDiff * adjPerSqft,
+                    beds: bedsOk ? (sBeds - num(c.beds)) * bedAdj : 0,
+                    baths: bathsOk ? (sBaths - num(c.baths)) * bathAdj : 0,
                     lot: (has(subject.lotSqft) && has(c.lotSqft))
                         ? (num(subject.lotSqft) - num(c.lotSqft)) * lotAdj : 0,
                     garage: (has(subject.garageSpaces) && has(c.garageSpaces))
                         ? (num(subject.garageSpaces) - num(c.garageSpaces)) * garageAdj : 0,
-                    year: (num(subject.yearBuilt) > 0 && num(c.yearBuilt) > 0)
+                    // Effective age: renovation resets it, so renovated comps
+                    // take no vintage penalty (their condition line is 0 too)
+                    year: (num(subject.yearBuilt) > 0 && num(c.yearBuilt) > 0 && compCondition !== 'renovated')
                         ? (num(subject.yearBuilt) - num(c.yearBuilt)) * yearAdj : 0,
                     pool: (sPool !== null && cPool !== null && sPool !== cPool)
                         ? (sPool ? poolAdj : -poolAdj) : 0,
+                    // Single-story premium: fires only when exactly one side
+                    // is single-story — the market prices stairs, not floors
                     stories: (has(subject.stories) && has(c.stories))
-                        ? Math.sign(num(c.stories) - num(subject.stories)) * storyAdj : 0,
-                    condition: salePrice * num(condPct[c.condition || 'renovated']) / 100,
-                    time: salePrice * (apprPct / 100) * (num(c.monthsAgo) / 12)
+                        ? (isSingleStory(subject.stories) && !isSingleStory(c.stories) ? storyAdj
+                            : (!isSingleStory(subject.stories) && isSingleStory(c.stories) ? -storyAdj : 0))
+                        : 0,
+                    condition: basis * num(condPct[compCondition]) / 100,
+                    time: timeAdj
                 };
-                // Qualitative grid: % of sale price per factor, signed by rating
-                const ratings = c.ratings || {};
+                // Qualitative grid: % of the time-adjusted basis, signed by rating
                 Object.keys(qualPct).forEach(key => {
                     const r = ratings[key];
                     const sign = r === 'inferior' ? 1 : (r === 'superior' ? -1 : 0);
-                    adjustments[key] = sign * salePrice * num(qualPct[key]) / 100;
+                    adjustments[key] = sign * basis * num(qualPct[key]) / 100;
                 });
+
+                // Likely double-counts the user should sanity-check by hand
+                const overlaps = [];
+                if (compCondition !== 'renovated' && ratings.curbAppeal === 'inferior') {
+                    overlaps.push('condition uplift + inferior curb appeal');
+                }
+                if (adjustments.lot !== 0 && (ratings.lotUsability === 'inferior' || ratings.lotUsability === 'superior')) {
+                    overlaps.push('lot size $ + lot usability %');
+                }
 
                 const netAdjustment = Object.values(adjustments).reduce((a, b) => a + b, 0);
                 const grossAdj = Object.values(adjustments).reduce((a, b) => a + Math.abs(b), 0);
@@ -274,6 +324,7 @@
                     label: c.label || '',
                     salePrice,
                     adjustments,
+                    overlaps,
                     netAdjustment,
                     grossAdjPct,
                     adjustedValue: salePrice + netAdjustment,

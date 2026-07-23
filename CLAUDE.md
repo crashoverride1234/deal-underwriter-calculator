@@ -40,7 +40,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (39 tests as of 2026-07). Must pass before deploy.
+- **Test**: `node tests.js` (44 tests as of 2026-07). Must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -73,6 +73,14 @@ GitHub Pages from `main`.
 
 - Percent inputs are whole numbers (80 = 80%); the engine divides by 100.
 - Missing comp data must produce NO adjustment, not a phantom one.
+- Appraisal model semantics (all deliberate, all tested): time adjustment
+  first, % adjustments (condition/qualitative) apply to the time-adjusted
+  basis; renovated comps take no age adjustment (effective age); the sqft
+  line nets out bedroom/bath footprints (`DEFAULTS.bedroomFootprintSqft`);
+  story premium fires only single-story-vs-multi (stairs, not floor count);
+  appreciation and storyAdj may be negative; the engine emits per-comp
+  `overlaps` advisories for likely double-counts (condition+curbAppeal,
+  lot size+lotUsability).
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
   `underwriter-property-cache-v3`.

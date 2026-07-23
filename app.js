@@ -1004,6 +1004,7 @@ function recalcAppraisal() {
             <td>${formatCurrency(c.salePrice)}</td>
             <td class="${c.netAdjustment >= 0 ? 'adj-pos' : 'adj-neg'}">${netPrefix}${formatCurrency(c.netAdjustment)}</td>
             <td><strong>${formatCurrency(c.adjustedValue)}</strong></td>
+            <td class="${c.flagged ? 'adj-neg' : ''}">${c.grossAdjPct.toFixed(1)}%</td>
             <td>×${c.weight.toFixed(2)}</td>
         `;
         row.querySelector('.comp-name').textContent = c.label || `Comp ${i + 1}`;
@@ -1018,6 +1019,12 @@ function recalcAppraisal() {
         warn.textContent = `⚠ ${flagged.map(c => c.label || 'Unnamed comp').join(', ')}: gross adjustments exceed 25% of sale price — weak comparable(s), consider replacing.`;
         appraisalWarnings.appendChild(warn);
     }
+    a.comps.filter(c => c.overlaps.length).forEach((c, i) => {
+        const warn = document.createElement('div');
+        warn.className = 'appraisal-warning';
+        warn.textContent = `⚠ Possible double-count on ${c.label || 'unnamed comp'}: ${c.overlaps.join('; ')} — the same defect may be adjusted twice, consider easing one side.`;
+        appraisalWarnings.appendChild(warn);
+    });
 
     useArvBtn.disabled = a.arv <= 0;
     useArvBtn.textContent = a.arv > 0
