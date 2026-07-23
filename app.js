@@ -598,6 +598,7 @@ const statAbsorption = document.getElementById('stat-absorption');
 const statPendingRatio = document.getElementById('stat-pending-ratio');
 
 const compsContainer = document.getElementById('comps-container');
+const subjectSummaryEl = document.getElementById('subject-summary');
 const addCompBtn = document.getElementById('add-comp-btn');
 const arvEstimateValue = document.getElementById('arv-estimate-value');
 const arvPpsfNote = document.getElementById('arv-ppsf-note');
@@ -636,7 +637,13 @@ function compTemplate() {
     return {
         label: '', salePrice: 300000, sqft: 1500, beds: 3, baths: 2,
         lotSqft: 7000, garageSpaces: 2, yearBuilt: 1980, pool: 'no', stories: '1',
-        condition: 'renovated', monthsAgo: 0, ratings: defaultRatings()
+        condition: 'renovated', monthsAgo: 0, ratings: defaultRatings(),
+        // Informational detail fields (auto-filled from the comp's address,
+        // not used by the engine math)
+        subdivision: '', propType: '', county: '', zoning: '', apn: '',
+        garageType: '', foundation: '', roof: '', exterior: '', heating: '', cooling: '',
+        assessedValue: '', annualTaxes: '', lastSaleDate: '', lastSalePrice: '', hoaFee: '',
+        ownerNames: '', ownerType: '', ownerOccupied: '', ownerMailing: ''
     };
 }
 
@@ -825,7 +832,10 @@ function renderComps() {
             </div>
             <div class="form-group">
                 <label>Address / Label</label>
-                <input type="text" data-field="label">
+                <div class="autocomplete-wrap">
+                    <input type="text" data-field="label" placeholder="Type address to auto-fill…" autocomplete="off" spellcheck="false">
+                    <div class="address-suggestions hidden" role="listbox"></div>
+                </div>
             </div>
             <div class="input-row">
                 <div class="form-group">
@@ -897,6 +907,112 @@ function renderComps() {
                             <option value="yes">Pool</option>
                         </select>
                     </div>
+                    <div class="comp-ratings-title">Property Facts</div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Subdivision</label>
+                            <input type="text" data-field="subdivision">
+                        </div>
+                        <div class="form-group">
+                            <label>Property Type</label>
+                            <input type="text" data-field="propType">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>County</label>
+                            <input type="text" data-field="county">
+                        </div>
+                        <div class="form-group">
+                            <label>Zoning</label>
+                            <input type="text" data-field="zoning">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Parcel ID (APN)</label>
+                        <input type="text" data-field="apn">
+                    </div>
+                    <div class="comp-ratings-title">Construction</div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Garage Type</label>
+                            <input type="text" data-field="garageType">
+                        </div>
+                        <div class="form-group">
+                            <label>Foundation</label>
+                            <input type="text" data-field="foundation">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Roof</label>
+                            <input type="text" data-field="roof">
+                        </div>
+                        <div class="form-group">
+                            <label>Exterior</label>
+                            <input type="text" data-field="exterior">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Heating</label>
+                            <input type="text" data-field="heating">
+                        </div>
+                        <div class="form-group">
+                            <label>Cooling</label>
+                            <input type="text" data-field="cooling">
+                        </div>
+                    </div>
+                    <div class="comp-ratings-title">Financial &amp; Sale</div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Assessed Value</label>
+                            <input type="number" data-field="assessedValue" min="0" step="1000">
+                        </div>
+                        <div class="form-group">
+                            <label>Annual Taxes</label>
+                            <input type="number" data-field="annualTaxes" min="0" step="100">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Last Sale Date</label>
+                            <input type="date" data-field="lastSaleDate">
+                        </div>
+                        <div class="form-group">
+                            <label>Last Sold Price</label>
+                            <input type="number" data-field="lastSalePrice" min="0" step="1000">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>HOA Fee (monthly)</label>
+                        <input type="number" data-field="hoaFee" min="0" step="10">
+                    </div>
+                    <div class="comp-ratings-title">Owner</div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Owner Name(s)</label>
+                            <input type="text" data-field="ownerNames">
+                        </div>
+                        <div class="form-group">
+                            <label>Owner Type</label>
+                            <input type="text" data-field="ownerType">
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label>Owner-Occupied</label>
+                            <select data-field="ownerOccupied">
+                                <option value="">Unknown</option>
+                                <option value="yes">Yes</option>
+                                <option value="no">No</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Owner Mailing Addr</label>
+                            <input type="text" data-field="ownerMailing">
+                        </div>
+                    </div>
                     <div class="comp-ratings-title">Location &amp; Quality (comp vs subject)</div>
                     ${QUALITATIVE_FACTORS.map(f => `
                     <div class="comp-rating-row">
@@ -930,6 +1046,17 @@ function renderComps() {
             renderComps();
             recalcAppraisal();
         });
+        // Address autocomplete on the label: picking a suggestion auto-fills
+        // the whole comp card from property records
+        attachAddressAutocomplete(
+            card.querySelector('[data-field="label"]'),
+            card.querySelector('.address-suggestions'),
+            (s) => {
+                comp.label = s.line1 || s.text;
+                lookupCompProperty(comp, s.text, s.mprId || null,
+                    (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null);
+            }
+        );
         compsContainer.appendChild(card);
     });
     addCompBtn.disabled = appraisalComps.length >= MAX_COMPS;
@@ -978,10 +1105,27 @@ const CONFIDENCE_STYLES = {
     low: { label: 'LOW', card: 'danger' }
 };
 
+// One-line subject recap above the comps so the CMA is always read
+// against the property it's for (street only — no city/state/zip)
+function updateSubjectSummary() {
+    const street = subjectAddressInput.value.split(',')[0].trim();
+    const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
+    subjectSummaryEl.textContent = [
+        street || 'Subject property',
+        `${Engine.num(subjectSqftInput.value).toLocaleString()} sqft`,
+        `${Engine.num(subjectLotInput.value).toLocaleString()} sqft lot`,
+        `built ${subjectYearInput.value || '—'}`,
+        `${subjectStoriesInput.value} story`,
+        `${subjectBedsInput.value} bd / ${baths} ba / ${subjectGarageInput.value} gar`
+    ].join('  ·  ');
+    subjectSummaryEl.classList.remove('hidden');
+}
+
 function recalcAppraisal() {
     const a = Engine.appraise(readAppraisalInputs());
     lastAppraisal = a;
     updateWeightImpacts(a);
+    updateSubjectSummary();
 
     arvEstimateValue.textContent = formatCurrency(a.arv);
     arvPpsfNote.textContent = a.subjectPricePerSqft > 0
@@ -1273,19 +1417,19 @@ async function rentcastFetch(params, key) {
     return (rec && (rec.squareFootage != null || rec.bedrooms != null)) ? rentcastToRecord(rec) : null;
 }
 
-async function rentcastLookup(address, key) {
+async function rentcastLookup(address, key, opts = {}) {
     // 1. Address variants: canonical suggestion text, then the raw typed text
     const variants = [address];
-    if (rawTypedAddress && rawTypedAddress.toLowerCase() !== address.toLowerCase() && /\d/.test(rawTypedAddress)) {
-        variants.push(rawTypedAddress);
+    if (opts.altAddress && opts.altAddress.toLowerCase() !== address.toLowerCase() && /\d/.test(opts.altAddress)) {
+        variants.push(opts.altAddress);
     }
     for (const variant of variants) {
         const rec = await rentcastFetch(`address=${encodeURIComponent(variant)}`, key);
         if (rec) return rec;
     }
     // 2. Coordinate radius — sidesteps address-string matching entirely
-    if (lastSelectedCoords) {
-        const { lat, lon } = lastSelectedCoords;
+    if (opts.coords) {
+        const { lat, lon } = opts.coords;
         const rec = await rentcastFetch(`latitude=${lat}&longitude=${lon}&radius=0.05&limit=1`, key);
         if (rec) return rec;
     }
@@ -1408,66 +1552,71 @@ function applyPropertyRecord(rec, fallbackAddress) {
     recalcAppraisal();
 }
 
+// Shared provider ladder: cache → browser-pasted keys (deliberate user
+// overrides, so a power user controls their own quota) → Worker unified
+// /lookup (RentCast → Melissa server-side secrets → realtor.com keyless).
+// Returns { rec, problems }; successful records are cached.
+async function fetchPropertyRecord(address, opts = {}) {
+    const problems = [];
+    const cached = getCachedRecord(address);
+    if (cached) return { rec: cached, problems };
+
+    const rcKey = rentcastKeyInput.value.trim();
+    const mdKey = melissaKeyInput.value.trim();
+    const worker = workerBase();
+    let rec = null;
+    if (rcKey) {
+        try {
+            rec = await rentcastLookup(address, rcKey, opts);
+        } catch (err) {
+            problems.push(err instanceof TypeError ? 'RentCast: network error' : err.message);
+        }
+    }
+    if (!rec && mdKey) {
+        try {
+            rec = await melissaLookup(address, mdKey);
+        } catch (err) {
+            problems.push(err instanceof TypeError ? 'Melissa: network error' : err.message);
+        }
+    }
+    if (!rec && worker) {
+        try {
+            const q = new URLSearchParams({ address });
+            if (opts.mprId) q.set('mpr_id', opts.mprId);
+            if (opts.coords) {
+                q.set('latitude', String(opts.coords.lat));
+                q.set('longitude', String(opts.coords.lon));
+            }
+            rec = await workerFetchRecord(`/lookup?${q}`);
+        } catch (err) {
+            problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
+        }
+    }
+    if (rec) putCachedRecord(address, rec);
+    return { rec, problems };
+}
+
 async function lookupSubjectProperty() {
     const address = subjectAddressInput.value.trim();
     if (!address) {
         setLookupStatus('Enter the property address first.', 'error');
         return;
     }
-    const rcKey = rentcastKeyInput.value.trim();
-    const mdKey = melissaKeyInput.value.trim();
-    const worker = workerBase();
-    if (!rcKey && !mdKey && !worker) {
+    if (!rentcastKeyInput.value.trim() && !melissaKeyInput.value.trim() && !workerBase()) {
         setLookupStatus('Deploy the bundled Cloudflare Worker (keyless) or paste a free RentCast/Melissa API key below to enable auto-fill.', 'error');
         rentcastKeyInput.closest('details').open = true;
         return;
     }
 
-    // Cache first — a property already fetched never costs another API call
-    const cached = getCachedRecord(address);
-    if (cached) {
-        applyPropertyRecord(cached, address);
-        return;
-    }
-
     lookupBtn.disabled = true;
     setLookupStatus('Looking up property records…', 'info');
-    const problems = [];
     try {
-        let rec = null;
-        // 1-2. Browser-pasted keys are deliberate user overrides — they run
-        //      before the worker so a power user controls their own quota
-        if (rcKey) {
-            try {
-                rec = await rentcastLookup(address, rcKey);
-            } catch (err) {
-                problems.push(err instanceof TypeError ? 'RentCast: network error' : err.message);
-            }
-        }
-        if (!rec && mdKey) {
-            try {
-                rec = await melissaLookup(address, mdKey);
-            } catch (err) {
-                problems.push(err instanceof TypeError ? 'Melissa: network error' : err.message);
-            }
-        }
-        // 3. Worker unified ladder (one round trip): RentCast → Melissa
-        //    (server-side secrets, skipped when unset) → realtor.com keyless
-        if (!rec && worker) {
-            try {
-                const q = new URLSearchParams({ address });
-                if (lastSelectedMprId) q.set('mpr_id', lastSelectedMprId);
-                if (lastSelectedCoords) {
-                    q.set('latitude', String(lastSelectedCoords.lat));
-                    q.set('longitude', String(lastSelectedCoords.lon));
-                }
-                rec = await workerFetchRecord(`/lookup?${q}`);
-            } catch (err) {
-                problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
-            }
-        }
+        const { rec, problems } = await fetchPropertyRecord(address, {
+            mprId: lastSelectedMprId,
+            coords: lastSelectedCoords,
+            altAddress: rawTypedAddress
+        });
         if (rec) {
-            putCachedRecord(address, rec);
             applyPropertyRecord(rec, address);
         } else {
             setLookupStatus(
@@ -1482,6 +1631,50 @@ async function lookupSubjectProperty() {
     }
 }
 
+// Apply a record to a comp object: only fields the record actually has,
+// and the sale data feeds the CMA directly when present (TX is
+// non-disclosure — sold prices usually only exist for MLS-listed sales)
+function applyRecordToComp(comp, rec) {
+    const set = (field, value) => {
+        if (value !== undefined && value !== null && value !== '') comp[field] = value;
+    };
+    set('sqft', rec.sqft); set('beds', rec.beds); set('baths', rec.baths);
+    set('lotSqft', rec.lot); set('yearBuilt', rec.year); set('garageSpaces', rec.garage);
+    if (rec.pool === true || rec.pool === false) comp.pool = rec.pool ? 'yes' : 'no';
+    if (rec.stories != null) {
+        const v = rec.stories >= 3 ? '3' : String(rec.stories);
+        if (['1', '1.5', '2', '3'].includes(v)) comp.stories = v;
+    }
+    set('subdivision', rec.subdivision); set('propType', rec.propType);
+    set('county', rec.county); set('zoning', rec.zoning); set('apn', rec.apn);
+    set('garageType', rec.garageType); set('foundation', rec.foundation);
+    set('roof', rec.roof); set('exterior', rec.exterior);
+    set('heating', rec.heating); set('cooling', rec.cooling);
+    set('assessedValue', rec.assessedValue); set('annualTaxes', rec.annualTaxes);
+    if (rec.lastSaleDate) comp.lastSaleDate = String(rec.lastSaleDate).slice(0, 10);
+    set('lastSalePrice', rec.lastSalePrice); set('hoaFee', rec.hoaFee);
+    set('ownerNames', rec.ownerNames); set('ownerType', rec.ownerType);
+    if (rec.ownerOccupied === true || rec.ownerOccupied === false) {
+        comp.ownerOccupied = rec.ownerOccupied ? 'yes' : 'no';
+    }
+    set('ownerMailing', rec.ownerMailing);
+    if (rec.lastSalePrice > 0) comp.salePrice = rec.lastSalePrice;
+    if (rec.lastSaleDate) {
+        const months = Math.round((Date.now() - new Date(rec.lastSaleDate).getTime()) / (1000 * 60 * 60 * 24 * 30.44));
+        // Only within the comp window — an ancient record sale must not
+        // masquerade as a 24-month-old comp
+        if (months >= 0 && months <= 24) comp.monthsAgo = months;
+    }
+    if (rec.formattedAddress) comp.label = rec.formattedAddress.split(',')[0];
+}
+
+async function lookupCompProperty(comp, address, mprId, coords) {
+    const { rec } = await fetchPropertyRecord(address, { mprId, coords });
+    if (rec) applyRecordToComp(comp, rec);
+    renderComps();       // reflect whatever filled (or just the label)
+    recalcAppraisal();
+}
+
 // ==================== Address Autocomplete ====================
 // Three free, keyless sources queried in parallel, best-first:
 // - realtor.com geo-suggest (CORS-open): canonical listing addresses with
@@ -1493,77 +1686,96 @@ async function lookupSubjectProperty() {
 // is on file, and every populated field stays editable.
 
 const addressSuggestionsBox = document.getElementById('address-suggestions');
-let suggestDebounce = null;
-let suggestAbort = null;
-let suggestGeneration = 0; // ignore out-of-order responses while typing
-let jsonpCounter = 0;      // unique JSONP callback names (separate from generation)
-let currentSuggestions = [];
-let activeSuggestion = -1;
+let jsonpCounter = 0;      // unique JSONP callback names across all instances
 let rawTypedAddress = '';  // what the user had typed before a suggestion replaced it
 
 function titleCase(s) {
     return s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
 }
 
-function hideSuggestions() {
-    addressSuggestionsBox.classList.add('hidden');
-    addressSuggestionsBox.innerHTML = '';
-    currentSuggestions = [];
-    activeSuggestion = -1;
-}
+// Attach autocomplete to any input + suggestion-box pair. Each instance owns
+// its own debounce, generation counter and abort controller, so the subject
+// field and every comp card can autocomplete independently.
+function attachAddressAutocomplete(input, box, onSelect) {
+    let debounce = null;
+    let generation = 0; // ignore out-of-order responses while typing
+    let list = [];
+    let active = -1;
+    let abortCtrl = null;
 
-function highlightSuggestion(idx) {
-    activeSuggestion = idx;
-    [...addressSuggestionsBox.children].forEach((el, i) => {
-        el.classList.toggle('active', i === idx);
-    });
-}
-
-function selectSuggestion(s) {
-    rawTypedAddress = subjectAddressInput.value.trim(); // keep as a lookup fallback variant
-    lastSelectedCoords = (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null;
-    lastSelectedMprId = s.mprId || null;
-    subjectAddressInput.value = s.text;
-    hideSuggestions();
-    recalcAppraisal(); // persists the chosen address
-    const anyProvider = rentcastKeyInput.value.trim() || melissaKeyInput.value.trim() || workerBase();
-    if (anyProvider) {
-        lookupSubjectProperty(); // auto-populate beds/baths/sqft/etc — all editable after
-    } else {
-        setLookupStatus('Address set. Deploy the free Cloudflare Worker or paste an API key below and property details will fill in automatically.', 'info');
-    }
-}
-
-function renderSuggestions(list) {
-    currentSuggestions = list;
-    activeSuggestion = -1;
-    addressSuggestionsBox.innerHTML = '';
-    if (!list.length) {
-        hideSuggestions();
-        return;
-    }
-    list.forEach((s, i) => {
-        const item = document.createElement('div');
-        item.className = 'address-suggestion';
-        item.setAttribute('role', 'option');
-        const primary = document.createElement('div');
-        primary.textContent = s.line1;
-        item.appendChild(primary);
-        if (s.line2) {
-            const secondary = document.createElement('div');
-            secondary.className = 'suggestion-secondary';
-            secondary.textContent = s.line2;
-            item.appendChild(secondary);
-        }
-        // mousedown (not click) so the input doesn't blur first and eat the event
-        item.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            selectSuggestion(s);
+    const hide = () => {
+        box.classList.add('hidden');
+        box.innerHTML = '';
+        list = [];
+        active = -1;
+    };
+    const highlight = (idx) => {
+        active = idx;
+        [...box.children].forEach((el, i) => el.classList.toggle('active', i === idx));
+    };
+    const render = (items) => {
+        list = items;
+        active = -1;
+        box.innerHTML = '';
+        if (!items.length) { hide(); return; }
+        items.forEach((s, i) => {
+            const item = document.createElement('div');
+            item.className = 'address-suggestion';
+            item.setAttribute('role', 'option');
+            const primary = document.createElement('div');
+            primary.textContent = s.line1;
+            item.appendChild(primary);
+            if (s.line2) {
+                const secondary = document.createElement('div');
+                secondary.className = 'suggestion-secondary';
+                secondary.textContent = s.line2;
+                item.appendChild(secondary);
+            }
+            // mousedown (not click) so the input doesn't blur first and eat the event
+            item.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                hide();
+                onSelect(s);
+            });
+            item.addEventListener('mouseenter', () => highlight(i));
+            box.appendChild(item);
         });
-        item.addEventListener('mouseenter', () => highlightSuggestion(i));
-        addressSuggestionsBox.appendChild(item);
+        box.classList.remove('hidden');
+    };
+
+    input.addEventListener('input', () => {
+        const q = input.value.trim();
+        clearTimeout(debounce);
+        if (q.length < 4) { hide(); return; }
+        debounce = setTimeout(async () => {
+            const gen = ++generation;
+            if (abortCtrl) abortCtrl.abort();
+            abortCtrl = new AbortController();
+            const items = await queryAddressProviders(q, abortCtrl.signal);
+            if (gen === generation) render(items);
+        }, 300);
     });
-    addressSuggestionsBox.classList.remove('hidden');
+    input.addEventListener('keydown', (e) => {
+        if (box.classList.contains('hidden')) return;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            highlight(Math.min(active + 1, list.length - 1));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            highlight(Math.max(active - 1, 0));
+        } else if (e.key === 'Enter' && active >= 0) {
+            e.preventDefault();
+            const s = list[active];
+            hide();
+            onSelect(s);
+        } else if (e.key === 'Escape') {
+            hide();
+        }
+    });
+    input.addEventListener('blur', () => {
+        // Delay so a mousedown on a suggestion can land first
+        setTimeout(hide, 150);
+    });
 }
 
 // realtor.com's public geo-suggest — canonical addresses with street suffixes
@@ -1626,14 +1838,12 @@ function censusSuggestions(query) {
     });
 }
 
-async function photonSuggestions(query) {
-    if (suggestAbort) suggestAbort.abort();
-    suggestAbort = new AbortController();
+async function photonSuggestions(query, signal) {
     try {
         // lat/lon bias toward the continental US improves ranking
         const res = await fetch(
             `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=8&lang=en&lat=39.8&lon=-98.5`,
-            { signal: suggestAbort.signal }
+            { signal }
         );
         if (!res.ok) return [];
         const data = await res.json();
@@ -1659,57 +1869,43 @@ async function photonSuggestions(query) {
     }
 }
 
-async function fetchAddressSuggestions(query) {
-    const generation = ++suggestGeneration;
+// One query across all three sources, merged best-first: realtor.com
+// (canonical, suffixed) first, then Census, then Photon — deduped on
+// street line + zip so near-identical entries collapse
+async function queryAddressProviders(query, signal) {
     // Census needs a house number to match; skip it for street-only fragments
     const censusPromise = /\d/.test(query) ? censusSuggestions(query) : Promise.resolve([]);
     const [realtor, census, photon] = await Promise.all([
-        realtorSuggestions(query), censusPromise, photonSuggestions(query)
+        realtorSuggestions(query), censusPromise, photonSuggestions(query, signal)
     ]);
-    if (generation !== suggestGeneration) return; // a newer query superseded this one
-    // realtor.com (canonical, suffixed) first, then Census, then Photon —
-    // deduped on street line + zip so near-identical entries collapse
     const seen = new Set();
-    const merged = [...realtor, ...census, ...photon].filter(s => {
+    return [...realtor, ...census, ...photon].filter(s => {
         const key = s.text.toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
-    });
-    renderSuggestions(merged.slice(0, 6));
+    }).slice(0, 6);
 }
+
+// Subject field: picking a suggestion sets the canonical address and
+// auto-runs the property lookup
+attachAddressAutocomplete(subjectAddressInput, addressSuggestionsBox, (s) => {
+    rawTypedAddress = subjectAddressInput.value.trim(); // keep as a lookup fallback variant
+    lastSelectedCoords = (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null;
+    lastSelectedMprId = s.mprId || null;
+    subjectAddressInput.value = s.text;
+    recalcAppraisal(); // persists the chosen address
+    const anyProvider = rentcastKeyInput.value.trim() || melissaKeyInput.value.trim() || workerBase();
+    if (anyProvider) {
+        lookupSubjectProperty(); // auto-populate beds/baths/sqft/etc — all editable after
+    } else {
+        setLookupStatus('Address set. Deploy the free Cloudflare Worker or paste an API key below and property details will fill in automatically.', 'info');
+    }
+});
 
 subjectAddressInput.addEventListener('input', () => {
     lastSelectedCoords = null; // typing invalidates the previously picked location
     lastSelectedMprId = null;
-    const q = subjectAddressInput.value.trim();
-    clearTimeout(suggestDebounce);
-    if (q.length < 4) {
-        hideSuggestions();
-        return;
-    }
-    suggestDebounce = setTimeout(() => fetchAddressSuggestions(q), 300);
-});
-
-subjectAddressInput.addEventListener('keydown', (e) => {
-    if (addressSuggestionsBox.classList.contains('hidden')) return;
-    if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        highlightSuggestion(Math.min(activeSuggestion + 1, currentSuggestions.length - 1));
-    } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        highlightSuggestion(Math.max(activeSuggestion - 1, 0));
-    } else if (e.key === 'Enter' && activeSuggestion >= 0) {
-        e.preventDefault();
-        selectSuggestion(currentSuggestions[activeSuggestion]);
-    } else if (e.key === 'Escape') {
-        hideSuggestions();
-    }
-});
-
-subjectAddressInput.addEventListener('blur', () => {
-    // Delay so a mousedown on a suggestion can land first
-    setTimeout(hideSuggestions, 150);
 });
 
 // ==================== Page switching ====================

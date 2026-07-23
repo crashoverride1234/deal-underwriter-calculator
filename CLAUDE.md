@@ -56,7 +56,8 @@ GitHub Pages from `main`.
   CORS-open, canonical suffixed addresses, carries `mpr_id`) → US Census
   geocoder (JSONP only — no CORS) → Photon/OSM (CORS-open, weak US
   house-number coverage).
-- **Property record ladder** (in `lookupSubjectProperty`): localStorage cache
+- **Property record ladder** (in `fetchPropertyRecord`, shared by the subject
+  page and every comp card's address autocomplete): localStorage cache
   → browser-pasted keys as deliberate overrides (RentCast direct with
   variant + lat/long-radius retries, then Melissa direct) → Worker `/lookup`,
   which runs the canonical server-side order in ONE round trip:

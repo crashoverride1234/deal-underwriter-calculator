@@ -225,7 +225,7 @@ label {
     right: 0.75rem;
 }
 
-input[type="number"], input[type="text"], select {
+input[type="number"], input[type="text"], input[type="date"], select {
     width: 100%;
     background: rgba(10, 15, 30, 0.6);
     border: 1px solid var(--border-color);
@@ -237,7 +237,7 @@ input[type="number"], input[type="text"], select {
     transition: all 0.2s ease;
 }
 
-input[type="number"]:focus, input[type="text"]:focus, select:focus {
+input[type="number"]:focus, input[type="text"]:focus, input[type="date"]:focus, select:focus {
     outline: none;
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
@@ -702,6 +702,19 @@ input[type="range"]::-webkit-slider-thumb:active {
 
 .weight-impact.active {
     color: var(--accent-info);
+}
+
+/* One-line subject recap above the comp cards */
+.subject-summary {
+    margin-bottom: 1rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 0.5rem;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    color: #a5b4fc;
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1.5;
 }
 
 .comps-grid {
