@@ -621,7 +621,7 @@ const QUALITATIVE_FACTORS = [
     { key: 'lotPlacement', label: 'Lot Placement', pct: 3 },
     { key: 'lotUsability', label: 'Lot Usability', pct: 3 },
     { key: 'schools', label: 'School District', pct: 4 },
-    { key: 'curbAppeal', label: 'Curb Appeal', pct: 2 },
+    { key: 'curbAppeal', label: 'Curb Appeal', pct: 3 },
     { key: 'floorplan', label: 'Floorplan / Function', pct: 3 },
     { key: 'locationInfluence', label: 'Adverse Location (road / rail / power)', pct: 5 }
 ];
@@ -736,23 +736,73 @@ function restoreAppraisalState() {
     } catch (e) { /* corrupted state — fall back to defaults */ }
 }
 
-// Generate the qualitative % inputs in Adjustment Settings from one source of truth
+// Generate the qualitative % weight rows (slider + number) from one source of truth
 function renderQualSettings() {
     qualSettingsContainer.innerHTML = '';
     QUALITATIVE_FACTORS.forEach(f => {
         const div = document.createElement('div');
-        div.className = 'form-group';
+        div.className = 'weight-row';
         div.innerHTML = `
-            <label></label>
-            <div class="input-wrapper has-suffix">
-                <input type="number" min="0" max="25" step="0.5" value="${f.pct}">
-                <span class="input-suffix">%</span>
-            </div>`;
+            <div class="weight-head">
+                <label for="qual-${f.key}"></label>
+                <div class="input-wrapper has-suffix">
+                    <input type="number" id="qual-${f.key}" min="0" max="25" step="0.5" value="${f.pct}">
+                    <span class="input-suffix">%</span>
+                </div>
+            </div>
+            <input type="range" data-for="qual-${f.key}" min="0" max="15" step="0.5" value="${f.pct}">
+            <div class="weight-impact" data-impact="${f.key}">—</div>`;
         div.querySelector('label').textContent = f.label;
-        const input = div.querySelector('input');
+        const input = div.querySelector('input[type="number"]');
         input.addEventListener('input', recalcAppraisal);
         qualSettingInputs[f.key] = input;
         qualSettingsContainer.appendChild(div);
+    });
+}
+
+// ---- Weight sliders: every range[data-for] mirrors its number input ----
+// Sliders give feel, the number inputs keep paired-sales precision; either
+// side drives the other and both feed the same recalc + persistence path.
+function initWeightSliders() {
+    document.querySelectorAll('input[type="range"][data-for]').forEach(slider => {
+        const num = document.getElementById(slider.dataset.for);
+        if (!num) return;
+        slider.addEventListener('input', () => {
+            num.value = slider.value;
+            num.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        num.addEventListener('input', () => { slider.value = num.value; });
+    });
+    syncWeightSliders();
+}
+
+function syncWeightSliders() {
+    document.querySelectorAll('input[type="range"][data-for]').forEach(slider => {
+        const num = document.getElementById(slider.dataset.for);
+        if (num) slider.value = num.value;
+    });
+}
+
+// Under each weight: what that factor is doing to the current comp set
+// ("3-car subject vs 2-car comps" shows up here as a live +$ on those comps)
+function updateWeightImpacts(a) {
+    const totals = {};
+    a.comps.forEach(c => {
+        Object.entries(c.adjustments).forEach(([k, v]) => {
+            if (!totals[k]) totals[k] = { count: 0, sum: 0 };
+            if (v) { totals[k].count++; totals[k].sum += v; }
+        });
+    });
+    document.querySelectorAll('.weight-impact[data-impact]').forEach(el => {
+        const t = totals[el.dataset.impact];
+        if (!t || !t.count) {
+            el.textContent = 'no effect on current comps';
+            el.classList.remove('active');
+        } else {
+            const avg = t.sum / t.count;
+            el.textContent = `${t.count} of ${a.comps.length} comps · avg ${avg >= 0 ? '+' : '−'}${formatCurrency(Math.abs(avg))}`;
+            el.classList.add('active');
+        }
     });
 }
 
@@ -931,6 +981,7 @@ const CONFIDENCE_STYLES = {
 function recalcAppraisal() {
     const a = Engine.appraise(readAppraisalInputs());
     lastAppraisal = a;
+    updateWeightImpacts(a);
 
     arvEstimateValue.textContent = formatCurrency(a.arv);
     arvPpsfNote.textContent = a.subjectPricePerSqft > 0
@@ -1748,6 +1799,7 @@ if (window.lucide) {
 switchStrategy('flip');
 renderQualSettings();          // must exist before restore fills the % values
 restoreAppraisalState();
+initWeightSliders();           // sliders mirror the restored number values
 try {
     rentcastKeyInput.value = localStorage.getItem(RENTCAST_KEY_STORAGE) || '';
     melissaKeyInput.value = localStorage.getItem(MELISSA_KEY_STORAGE) || '';

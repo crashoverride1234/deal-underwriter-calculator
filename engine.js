@@ -227,7 +227,10 @@
         const storyAdjRaw = parseFloat(settings.storyAdj);
         const storyAdj = Number.isFinite(storyAdjRaw) ? storyAdjRaw : 0;
         const condPct = settings.conditionAdjPct || {};
-        const apprPct = num(settings.annualAppreciationPct);
+        // Appreciation may legitimately be negative (declining market): comps
+        // that sold before a downturn must be adjustable DOWN, so no num() clamp
+        const apprRaw = parseFloat(settings.annualAppreciationPct);
+        const apprPct = Number.isFinite(apprRaw) ? apprRaw : 0;
         const qualPct = settings.qualitativeAdjPct || {};
 
         const comps = (Array.isArray(inputs.comps) ? inputs.comps : [])
@@ -235,9 +238,14 @@
                 const salePrice = num(c.salePrice);
                 const cPool = boolish(c.pool);
                 const adjustments = {
-                    sqft: (sSqft - num(c.sqft)) * adjPerSqft,
-                    beds: (sBeds - num(c.beds)) * bedAdj,
-                    baths: (sBaths - num(c.baths)) * bathAdj,
+                    // Guarded like lot/garage below: a blank field on either
+                    // side means NO adjustment, never a phantom against 0
+                    sqft: (has(subject.sqft) && has(c.sqft))
+                        ? (sSqft - num(c.sqft)) * adjPerSqft : 0,
+                    beds: (has(subject.beds) && has(c.beds))
+                        ? (sBeds - num(c.beds)) * bedAdj : 0,
+                    baths: (has(subject.baths) && has(c.baths))
+                        ? (sBaths - num(c.baths)) * bathAdj : 0,
                     lot: (has(subject.lotSqft) && has(c.lotSqft))
                         ? (num(subject.lotSqft) - num(c.lotSqft)) * lotAdj : 0,
                     garage: (has(subject.garageSpaces) && has(c.garageSpaces))

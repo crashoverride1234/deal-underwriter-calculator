@@ -330,122 +330,7 @@
         <!-- ============ PAGE 2: ARV Estimation (Adjustments & Comps) ============ -->
         <div class="app-grid hidden" id="arv-page">
 
-            <!-- Adjustment Settings (Left Column) -->
-            <div class="panel-card">
-                <div class="input-section-title">
-                    <i data-lucide="settings-2"></i> Adjustment Settings
-                </div>
-                <div class="inputs-group">
-                    <div class="input-row">
-                        <div class="form-group">
-                            <label for="adj-price-sqft">Per SqFt Difference</label>
-                            <div class="input-wrapper has-prefix">
-                                <span class="input-prefix">$</span>
-                                <input type="number" id="adj-price-sqft" value="50" min="0" step="5">
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label for="adj-appreciation">Annual Appreciation</label>
-                            <div class="input-wrapper has-suffix">
-                                <input type="number" id="adj-appreciation" value="3" min="0" max="25" step="0.5">
-                                <span class="input-suffix">%</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="input-row">
-                        <div class="form-group">
-                            <label for="adj-bed">Per Bedroom</label>
-                            <div class="input-wrapper has-prefix">
-                                <span class="input-prefix">$</span>
-                                <input type="number" id="adj-bed" value="5000" min="0" step="500">
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label for="adj-bath">Per Bathroom</label>
-                            <div class="input-wrapper has-prefix">
-                                <span class="input-prefix">$</span>
-                                <input type="number" id="adj-bath" value="7500" min="0" step="500">
-                            </div>
-                        </div>
-                    </div>
-                    <div class="input-row">
-                        <div class="form-group">
-                            <label for="adj-cond-avg">Average Condition Uplift</label>
-                            <div class="input-wrapper has-suffix">
-                                <input type="number" id="adj-cond-avg" value="8" min="0" max="50" step="1">
-                                <span class="input-suffix">%</span>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label for="adj-cond-dated">Dated Condition Uplift</label>
-                            <div class="input-wrapper has-suffix">
-                                <input type="number" id="adj-cond-dated" value="15" min="0" max="50" step="1">
-                                <span class="input-suffix">%</span>
-                            </div>
-                        </div>
-                    </div>
-                    <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
-                        The subject is valued in <strong>after-repair (renovated) condition</strong>.
-                        Comps in weaker condition are adjusted upward to match.
-                    </p>
-                    <details class="settings-details" id="advanced-adjustments">
-                        <summary>Advanced Adjustments (lot, garage, pool, age, quality)</summary>
-                        <div class="inputs-group" style="margin-top: 1rem; margin-bottom: 0;">
-                            <div class="input-row">
-                                <div class="form-group">
-                                    <label for="adj-lot">Lot Size (per sqft)</label>
-                                    <div class="input-wrapper has-prefix">
-                                        <span class="input-prefix">$</span>
-                                        <input type="number" id="adj-lot" value="1.5" min="0" step="0.25">
-                                    </div>
-                                </div>
-                                <div class="form-group">
-                                    <label for="adj-garage">Per Garage Space</label>
-                                    <div class="input-wrapper has-prefix">
-                                        <span class="input-prefix">$</span>
-                                        <input type="number" id="adj-garage" value="7500" min="0" step="500">
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="input-row">
-                                <div class="form-group">
-                                    <label for="adj-pool">Pool</label>
-                                    <div class="input-wrapper has-prefix">
-                                        <span class="input-prefix">$</span>
-                                        <input type="number" id="adj-pool" value="15000" min="0" step="1000">
-                                    </div>
-                                </div>
-                                <div class="form-group">
-                                    <label for="adj-year">Age (per year newer)</label>
-                                    <div class="input-wrapper has-prefix">
-                                        <span class="input-prefix">$</span>
-                                        <input type="number" id="adj-year" value="500" min="0" step="50">
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="form-group">
-                                <label for="adj-story">1-Story Premium (negative = 2-story premium)</label>
-                                <div class="input-wrapper has-prefix">
-                                    <span class="input-prefix">$</span>
-                                    <input type="number" id="adj-story" value="5000" step="500">
-                                </div>
-                            </div>
-                            <div>
-                                <div class="qual-settings-title">Qualitative Ratings (% of comp sale price)</div>
-                                <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; margin-bottom: 0.75rem;">
-                                    Rate each comp against the subject on the comp cards. An <em>inferior</em>
-                                    comp adjusts up by this %, a <em>superior</em> comp adjusts down.
-                                </p>
-                                <div id="qual-settings" class="qual-settings-grid">
-                                    <!-- Populated by JS from QUALITATIVE_FACTORS -->
-                                </div>
-                            </div>
-                        </div>
-                    </details>
-                </div>
-            </div>
-
-            <!-- Comps & Results (Right Column) -->
+            <!-- Comps & Results (single wide column; weights live in a pros-only dropdown below) -->
             <div class="dashboard-grid">
                 <div class="panel-card">
                     <div class="input-section-title" style="justify-content: space-between;">
@@ -502,6 +387,162 @@
                     <button id="use-arv-btn" class="btn" style="width: 100%; margin-top: 1.25rem; padding: 0.9rem;">
                         Use This ARV in the Deal Calculator →
                     </button>
+                </div>
+
+                <!-- Adjustment Weights (pros only, collapsed by default) -->
+                <div class="panel-card pro-weights-card">
+                    <details id="pro-weights">
+                        <summary>
+                            <i data-lucide="sliders"></i> Adjustment Weights
+                            <span class="pro-badge">Pros Only</span>
+                        </summary>
+                        <div class="pro-warning">
+                            ⚠ These weights feed every comp adjustment directly into the ARV.
+                            Only change them with market-derived support (paired sales, local
+                            $/sqft studies) — a wrong weight silently skews every valuation.
+                            The subject is valued in <strong>after-repair (renovated) condition</strong>;
+                            comps in weaker condition adjust upward to match.
+                        </div>
+
+                        <div class="weights-section-title">Physical Differences (dollar-based)</div>
+                        <div class="weights-grid">
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-price-sqft">Living Area ($ / sqft diff)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-price-sqft" value="50" min="0" step="5">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-price-sqft" min="0" max="150" step="5" value="50">
+                                <div class="weight-impact" data-impact="sqft">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-bed">Per Bedroom</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-bed" value="5000" min="0" step="500">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-bed" min="0" max="25000" step="500" value="5000">
+                                <div class="weight-impact" data-impact="beds">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-bath">Per Bathroom</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-bath" value="5000" min="0" step="500">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-bath" min="0" max="20000" step="500" value="5000">
+                                <div class="weight-impact" data-impact="baths">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-garage">Per Garage / Covered Space</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-garage" value="10000" min="0" step="500">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-garage" min="0" max="30000" step="1000" value="10000">
+                                <div class="weight-impact" data-impact="garage">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-lot">Lot Size ($ / sqft diff)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-lot" value="3" min="0" step="0.25">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-lot" min="0" max="15" step="0.25" value="3">
+                                <div class="weight-impact" data-impact="lot">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-pool">Pool</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-pool" value="20000" min="0" step="1000">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-pool" min="0" max="75000" step="2500" value="20000">
+                                <div class="weight-impact" data-impact="pool">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-year">Age ($ / year newer)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-year" value="500" min="0" step="50">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-year" min="0" max="3000" step="100" value="500">
+                                <div class="weight-impact" data-impact="year">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-story">1-Story Premium (− = 2-story mkt)</label>
+                                    <div class="input-wrapper has-prefix">
+                                        <span class="input-prefix">$</span>
+                                        <input type="number" id="adj-story" value="0" step="500">
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-story" min="-25000" max="25000" step="1000" value="0">
+                                <div class="weight-impact" data-impact="stories">—</div>
+                            </div>
+                        </div>
+
+                        <div class="weights-section-title">Condition &amp; Market Time (% of comp price)</div>
+                        <div class="weights-grid">
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-cond-avg">Average-Condition Uplift</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="adj-cond-avg" value="10" min="0" max="50" step="1">
+                                        <span class="input-suffix">%</span>
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-cond-avg" min="0" max="25" step="1" value="10">
+                                <div class="weight-impact" data-impact="condition">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-cond-dated">Dated-Condition Uplift</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="adj-cond-dated" value="20" min="0" max="50" step="1">
+                                        <span class="input-suffix">%</span>
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-cond-dated" min="0" max="40" step="1" value="20">
+                                <div class="weight-impact" data-impact="condition">—</div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="adj-appreciation">Annual Appreciation (− = declining)</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="adj-appreciation" value="2" min="-10" max="25" step="0.5">
+                                        <span class="input-suffix">%</span>
+                                    </div>
+                                </div>
+                                <input type="range" data-for="adj-appreciation" min="-10" max="15" step="0.5" value="2">
+                                <div class="weight-impact" data-impact="time">—</div>
+                            </div>
+                        </div>
+
+                        <div class="weights-section-title">Location &amp; Quality (% of comp price, rated per comp)</div>
+                        <p class="weights-note">
+                            Rate each comp against the subject on the comp cards (superior / similar /
+                            inferior). An <em>inferior</em> comp adjusts up by this %, a <em>superior</em>
+                            comp adjusts down.
+                        </p>
+                        <div id="qual-settings" class="weights-grid">
+                            <!-- Populated by JS from QUALITATIVE_FACTORS -->
+                        </div>
+                    </details>
                 </div>
 
                 <!-- Market Absorption Meter -->

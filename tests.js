@@ -374,6 +374,37 @@ test('absorption: listings but zero sales reads infinite inventory / cold', () =
     assert(m.temperature === 'cold', `expected cold, got ${m.temperature}`);
 });
 
+test('appraise: blank subject sqft/beds/baths produce NO phantom adjustments', () => {
+    const a = Engine.appraise({
+        subject: { sqft: '', beds: '', baths: '' },
+        comps: [{ salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 0 }],
+        settings: { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 0 }
+    });
+    const c = a.comps[0];
+    assert(c.adjustments.sqft === 0, 'no sqft phantom');
+    assert(c.adjustments.beds === 0, 'no beds phantom');
+    assert(c.adjustments.baths === 0, 'no baths phantom');
+    assertNear(c.adjustedValue, 300000, 1e-9, 'comp stays unadjusted');
+});
+
+test('appraise: comp with a blank baths field gets no bath adjustment', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 1500, beds: 3, baths: 2 },
+        comps: [{ salePrice: 300000, sqft: 1500, beds: 3, baths: '', condition: 'renovated', monthsAgo: 0 }],
+        settings: { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 0 }
+    });
+    assert(a.comps[0].adjustments.baths === 0, 'blank comp baths = no adjustment');
+});
+
+test('appraise: negative appreciation adjusts old comps DOWN (declining market)', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 1500, beds: 3, baths: 2 },
+        comps: [{ salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 12 }],
+        settings: { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: -6 }
+    });
+    assertNear(a.comps[0].adjustments.time, -18000, 1e-9, '-6%/yr × 12 months on $300k');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);
