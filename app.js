@@ -1141,8 +1141,24 @@ function refreshCompSubdivisions() {
 // Worker /comps merges realtor.com recent solds (keyless) with RentCast AVM
 // comparables; ranking happens here so it always reflects the live subject.
 
-const suggestCompsBtn = document.getElementById('suggest-comps-btn');
 const compCandidatesPanel = document.getElementById('comp-candidates');
+
+// How many top-ranked priced candidates auto-fill the comp slots when the
+// ARV page is opened from the subject page (user asked for "top 3–5")
+const AUTO_APPLY_COUNT = 4;
+
+// Search generation token: landing on the ARV page twice in quick succession
+// (or hitting Retry) must not let a slow, stale response overwrite the
+// newer search's candidates or double-fill the comp slots. Also bumped when
+// the subject page is entered — the subject may be about to change, and a
+// late response for the OLD address must not fill cards behind the user's back.
+let suggestRunId = 0;
+
+// Comps captured just before a page-entry wipe; offered back via "Restore
+// previous comps" when the search that was meant to replace them fails
+// (e.g. offline PWA) — the wipe must not convert a network error into
+// permanent loss of a hand-tuned appraisal.
+let preResetComps = null;
 
 // Proximity-first ranking (0–100): location and sale recency carry 70 of
 // 100 points — the closest, freshest solds lead. Material similarity earns
@@ -1212,29 +1228,112 @@ async function suggestComps() {
     const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
     if (baths > 0) q.set('baths', String(baths));
 
-    suggestCompsBtn.disabled = true;
+    const runId = ++suggestRunId;
     compCandidatesPanel.innerHTML = '<div class="candidates-note">Searching recent solds near the subject…</div>';
     compCandidatesPanel.classList.remove('hidden');
     try {
         const res = await fetch(`${workerBase()}/comps?${q}`, { headers: { 'Accept': 'application/json' } });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        if (runId !== suggestRunId) return; // superseded by a newer search
         const ranked = (data.candidates || [])
             .map(c => ({ ...c, score: candidateScore(c) }))
             .sort((a, b) => b.score - a.score);
+        if (autoApplyCandidates(ranked) > 0) preResetComps = null; // replacement secured
         renderCandidates(ranked);
     } catch (e) {
-        compCandidatesPanel.innerHTML = '<div class="appraisal-warning">Comp search failed — check the connection and try again.</div>';
-    } finally {
-        suggestCompsBtn.disabled = false;
+        if (runId !== suggestRunId) return;
+        compCandidatesPanel.innerHTML = '';
+        const warn = document.createElement('div');
+        warn.className = 'appraisal-warning';
+        warn.innerHTML = 'Comp search failed — check the connection. '
+            + '<button class="btn btn-secondary" style="padding: 0.25rem 0.7rem; font-size: 0.75rem;">Retry</button>';
+        warn.querySelector('button').addEventListener('click', suggestComps);
+        const restore = makeRestoreButton();
+        if (restore) warn.appendChild(restore);
+        compCandidatesPanel.appendChild(warn);
     }
 }
 
+// "Restore previous comps" — undo the page-entry wipe when the search that
+// was meant to replace them failed or came back empty.
+function makeRestoreButton() {
+    if (!preResetComps) return null;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-secondary';
+    btn.style.cssText = 'padding: 0.25rem 0.7rem; font-size: 0.75rem; margin-left: 0.5rem;';
+    btn.textContent = 'Restore previous comps';
+    btn.addEventListener('click', () => {
+        if (!preResetComps) return;
+        appraisalComps = preResetComps;
+        preResetComps = null;
+        compCandidatesPanel.classList.add('hidden');
+        renderComps();
+        recalcAppraisal();
+    });
+    return btn;
+}
+
+// Addresses from different providers differ in punctuation and spacing
+// ("412 Oak Ave." vs "412 Oak Ave"); compare on alphanumerics only, the same
+// normalization the worker's /comps dedup uses.
+function normalizeAddr(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// The best-scoring priced candidates go straight into the comp slots so the
+// ARV reads instantly; the candidate list stays rendered for swaps/additions.
+// Only ever fills EMPTY slots and skips addresses already on a card, so a
+// re-run (Retry/Refresh) can't duplicate comps or clobber manual entries.
+// The subject's own sale is never auto-applied — at distance 0 it would
+// outscore every real comp and anchor the ARV to the purchase price.
+// Returns how many comps were applied; repaints once, not per comp.
+function autoApplyCandidates(ranked) {
+    const subjectAddr = normalizeAddr(subjectAddressInput.value.split(',')[0]);
+    const priced = new Set();
+    const labelOnly = new Set();
+    appraisalComps.forEach(x => {
+        const key = normalizeAddr(x.label);
+        if (key) (Engine.num(x.salePrice) > 0 ? priced : labelOnly).add(key);
+    });
+    let room = Math.min(
+        AUTO_APPLY_COUNT,
+        appraisalComps.filter(x => !Engine.num(x.salePrice) && !x.label).length
+    );
+    let applied = 0;
+    for (const c of ranked) {
+        const addr = normalizeAddr(c.address);
+        if (subjectAddr && addr === subjectAddr) { c.isSubject = true; continue; }
+        if (priced.has(addr)) { c.autoAdded = true; continue; } // already on a card
+        // A label-only card (address typed, no price yet) blocks auto-fill
+        // for that address but leaves the Add button live for a deliberate click
+        if (labelOnly.has(addr)) continue;
+        if (room <= 0 || !(c.price > 0)) continue;
+        if (!applyCandidateData(c)) continue;
+        c.autoAdded = true;
+        priced.add(addr);
+        room--;
+        applied++;
+    }
+    if (applied) {
+        renderComps();
+        recalcAppraisal();
+    }
+    return applied;
+}
+
 function addCandidateAsComp(c) {
+    if (!applyCandidateData(c)) return;
+    renderComps();
+    recalcAppraisal();
+}
+
+// Pure data move — callers render/recalc themselves so batch fills repaint once
+function applyCandidateData(c) {
     // Fill the first truly empty slot, else append (bounded by MAX_COMPS)
     let comp = appraisalComps.find(x => !Engine.num(x.salePrice) && !x.label);
     if (!comp) {
-        if (appraisalComps.length >= MAX_COMPS) return;
+        if (appraisalComps.length >= MAX_COMPS) return false;
         comp = emptyCompSlot();
         appraisalComps.push(comp);
     }
@@ -1252,23 +1351,28 @@ function addCandidateAsComp(c) {
         const months = Math.round((Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44));
         if (months >= 0 && months <= 24) comp.monthsAgo = months;
     }
-    renderComps();
-    recalcAppraisal();
+    return true;
 }
 
 function renderCandidates(list) {
     compCandidatesPanel.innerHTML = '';
     const head = document.createElement('div');
     head.className = 'candidates-head';
-    head.innerHTML = '<span>Suggested comps — recent nearby solds ranked by similarity to the subject. '
+    head.innerHTML = '<span>Suggested comps — the top matches were auto-filled into the comp cards below; '
+        + 'swap in any other candidate or add your own. '
         + 'Prices are list-at-sale (TX non-disclosure); verify against MLS before relying on them.</span>'
-        + '<button class="comp-remove" title="Close">&times;</button>';
-    head.querySelector('button').addEventListener('click', () => compCandidatesPanel.classList.add('hidden'));
+        + '<span style="display: flex; gap: 0.35rem; flex-shrink: 0;">'
+        + '<button class="comp-remove" data-act="refresh" title="Search again">&#x21bb;</button>'
+        + '<button class="comp-remove" data-act="close" title="Close">&times;</button></span>';
+    head.querySelector('[data-act="refresh"]').addEventListener('click', suggestComps);
+    head.querySelector('[data-act="close"]').addEventListener('click', () => compCandidatesPanel.classList.add('hidden'));
     compCandidatesPanel.appendChild(head);
     if (!list.length) {
         const none = document.createElement('div');
         none.className = 'candidates-note';
         none.textContent = 'No recent solds found nearby — add comps manually from MLS.';
+        const restore = makeRestoreButton();
+        if (restore) none.appendChild(restore);
         compCandidatesPanel.appendChild(none);
         return;
     }
@@ -1295,6 +1399,14 @@ function renderCandidates(list) {
         row.querySelector('.candidate-specs').textContent = specs;
         row.querySelector('.candidate-score').textContent = c.score;
         const btn = row.querySelector('.candidate-add');
+        if (c.isSubject) {
+            btn.disabled = true;
+            btn.textContent = 'Subject';
+            btn.title = "The subject property's own sale — shown for reference, not usable as a comp";
+        } else if (c.autoAdded) {
+            btn.disabled = true;
+            btn.textContent = 'Added ✓';
+        }
         btn.addEventListener('click', () => {
             addCandidateAsComp(c);
             btn.disabled = true;
@@ -1303,8 +1415,6 @@ function renderCandidates(list) {
         compCandidatesPanel.appendChild(row);
     });
 }
-
-suggestCompsBtn.addEventListener('click', suggestComps);
 
 // ==================== Site Map & Influence Scan ====================
 // Leaflet + Esri imagery for the eyeball read (pools, greenbelts, what the
@@ -2418,7 +2528,33 @@ subjectAddressInput.addEventListener('input', () => {
 
 // ==================== Page switching ====================
 
+// Any subject-page visit arms the next ARV arrival for a fresh appraisal —
+// even via a calculator detour (subject → calculator → arv must not carry
+// the old property's comps into the new subject). ARV ⇄ calculator hops
+// alone never reset.
+let subjectVisitedSinceArv = true;
+
+// Fresh appraisal on ARV entry: prior comps are wiped and the top-ranked
+// nearby solds are searched and auto-filled (deliberate — stale comps from
+// the last property must never bleed into a new subject). The outgoing set
+// is kept in memory so a failed search can offer "Restore previous comps".
+function resetCompsAndSuggest() {
+    if (!lastSelectedCoords && !subjectAddressInput.value.trim()) return; // nothing to search around
+    if (appraisalComps.some(c => c.label || Engine.num(c.salePrice) > 0)) {
+        preResetComps = appraisalComps;
+    }
+    appraisalComps = Array.from({ length: 4 }, () => emptyCompSlot());
+    compCandidatesPanel.classList.add('hidden');
+    renderComps();
+    recalcAppraisal();
+    suggestComps();
+}
+
 function switchPage(page) {
+    if (page === 'subject') {
+        subjectVisitedSinceArv = true;
+        suggestRunId++; // the subject may be about to change — kill any in-flight comp search
+    }
     pageSubjectBtn.classList.toggle('active', page === 'subject');
     pageArvBtn.classList.toggle('active', page === 'arv');
     pageCalculatorBtn.classList.toggle('active', page === 'calculator');
@@ -2426,6 +2562,10 @@ function switchPage(page) {
     arvPage.classList.toggle('hidden', page !== 'arv');
     calculatorPage.classList.toggle('hidden', page !== 'calculator');
     strategySelector.classList.toggle('hidden', page !== 'calculator');
+    if (page === 'arv' && subjectVisitedSinceArv) {
+        subjectVisitedSinceArv = false;
+        resetCompsAndSuggest();
+    }
     if (page === 'calculator' && chart) {
         // Chart may have been created while its container was hidden
         requestAnimationFrame(() => chart.resize());
