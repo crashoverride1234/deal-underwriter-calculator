@@ -108,6 +108,10 @@ GitHub Pages from `main`.
   appreciation and storyAdj may be negative; the engine emits per-comp
   `overlaps` advisories for likely double-counts (condition+curbAppeal,
   lot size+lotUsability).
+- Every open starts a BLANK underwriting (deliberate, 2026-08): subject
+  fields, market inputs, and comps never restore and index.html carries no
+  demo values; only the adjustment-grid settings + qualitative weights
+  persist (`underwriter-appraisal-v1` is settings-only now) plus API keys.
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
   `underwriter-property-cache-v3`.

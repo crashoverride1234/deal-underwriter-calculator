@@ -648,12 +648,6 @@ function compTemplate() {
     };
 }
 
-// Older saved comps predate the extra fields; fill gaps with template values
-function normalizeComp(c) {
-    const t = compTemplate();
-    return { ...t, ...c, ratings: { ...t.ratings, ...(c.ratings || {}) } };
-}
-
 // A slot that renders as a card but stays out of the blend until priced
 // (the engine drops zero-price comps, and blank fields adjust nothing)
 function emptyCompSlot() {
@@ -664,15 +658,11 @@ function emptyCompSlot() {
     };
 }
 
-const DEFAULT_COMPS = [
-    { ...compTemplate(), label: '412 Oak Ave', salePrice: 325000, sqft: 1520, lotSqft: 7200, yearBuilt: 1982, monthsAgo: 2 },
-    { ...compTemplate(), label: '88 Birch Ln', salePrice: 310000, sqft: 1450, lotSqft: 6800, yearBuilt: 1978, monthsAgo: 4 },
-    { ...compTemplate(), label: '205 Cedar Ct', salePrice: 289000, sqft: 1400, baths: 1, garageSpaces: 1, yearBuilt: 1975, condition: 'average', monthsAgo: 6,
-      ratings: { ...defaultRatings(), locationInfluence: 'inferior' } },
-    emptyCompSlot()
-];
-
-let appraisalComps = DEFAULT_COMPS.map(c => normalizeComp(c));
+// Every open starts a blank underwriting: no demo comps, no restored
+// property — the address autocomplete + auto-suggest rebuild a deal in
+// seconds, so carrying stale property data across sessions costs more
+// than it saves (deliberate, 2026-08).
+let appraisalComps = Array.from({ length: 4 }, () => emptyCompSlot());
 let lastAppraisal = null;
 const qualSettingInputs = {}; // factor key -> generated % input
 
@@ -688,29 +678,14 @@ function splitBaths(total) {
     return { full, half: rounded - full >= 0.5 ? 1 : 0 };
 }
 
-// Shared field lists so save/restore can't drift apart (key -> input element)
-const SUBJECT_STATE_FIELDS = {
-    address: subjectAddressInput, subdivision: subjectSubdivisionInput, sqft: subjectSqftInput, beds: subjectBedsInput,
-    bathsFull: subjectBathsFullInput, bathsHalf: subjectBathsHalfInput, lot: subjectLotInput, year: subjectYearInput,
-    garage: subjectGarageInput, stories: subjectStoriesInput, pool: subjectPoolInput, hoa: subjectHoaInput,
-    propType: subjectPropTypeInput, county: subjectCountyInput, zoning: subjectZoningInput,
-    apn: subjectApnInput, legal: subjectLegalInput,
-    garageType: subjectGarageTypeInput, foundation: subjectFoundationInput, roof: subjectRoofInput,
-    exterior: subjectExteriorInput, heating: subjectHeatingInput, cooling: subjectCoolingInput,
-    assessedValue: subjectAssessedValueInput, assessedLand: subjectAssessedLandInput,
-    assessedImprov: subjectAssessedImprovInput, annualTaxes: subjectAnnualTaxesInput,
-    lastSaleDate: subjectLastSaleDateInput, lastSalePrice: subjectLastSalePriceInput,
-    listPrice: subjectListPriceInput, listingStatus: subjectListingStatusInput, hoaFee: subjectHoaFeeInput,
-    ownerNames: subjectOwnerNamesInput, ownerType: subjectOwnerTypeInput,
-    ownerOccupied: subjectOwnerOccupiedInput, ownerMailing: subjectOwnerMailingInput
-};
+// Only the appraisal MODEL settings persist across opens (adjustment grid
+// % values + qualitative weights — market-area tuning, not property data).
+// Subject fields, market inputs, and comps deliberately start blank every
+// open; older saved blobs carried them and are simply ignored on restore.
 const SETTINGS_STATE_FIELDS = {
     pricePerSqft: adjPriceSqftInput, bed: adjBedInput, bath: adjBathInput,
     condAvg: adjCondAvgInput, condDated: adjCondDatedInput, appreciation: adjAppreciationInput,
     lot: adjLotInput, garage: adjGarageInput, pool: adjPoolInput, year: adjYearInput, story: adjStoryInput
-};
-const MARKET_STATE_FIELDS = {
-    actives: mktActivesInput, pendings: mktPendingsInput, sold90: mktSold90Input
 };
 
 function saveAppraisalState() {
@@ -721,10 +696,7 @@ function saveAppraisalState() {
         });
         const dump = fields => Object.fromEntries(Object.entries(fields).map(([k, input]) => [k, input.value]));
         localStorage.setItem(APPRAISAL_STORAGE_KEY, JSON.stringify({
-            ...dump(SUBJECT_STATE_FIELDS),
-            settings: { ...dump(SETTINGS_STATE_FIELDS), qual },
-            market: dump(MARKET_STATE_FIELDS),
-            comps: appraisalComps
+            settings: { ...dump(SETTINGS_STATE_FIELDS), qual }
         }));
     } catch (e) { /* storage full/blocked — appraisal still works, just not persisted */ }
 }
@@ -735,11 +707,9 @@ function restoreAppraisalState() {
         if (!raw) return;
         const s = JSON.parse(raw);
         const set = (input, v) => { if (v !== undefined && v !== null) input.value = v; };
-        const apply = (fields, source) => Object.entries(fields).forEach(([k, input]) => set(input, source[k]));
 
-        apply(SUBJECT_STATE_FIELDS, s);
         if (s.settings) {
-            apply(SETTINGS_STATE_FIELDS, s.settings);
+            Object.entries(SETTINGS_STATE_FIELDS).forEach(([k, input]) => set(input, s.settings[k]));
             if (s.settings.qual) {
                 QUALITATIVE_FACTORS.forEach(f => {
                     if (qualSettingInputs[f.key] && s.settings.qual[f.key] !== undefined) {
@@ -747,13 +717,6 @@ function restoreAppraisalState() {
                     }
                 });
             }
-        }
-        if (s.market) apply(MARKET_STATE_FIELDS, s.market);
-        if (Array.isArray(s.comps) && s.comps.length) {
-            appraisalComps = s.comps.slice(0, MAX_COMPS).map(normalizeComp);
-            // Keep a spare slot visible (min 4 cards); empty slots stay out
-            // of the blend until priced
-            while (appraisalComps.length < 4) appraisalComps.push(emptyCompSlot());
         }
     } catch (e) { /* corrupted state — fall back to defaults */ }
 }
@@ -2579,12 +2542,13 @@ continueToArvBtn.addEventListener('click', () => switchPage('arv'));
 useArvBtn.addEventListener('click', useAppraisedArv);
 addCompBtn.addEventListener('click', () => {
     if (appraisalComps.length >= MAX_COMPS) return;
-    // Seed the new comp from the subject so only the differences need editing
+    // Seed physicals from the subject so only the differences need editing;
+    // the price stays blank so the card sits out of the blend until priced
     appraisalComps.push({
-        ...compTemplate(),
-        sqft: Engine.num(subjectSqftInput.value), beds: Engine.num(subjectBedsInput.value),
-        baths: totalBaths(subjectBathsFullInput, subjectBathsHalfInput), lotSqft: Engine.num(subjectLotInput.value),
-        garageSpaces: Engine.num(subjectGarageInput.value), yearBuilt: Engine.num(subjectYearInput.value),
+        ...emptyCompSlot(),
+        sqft: Engine.num(subjectSqftInput.value) || '', beds: Engine.num(subjectBedsInput.value) || '',
+        baths: totalBaths(subjectBathsFullInput, subjectBathsHalfInput) || '', lotSqft: Engine.num(subjectLotInput.value) || '',
+        garageSpaces: Engine.num(subjectGarageInput.value) || '', yearBuilt: Engine.num(subjectYearInput.value) || '',
         pool: subjectPoolInput.value, stories: subjectStoriesInput.value
     });
     renderComps();
