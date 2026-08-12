@@ -66,7 +66,10 @@ GitHub Pages from `main`.
   secret is unset are skipped. RentCast: 50/mo free, only HTTP-200s billed.
   Melissa: ~1,000 credits/mo free. Worker also keeps `/property`, `/rentcast`,
   `/melissa`, `/health` as individual debug routes.
-- **Comp suggestions** (`/comps` route + "Suggest Comps" button): realtor.com
+- **Comp suggestions** (`/comps` route, auto-runs on ARV-page entry after any
+  subject-page visit — wipes prior comps, auto-fills the top 4 into the
+  cards, offers "Restore previous comps" if the search fails; no manual
+  button since 2026-08): realtor.com
   `home_search` sold listings (keyless; `nearby.coordinates` is GeoJSON
   [lon, lat], radius pattern "1mi", filters verified live 2026-07-23) merged
   with RentCast AVM `/avm/value` comparables (1 billed request per call,
