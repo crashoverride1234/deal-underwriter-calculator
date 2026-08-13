@@ -406,5 +406,29 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption };
+    // ---- Listing-remarks condition read ----
+    // Maps listing-remarks language onto the appraisal's condition buckets.
+    // Returns { condition: 'renovated'|'average'|'dated', evidence } or null
+    // when the text carries no usable signal — callers keep their own default
+    // and should surface that the condition is unverified.
+    // Priority is deliberate: full-scope renovation language beats distress
+    // language (flip resales routinely say "completely remodeled … sold
+    // as-is"), and distress beats partial-update mentions.
+    const RENOVATED_RX = /(?:fully|completely|totally|entirely|newly|recently|professionally|beautifully|extensively|tastefully|meticulously)[\s-]*(?:remodel|renovat|updat|restor)\w*|(?:complete|total|full|extensive)\s+(?:remodel|renovation|rehab|makeover|transformation)|reimagined|down to the studs|studs[\s-]?out|like[\s-]new condition/;
+    const DATED_RX = /\bas[\s-]?is\b|fixer[\s-]?upper|\bhandyman\b|investor special|needs?\s+(?:some\s+)?(?:work|updating|updates|repairs?|renovation|rehab|tlc)|\btlc\b|sweat equity|bring your (?:vision|toolbox|contractor|ideas)|original condition|renovation[\s-]ready|great bones|(?:full|tons|lots) of potential|cash[\s-]?only|sold for lot value/;
+    const PARTIAL_RX = /(?:remodel|renovat|updat|restor)\w*|new (?:roof|hvac|a\/?c|floor\w*|windows|kitchen|carpet|paint|appliances|water heater|plumbing|electrical)/;
+
+    function classifyCondition(text) {
+        if (!text) return null;
+        const t = String(text).toLowerCase();
+        const reno = t.match(RENOVATED_RX);
+        if (reno) return { condition: 'renovated', evidence: reno[0] };
+        const dated = t.match(DATED_RX);
+        if (dated) return { condition: 'dated', evidence: dated[0] };
+        const partial = t.match(PARTIAL_RX);
+        if (partial) return { condition: 'average', evidence: partial[0] };
+        return null;
+    }
+
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition };
 }));

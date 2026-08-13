@@ -461,6 +461,39 @@ test('appraise: negative appreciation adjusts old comps DOWN (declining market)'
     assertNear(a.comps[0].adjustments.time, -18000, 1e-9, '-6%/yr × 12 months on $300k');
 });
 
+// ---- classifyCondition: listing-remarks condition read ----
+
+test('classify: full-scope renovation language reads renovated', () => {
+    assert(Engine.classifyCondition('Completely remodeled in 2024 with designer finishes').condition === 'renovated');
+    assert(Engine.classifyCondition('This home has been PROFESSIONALLY RENOVATED top to bottom').condition === 'renovated');
+    assert(Engine.classifyCondition('Stunning home, recently updated throughout').condition === 'renovated');
+    assert(Engine.classifyCondition('Taken down to the studs and reimagined').condition === 'renovated');
+});
+
+test('classify: distress / as-is language reads dated', () => {
+    assert(Engine.classifyCondition('Sold as-is. Investor special!').condition === 'dated');
+    assert(Engine.classifyCondition('Needs some TLC but great location').condition === 'dated');
+    assert(Engine.classifyCondition('Great bones, bring your vision').condition === 'dated');
+    assert(Engine.classifyCondition('Handyman opportunity, needs work').condition === 'dated');
+});
+
+test('classify: partial-update mentions read average', () => {
+    assert(Engine.classifyCondition('Updated kitchen with granite counters').condition === 'average');
+    assert(Engine.classifyCondition('New roof (2023) and new water heater').condition === 'average');
+});
+
+test('classify: flip resale — renovation language outranks as-is boilerplate', () => {
+    const r = Engine.classifyCondition('Completely renovated! Seller never occupied, sold as-is.');
+    assert(r.condition === 'renovated', 'remodel beats boilerplate as-is');
+});
+
+test('classify: no signal or missing text returns null, never a guess', () => {
+    assert(Engine.classifyCondition('Charming home near parks and top schools') === null);
+    assert(Engine.classifyCondition('') === null);
+    assert(Engine.classifyCondition(null) === null);
+    assert(Engine.classifyCondition(undefined) === null);
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

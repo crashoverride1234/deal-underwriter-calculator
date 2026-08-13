@@ -76,7 +76,14 @@ GitHub Pages from `main`.
   correlation-ranked), deduped by street address; client ranks 0–100 by
   similarity to the live subject. TX non-disclosure: prices are list-at-sale
   proxies — the UI says to verify against MLS. NTREIS BBO (Trestle) remains
-  the endgame for true sold prices.
+  the endgame for true sold prices. Listing REMARKS survive closing (unlike
+  photos; verified 2026-08-13) and ride on candidates as `remarks` —
+  realtor.com strips `description.text` for bare datacenter requests, so the
+  worker sends full browser-shaped headers (Origin/Referer/Accept-Language);
+  engine `classifyCondition()` reads renovated/average/dated from that text
+  (renovation language > distress language > partial updates), auto-applied
+  comps carry `conditionEvidence`, and no-signal comps get
+  `conditionUnverified` + a visible warning until the user sets Condition.
 - **Site map & influence scan**: Leaflet 1.9.4 (pinned unpkg CDN) + Esri
   World Imagery tiles (keyless) on the subject page; Overpass API
   (`overpass-api.de`, keyless, CORS-open) reads nearest major road / rail /

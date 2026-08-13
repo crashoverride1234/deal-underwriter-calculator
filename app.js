@@ -1015,6 +1015,11 @@ function renderComps() {
             el.value = comp[el.dataset.field];
             el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
                 comp[el.dataset.field] = el.value;
+                if (el.dataset.field === 'condition') {
+                    // The user made the call — stop flagging it as assumed
+                    comp.conditionUnverified = false;
+                    delete comp.conditionEvidence;
+                }
                 recalcAppraisal();
             });
         });
@@ -1314,6 +1319,18 @@ function applyCandidateData(c) {
         const months = Math.round((Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44));
         if (months >= 0 && months <= 24) comp.monthsAgo = months;
     }
+    // Condition read from listing remarks when the language is clear;
+    // otherwise the card default (renovated) stands but is FLAGGED so the
+    // assumption is never silent. Remarks survive closing; photos don't —
+    // MLS stays the ground truth either way.
+    const read = Engine.classifyCondition(c.remarks);
+    if (read) {
+        comp.condition = read.condition;
+        comp.conditionEvidence = read.evidence;
+        comp.conditionUnverified = false;
+    } else {
+        comp.conditionUnverified = true;
+    }
     return true;
 }
 
@@ -1342,6 +1359,10 @@ function renderCandidates(list) {
     list.forEach(c => {
         const row = document.createElement('div');
         row.className = 'candidate-row';
+        const read = Engine.classifyCondition(c.remarks);
+        const conditionNote = read
+            ? `remarks → ${read.condition} (“${read.evidence}”)`
+            : (c.remarks ? 'remarks: no condition signal' : 'no remarks');
         const specs = [
             c.price ? formatCurrency(c.price) : 'no price',
             c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null,
@@ -1349,8 +1370,10 @@ function renderCandidates(list) {
             (c.beds != null && c.baths != null) ? `${c.beds} bd / ${c.baths} ba` : null,
             c.yearBuilt ? `blt ${c.yearBuilt}` : null,
             c.distanceMi != null ? `${c.distanceMi} mi` : null,
-            c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null
+            c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null,
+            conditionNote
         ].filter(Boolean).join(' · ');
+        if (c.remarks) row.title = c.remarks.slice(0, 600); // hover to read the listing text
         row.innerHTML = `
             <div class="candidate-main">
                 <div class="candidate-addr"></div>
@@ -1741,6 +1764,16 @@ function recalcAppraisal() {
         warn.textContent = `⚠ Possible double-count on ${c.label || 'unnamed comp'}: ${c.overlaps.join('; ')} — the same defect may be adjusted twice, consider easing one side.`;
         appraisalWarnings.appendChild(warn);
     });
+
+    // Auto-added comps whose listing remarks gave no condition signal are
+    // blended at the card default (Renovated) — never let that pass silently
+    const assumed = appraisalComps.filter(c => c.conditionUnverified && Engine.num(c.salePrice) > 0);
+    if (assumed.length) {
+        const warn = document.createElement('div');
+        warn.className = 'appraisal-warning';
+        warn.textContent = `⚠ Condition unverified on: ${assumed.map(c => c.label || 'unnamed comp').join(', ')} — no renovation signal in listing remarks, so Renovated is assumed. Verify in MLS or set the Condition dropdown (that clears this warning).`;
+        appraisalWarnings.appendChild(warn);
+    }
 
     useArvBtn.disabled = a.arv <= 0;
     useArvBtn.textContent = a.arv > 0

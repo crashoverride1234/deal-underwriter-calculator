@@ -82,7 +82,7 @@ const REALTOR_SEARCH_QUERY = `query CompSearch($query: HomeSearchCriteria!, $lim
       list_price
       last_sold_price
       last_sold_date
-      description { beds baths sqft lot_sqft year_built type garage stories }
+      description { text beds baths sqft lot_sqft year_built type garage stories }
       location { address { line city state_code postal_code coordinate { lat lon } } }
     }
   }
@@ -484,7 +484,13 @@ async function handleComps(params, env, cors) {
         'Content-Type': 'application/json',
         'rdc-client-name': 'RDC_WEB_DETAILS_PAGE',
         'rdc-client-version': '3.x.x',
-        'User-Agent': BROWSER_UA
+        'User-Agent': BROWSER_UA,
+        // Fuller browser-shaped headers: realtor.com serves description.text
+        // to residential clients but strips it for bare datacenter requests
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://www.realtor.com',
+        'Referer': 'https://www.realtor.com/'
       },
       body: JSON.stringify({
         operationName: 'CompSearch',
@@ -527,6 +533,9 @@ async function handleComps(params, env, cors) {
         garage: numOrNull(d.garage),
         stories: numOrNull(d.stories),
         propType: d.type || null,
+        // Listing remarks survive closing (verified live 2026-08-13) even
+        // though photos don't — the client reads condition language from them
+        remarks: d.text || null,
         distanceMi: (coord.lat != null && coord.lon != null)
           ? Math.round(milesBetween(lat, lon, coord.lat, coord.lon) * 100) / 100 : null,
         correlation: null,
@@ -569,6 +578,7 @@ async function handleComps(params, env, cors) {
           garage: null,
           stories: null,
           propType: c.propertyType || null,
+          remarks: null,
           distanceMi: c.distance != null ? Math.round(c.distance * 100) / 100 : null,
           correlation: c.correlation != null ? c.correlation : null,
           source: 'RentCast'
@@ -586,6 +596,7 @@ async function handleComps(params, env, cors) {
       byKey.set(key, c);
     } else {
       if (existing.correlation == null && c.correlation != null) existing.correlation = c.correlation;
+      if (!existing.remarks && c.remarks) existing.remarks = c.remarks;
       if (existing.price == null && c.price != null) { existing.price = c.price; existing.priceType = c.priceType; }
       if (existing.source.indexOf(c.source) === -1) existing.source += ' + ' + c.source;
     }
