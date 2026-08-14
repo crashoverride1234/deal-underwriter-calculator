@@ -494,6 +494,86 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition(undefined) === null);
 });
 
+// ---- marketTrend: 1004MC-style trailing buckets ----
+
+test('market trend: buckets fill by sale age and direction reads newest vs oldest median', () => {
+    const asOf = '2026-08-14';
+    const t = Engine.marketTrend([
+        { soldDate: '2026-07-20', price: 320000 }, { soldDate: '2026-06-25', price: 324000 },
+        { soldDate: '2026-04-01', price: 310000 },
+        { soldDate: '2025-11-15', price: 300000 }, { soldDate: '2025-10-01', price: 298000 }
+    ], asOf);
+    assert(t.buckets[0].count === 2 && t.buckets[1].count === 1 && t.buckets[2].count === 2, 'bucket counts');
+    assertNear(t.buckets[0].medianPrice, 322000, 1e-9, 'newest median');
+    assertNear(t.buckets[2].medianPrice, 299000, 1e-9, 'oldest median');
+    assert(t.direction === 'rising', `+7.7% should read rising, got ${t.direction}`);
+});
+
+test('market trend: small deltas read flat; no data reads null, not a fake verdict', () => {
+    const asOf = '2026-08-14';
+    const flat = Engine.marketTrend([
+        { soldDate: '2026-07-20', price: 302000 },
+        { soldDate: '2025-10-01', price: 300000 }
+    ], asOf);
+    assert(flat.direction === 'flat', 'within ±3% is flat');
+    const none = Engine.marketTrend([], asOf);
+    assert(none.direction === null && none.changePct === null, 'no solds = no verdict');
+    const one = Engine.marketTrend([{ soldDate: '2026-07-20', price: 300000 }], asOf);
+    assert(one.direction === null, 'a single bucket cannot make a trend');
+});
+
+// ---- rentFromComps ----
+
+test('rent from comps: median $/sqft scaled to the subject, rounded to $25', () => {
+    const r = Engine.rentFromComps({ sqft: 2000 }, [
+        { rent: 2000, sqft: 1600 }, { rent: 2600, sqft: 2000 }, { rent: 2200, sqft: 1800 }
+    ]);
+    assertNear(r.ppsfMedian, 1.25, 1e-9, 'median $/sqft');
+    assert(r.estimate === 2500, 'scaled to subject sqft');
+    assert(r.used === 3);
+});
+
+test('rent from comps: falls back to median rent without subject sqft; null with nothing usable', () => {
+    const r = Engine.rentFromComps({}, [{ rent: 1900 }, { rent: 2100 }, { rent: 2300 }]);
+    assert(r.estimate === 2100, 'plain median fallback');
+    assert(Engine.rentFromComps({ sqft: 1500 }, []) === null);
+    assert(Engine.rentFromComps({ sqft: 1500 }, [{ rent: 0, sqft: 1000 }]) === null);
+});
+
+// ---- Rehab reality: estimator, capex flags, draw interest, peak cash ----
+
+test('rehab estimate: sqft × $/sqft + contingency; null when a driver is missing', () => {
+    const r = Engine.estimateRehab({ sqft: 1500, perSqft: 42, contingencyPct: 10 });
+    assert(r.base === 63000 && r.contingency === 6300 && r.total === 69300, 'medium tier math');
+    assert(Engine.estimateRehab({ sqft: 0, perSqft: 42, contingencyPct: 10 }) === null);
+    assert(Engine.estimateRehab({ sqft: 1500, perSqft: '', contingencyPct: 10 }) === null);
+});
+
+test('capex flags: year-built eras fire the right advisories', () => {
+    const all = Engine.capexFlags({ yearBuilt: 1970 });
+    assert(all.length === 3, '1970 hits sewer + aluminum + foundation');
+    assert(all.find(f => f.key === 'castIronSewer').addToBudget === 15000);
+    assert(Engine.capexFlags({ yearBuilt: 1980 }).map(f => f.key).join() === 'foundationWatch', '1980 = foundation only');
+    assert(Engine.capexFlags({ yearBuilt: 2005 }).length === 0, 'modern build = clean');
+    assert(Engine.capexFlags({}).length === 0, 'no year = no flags');
+});
+
+test('draw-based interest carries less than Dutch full-balance interest', () => {
+    const dutch = Engine.underwrite({ ...FLIP_BASE, financingType: 'hard_money' });
+    const draws = Engine.underwrite({ ...FLIP_BASE, financingType: 'hard_money', interestOnDraws: 'yes' });
+    // loan = min(85% × 245k, 75% × 320k) = 208,250; holdback = 45,000
+    assertNear(dutch.monthlyFinancingCost, 208250 * 0.105 / 12, 1e-6, 'Dutch: full note');
+    assertNear(draws.monthlyFinancingCost, (208250 - 22500) * 0.105 / 12, 1e-6, 'draws: holdback half-drawn on average');
+    assert(draws.netProfit > dutch.netProfit, 'cheaper carry raises profit');
+});
+
+test('peak cash exposure: cash flip = cash invested; financed adds a fronted draw phase', () => {
+    const cash = Engine.underwrite({ ...FLIP_BASE });
+    assertNear(cash.peakCashExposure, cash.cashInvested, 1e-9, 'no holdback on a cash deal');
+    const hard = Engine.underwrite({ ...FLIP_BASE, financingType: 'hard_money' });
+    assertNear(hard.peakCashExposure, hard.cashInvested + 15000, 1e-9, 'one third of the 45k holdback fronted');
+});
+
 // ---- maxOffer: back-solve the purchase price from targets ----
 
 test('maxOffer: flip target profit is met at the answer and broken just above it', () => {

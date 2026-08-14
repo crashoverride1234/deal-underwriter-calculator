@@ -825,6 +825,29 @@ input[type="range"]::-webkit-slider-thumb:active {
     border: 1px solid var(--border-color);
 }
 
+/* Live market scan under the absorption meter */
+.market-scan {
+    margin-top: 0.9rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.65;
+}
+
+.market-scan .scan-strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.market-scan .trend-rising { color: var(--accent-success); font-weight: 600; }
+.market-scan .trend-falling { color: var(--accent-danger); font-weight: 600; }
+.market-scan .trend-flat { color: var(--accent-warning); font-weight: 600; }
+
+.market-scan button {
+    margin-left: 0.35rem;
+    padding: 0.12rem 0.55rem;
+    font-size: 0.7rem;
+}
+
 /* Max Offer back-solver result block */
 .mao-result {
     font-size: 0.78rem;

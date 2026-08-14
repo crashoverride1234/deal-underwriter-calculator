@@ -17,6 +17,16 @@
  *                                    realtor.com sold search (keyless) merged
  *                                    with RentCast AVM comparables (secret,
  *                                    correlation-ranked), deduped by address
+ *   /market?latitude=&longitude= | address=... [&radius=]
+ *                                  → live market scan: recent solds (12mo),
+ *                                    actives and pendings near the point
+ *                                    (realtor.com keyless) for absorption
+ *                                    auto-fill, trend buckets, competition
+ *   /rent?latitude=&longitude=[&zip=&sqft=&beds=&baths=]
+ *                                  → rent ladder: RentCast rent AVM (secret)
+ *                                    + HUD SAFMR by zip (HUD_API_KEY secret,
+ *                                    DFW metro) + realtor.com active rentals
+ *                                    (keyless)
  *   /vision?latitude=&longitude=[&photo=<https url, allowlisted hosts>]
  *                                  → Workers AI vision verdicts: satellite
  *                                    (pool / road adjacency / rail /
@@ -30,7 +40,8 @@
  *   /melissa?ff=<address>          → Melissa with MELISSA_API_KEY secret
  *
  * Optional configuration:
- *   Secrets:  RENTCAST_API_KEY, MELISSA_API_KEY (routes 501 when unset)
+ *   Secrets:  RENTCAST_API_KEY, MELISSA_API_KEY, HUD_API_KEY (routes skip
+ *             the provider when unset)
  *   Vars:     ALLOWED_ORIGINS — comma-separated origin allowlist override
  *
  * Responses: 200 normalized record · 404 no record · 501 provider not
@@ -455,6 +466,200 @@ async function handleLookup(params, env, cors) {
   return json({ error: 'no record', providerErrors }, 404, cors);
 }
 
+// Separate query for /market and /rent so an unproven field can never break
+// the battle-tested /comps query. list_date + flags split actives/pendings.
+const MARKET_QUERY = `query MarketScan($query: HomeSearchCriteria!, $limit: Int, $sort: [SearchAPISort]) {
+  home_search(query: $query, limit: $limit, sort: $sort) {
+    total
+    results {
+      property_id
+      status
+      list_price
+      last_sold_price
+      last_sold_date
+      list_date
+      flags { is_pending is_contingent }
+      description { sqft beds baths type }
+      location { address { line postal_code coordinate { lat lon } } }
+    }
+  }
+}`;
+
+async function realtorSearch(queryVars) {
+  const res = await fetch('https://www.realtor.com/frontdoor/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'rdc-client-name': 'RDC_WEB_DETAILS_PAGE',
+      'rdc-client-version': '3.x.x',
+      'User-Agent': BROWSER_UA,
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Origin': 'https://www.realtor.com',
+      'Referer': 'https://www.realtor.com/'
+    },
+    body: JSON.stringify({ operationName: 'MarketScan', query: MARKET_QUERY, variables: queryVars })
+  });
+  if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.errors && data.errors.length) throw new Error('GraphQL: ' + JSON.stringify(data.errors[0]).slice(0, 120));
+  const hs = data && data.data && data.data.home_search;
+  return { total: (hs && hs.total) || 0, results: (hs && hs.results) || [] };
+}
+
+// Live market scan: what's sold (12mo), what's listed, what's pending near
+// the point — feeds the absorption meter, trend buckets and the competition
+// panel without an MLS hot sheet.
+async function handleMarket(params, env, cors) {
+  let lat = parseFloat(params.get('latitude'));
+  let lon = parseFloat(params.get('longitude'));
+  const address = params.get('address') || '';
+  if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && address) {
+    const geo = await resolveGeo(address);
+    if (geo && geo.lat != null) { lat = geo.lat; lon = geo.lon; }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude or a resolvable address is required' }, 400, cors);
+  }
+  const radius = Math.min(5, parseFloat(params.get('radius')) || 1);
+  const minDate = new Date(Date.now() - 366 * 86400000).toISOString().slice(0, 10);
+  const nearby = { coordinates: [lon, lat], radius: `${radius}mi` };
+  const providerErrors = [];
+
+  const [soldRes, saleRes] = await Promise.all([
+    realtorSearch({
+      query: { status: ['sold'], type: ['single_family'], sold_date: { min: minDate }, nearby },
+      limit: 200, sort: [{ field: 'sold_date', direction: 'desc' }]
+    }).catch(e => { providerErrors.push('sold: ' + e.message); return null; }),
+    realtorSearch({
+      query: { status: ['for_sale'], type: ['single_family'], nearby },
+      limit: 200, sort: [{ field: 'list_date', direction: 'desc' }]
+    }).catch(e => { providerErrors.push('for_sale: ' + e.message); return null; })
+  ]);
+
+  const mapRow = (r) => {
+    const d = r.description || {};
+    const addr = (r.location && r.location.address) || {};
+    return {
+      address: addr.line || null,
+      price: numOrNull(r.last_sold_price) || numOrNull(r.list_price),
+      listPrice: numOrNull(r.list_price),
+      soldDate: r.last_sold_date || null,
+      listDate: r.list_date || null,
+      sqft: numOrNull(d.sqft),
+      beds: numOrNull(d.beds)
+    };
+  };
+  const solds = soldRes ? soldRes.results.map(mapRow) : [];
+  const actives = [];
+  const pendings = [];
+  if (saleRes) {
+    for (const r of saleRes.results) {
+      const f = r.flags || {};
+      (f.is_pending || f.is_contingent ? pendings : actives).push(mapRow(r));
+    }
+  }
+  return json({
+    subject: { latitude: lat, longitude: lon, radiusMi: radius },
+    totals: { sold12mo: soldRes ? soldRes.total : null, forSale: saleRes ? saleRes.total : null },
+    solds, actives, pendings, providerErrors
+  }, 200, cors);
+}
+
+// Rent ladder: RentCast rent AVM (secret) + HUD SAFMR (secret; DFW is a
+// mandatory Small-Area-FMR metro so payment standards are zip-level) +
+// realtor.com active rentals (keyless). Providers without secrets are
+// skipped, never fatal.
+const HUD_DFW_METRO = 'METRO19100M19100'; // Dallas–Fort Worth–Arlington
+let hudSafmrCache = null; // per-isolate cache — the table changes annually
+
+async function handleRent(params, env, cors) {
+  let lat = parseFloat(params.get('latitude'));
+  let lon = parseFloat(params.get('longitude'));
+  const address = params.get('address') || '';
+  if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && address) {
+    const geo = await resolveGeo(address);
+    if (geo && geo.lat != null) { lat = geo.lat; lon = geo.lon; }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude or a resolvable address is required' }, 400, cors);
+  }
+  const zip = (params.get('zip') || '').trim();
+  const providerErrors = [];
+  const out = { rentcast: null, hud: null, rentals: [], providerErrors };
+
+  const jobs = [];
+
+  if (env.RENTCAST_API_KEY) {
+    const q = new URLSearchParams({
+      latitude: String(lat), longitude: String(lon), propertyType: 'Single Family', compCount: '8'
+    });
+    if (params.get('sqft')) q.set('squareFootage', params.get('sqft'));
+    if (params.get('beds')) q.set('bedrooms', params.get('beds'));
+    if (params.get('baths')) q.set('bathrooms', params.get('baths'));
+    jobs.push(fetch(`https://api.rentcast.io/v1/avm/rent/long-term?${q}`, {
+      headers: { 'X-Api-Key': env.RENTCAST_API_KEY, 'Accept': 'application/json' }
+    }).then(async res => {
+      if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+      const d = res.ok ? await res.json() : {};
+      if (d.rent > 0) {
+        out.rentcast = {
+          rent: d.rent, low: numOrNull(d.rentRangeLow), high: numOrNull(d.rentRangeHigh),
+          comparables: (d.comparables || []).map(c => ({
+            address: c.addressLine1 || (c.formattedAddress || '').split(',')[0],
+            rent: numOrNull(c.price), sqft: numOrNull(c.squareFootage),
+            beds: numOrNull(c.bedrooms), distanceMi: c.distance != null ? Math.round(c.distance * 100) / 100 : null,
+            correlation: c.correlation != null ? c.correlation : null
+          }))
+        };
+      }
+    }).catch(e => providerErrors.push('RentCast: ' + e.message)));
+  }
+
+  if (env.HUD_API_KEY && zip) {
+    jobs.push((async () => {
+      try {
+        if (!hudSafmrCache) {
+          const res = await fetch(`https://www.huduser.gov/hudapi/public/fmr/data/${HUD_DFW_METRO}`, {
+            headers: { 'Authorization': `Bearer ${env.HUD_API_KEY}`, 'Accept': 'application/json' }
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const d = await res.json();
+          hudSafmrCache = (d && d.data && d.data.basicdata) || [];
+        }
+        const row = hudSafmrCache.find(r => String(r.zip_code) === zip);
+        if (row) {
+          out.hud = {
+            zip, year: row.year || null,
+            byBedroom: {
+              0: numOrNull(row['Efficiency']), 1: numOrNull(row['One-Bedroom']),
+              2: numOrNull(row['Two-Bedroom']), 3: numOrNull(row['Three-Bedroom']),
+              4: numOrNull(row['Four-Bedroom'])
+            }
+          };
+        }
+      } catch (e) { providerErrors.push('HUD: ' + e.message); }
+    })());
+  }
+
+  jobs.push(realtorSearch({
+    query: { status: ['for_rent'], type: ['single_family'], nearby: { coordinates: [lon, lat], radius: '1mi' } },
+    limit: 20, sort: [{ field: 'list_date', direction: 'desc' }]
+  }).then(r => {
+    out.rentals = r.results.map(x => {
+      const d = x.description || {};
+      const addr = (x.location && x.location.address) || {};
+      return {
+        address: addr.line || null, rent: numOrNull(x.list_price),
+        sqft: numOrNull(d.sqft), beds: numOrNull(d.beds), baths: numOrNull(d.baths)
+      };
+    }).filter(x => x.rent > 0);
+  }).catch(e => providerErrors.push('realtor rentals: ' + e.message)));
+
+  await Promise.all(jobs);
+  return json(out, 200, cors);
+}
+
 // Comp candidates near a point: realtor.com sold listings (keyless) merged
 // with RentCast AVM comparables (correlation-ranked). Dedupe favors the
 // first-seen entry (realtor solds carry true sale dates) and grafts
@@ -773,6 +978,10 @@ export default {
           return await handleLookup(url.searchParams, env, cors);
         case '/comps':
           return await handleComps(url.searchParams, env, cors);
+        case '/market':
+          return await handleMarket(url.searchParams, env, cors);
+        case '/rent':
+          return await handleRent(url.searchParams, env, cors);
         case '/vision':
           return await handleVision(url.searchParams, env, cors);
         case '/property':

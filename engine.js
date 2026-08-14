@@ -22,7 +22,10 @@
         // a bedroom/bath difference isn't paid twice (once as generic area,
         // once as the flat room value)
         bedroomFootprintSqft: 120,
-        bathFootprintSqft: 50
+        bathFootprintSqft: 50,
+        // Rehab scope tiers, $/sqft (DFW-typical midpoints of the practitioner
+        // ranges: cosmetic 10–20, medium 35–50, full gut 50–80)
+        rehabTiers: { cosmetic: 15, medium: 42, gut: 65 }
     };
 
     // Coerce any input to a finite non-negative number
@@ -102,9 +105,16 @@
 
         // 2. Monthly carrying costs during the hold
         const baselineMonthlyCarry = strategy === 'flip' ? DEFAULTS.flipBaselineMonthlyCarry : monthlyTaxesIns;
+        // Hard-money rehab funds are a HOLDBACK drawn as work completes
+        const rehabHoldback = isHardMoney ? Math.min(rehabBudget, loanAmount) : 0;
+        const interestOnDraws = inputs.interestOnDraws === true || inputs.interestOnDraws === 'yes' || inputs.interestOnDraws === 'draws';
         let monthlyFinancingCost = 0;
         if (isHardMoney) {
-            monthlyFinancingCost = calcInterestOnlyPayment(loanAmount, interestRate);
+            // Most fix&flip lenders charge interest only on the drawn balance;
+            // "Dutch" lenders accrue on the full note from day one. Even-draw
+            // approximation: the holdback averages half-drawn across the hold.
+            monthlyFinancingCost = calcInterestOnlyPayment(
+                interestOnDraws ? loanAmount - rehabHoldback / 2 : loanAmount, interestRate);
         } else if (financingType === 'dscr_purchase') {
             monthlyFinancingCost = calcAmortizedPayment(loanAmount, interestRate);
         }
@@ -148,6 +158,11 @@
             result.netProfit = netProfit;
             result.roi = roi;
             result.annualizedRoi = holdingPeriod > 0 ? roi * (12 / holdingPeriod) : 0;
+            // Draws REIMBURSE: the investor fronts each rehab phase (≈⅓ of
+            // the holdback) before money comes back, so peak cash-in-deal
+            // runs above the out-of-pocket total — the number that actually
+            // bounces flippers mid-project.
+            result.peakCashExposure = cashInvested + rehabHoldback / 3;
         } else {
             const vacancyLoss = monthlyRent * vacancyRatio;
             const maintenanceMgmt = monthlyRent * opExRatio;
@@ -406,6 +421,108 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
+    // ---- Market trend (1004MC-style trailing buckets) ----
+    // Buckets the trailing year's solds 0–3 / 4–6 / 7–12 months back and
+    // reads direction the way an appraiser's market-conditions grid does:
+    // newest non-empty bucket's median vs the oldest one, ±3% = flat.
+    // asOf is injectable so tests are deterministic.
+    function marketTrend(solds, asOf) {
+        const now = asOf ? new Date(asOf).getTime() : Date.now();
+        const median = (arr) => {
+            if (!arr.length) return null;
+            const s = [...arr].sort((a, b) => a - b);
+            const m = Math.floor(s.length / 2);
+            return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+        };
+        const buckets = [
+            { key: '0-3', label: '0–3 mo', max: 3, prices: [] },
+            { key: '4-6', label: '4–6 mo', max: 6, prices: [] },
+            { key: '7-12', label: '7–12 mo', max: 12, prices: [] }
+        ];
+        (solds || []).forEach(s => {
+            if (!s || !s.soldDate || !(num(s.price) > 0)) return;
+            const months = (now - new Date(s.soldDate).getTime()) / (86400000 * 30.44);
+            if (!Number.isFinite(months) || months < 0 || months > 12) return;
+            (buckets.find(b => months < b.max) || buckets[2]).prices.push(num(s.price));
+        });
+        const out = buckets.map(b => ({ key: b.key, label: b.label, count: b.prices.length, medianPrice: median(b.prices) }));
+        const newest = out.find(b => b.medianPrice != null);
+        const oldest = [...out].reverse().find(b => b.medianPrice != null);
+        let direction = null;
+        let changePct = null;
+        if (newest && oldest && newest !== oldest) {
+            changePct = ((newest.medianPrice - oldest.medianPrice) / oldest.medianPrice) * 100;
+            direction = changePct > 3 ? 'rising' : changePct < -3 ? 'falling' : 'flat';
+        }
+        return { buckets: out, direction, changePct };
+    }
+
+    // ---- Rent from comps ----
+    // Median $/sqft across usable rent comps × the subject's sqft (plain
+    // median rent when the subject sqft is unknown). Rounded to $25;
+    // null when nothing usable — no phantom rent.
+    function rentFromComps(subject, comps) {
+        const usable = (comps || []).filter(c => c && num(c.rent) > 0);
+        if (!usable.length) return null;
+        const median = (arr) => {
+            const s = [...arr].sort((a, b) => a - b);
+            const m = Math.floor(s.length / 2);
+            return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+        };
+        const sqft = num(subject && subject.sqft);
+        const withSqft = usable.filter(c => num(c.sqft) > 0);
+        let ppsfMedian = null;
+        let estimate;
+        if (sqft > 0 && withSqft.length) {
+            ppsfMedian = median(withSqft.map(c => num(c.rent) / num(c.sqft)));
+            estimate = ppsfMedian * sqft;
+        } else {
+            estimate = median(usable.map(c => num(c.rent)));
+        }
+        return { estimate: Math.round(estimate / 25) * 25, ppsfMedian, used: usable.length };
+    }
+
+    // ---- Rehab reality helpers ----
+    // Tiered scope estimate: sqft × $/sqft plus a contingency line. Returns
+    // null when either driver is missing — no phantom budgets.
+    function estimateRehab(inputs) {
+        const sqft = num(inputs.sqft);
+        const perSqft = num(inputs.perSqft);
+        const contingencyRatio = num(inputs.contingencyPct) / 100;
+        if (sqft <= 0 || perSqft <= 0) return null;
+        const base = Math.round(sqft * perSqft);
+        const contingency = Math.round(base * contingencyRatio);
+        return { base, contingency, total: base + contingency };
+    }
+
+    // DFW-stock big-ticket advisories from year built — the budget-killers a
+    // walkthrough checks and a spreadsheet forgets. addToBudget 0 = advisory
+    // only (foundation risk isn't a number until an inspector counts piers).
+    function capexFlags(inputs) {
+        const yearBuilt = num(inputs.yearBuilt);
+        if (yearBuilt <= 0) return [];
+        const flags = [];
+        if (yearBuilt <= 1975) {
+            flags.push({
+                key: 'castIronSewer', addToBudget: 15000,
+                label: 'Cast-iron sewer era (≤1975): under-slab failures run $9k–28k in DFW (slab tunneling) — order a sewer scope (~$189) or budget the repipe.'
+            });
+        }
+        if (yearBuilt >= 1965 && yearBuilt <= 1973) {
+            flags.push({
+                key: 'aluminumWiring', addToBudget: 9000,
+                label: 'Aluminum branch-wiring era (1965–73): $2k–12k to remediate; many insurers surcharge or refuse it.'
+            });
+        }
+        if (yearBuilt <= 1985) {
+            flags.push({
+                key: 'foundationWatch', addToBudget: 0,
+                label: 'DFW expansive-clay vintage: check for stair-step brick cracks and doors out of square — piers run $1k–3.5k each, 10–40 typical.'
+            });
+        }
+        return flags;
+    }
+
     // ---- Max-offer back-solver ----
     // Inverts underwrite(): given the deal's other inputs and the investor's
     // floor targets, finds the highest purchase price that still meets every
@@ -512,5 +629,5 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps };
 }));

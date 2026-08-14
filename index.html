@@ -455,10 +455,12 @@
                             </div>
                         </div>
                     </div>
+                    <div id="market-scan" class="market-scan hidden"></div>
                     <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin-top: 1rem;">
-                        Pull the counts from your MLS hot sheet for the subject's zip or neighborhood.
-                        Under ~3 months of inventory is a seller's market; a high pending-to-active
-                        ratio signals accelerating demand.
+                        Counts auto-fill from live listings around the subject when comps are
+                        suggested (1-mile radius, realtor.com) — override with MLS hot-sheet
+                        numbers any time. Under ~3 months of inventory is a seller's market;
+                        a high pending-to-active ratio signals accelerating demand.
                     </p>
                 </div>
 
@@ -681,6 +683,32 @@
                             </div>
                         </div>
                     </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label for="rehab-tier">Scope Estimator</label>
+                            <select id="rehab-tier">
+                                <option value="cosmetic">Cosmetic</option>
+                                <option value="medium" selected>Medium</option>
+                                <option value="gut">Full Gut</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="rehab-per-sqft">$ / sqft</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="rehab-per-sqft" value="42" min="0" step="1">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="rehab-contingency">Contingency</label>
+                            <div class="input-wrapper has-suffix">
+                                <input type="number" id="rehab-contingency" value="10" min="0" max="50" step="5">
+                                <span class="input-suffix">%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="rehab-estimate-note" class="tax-reassess-note hidden"></div>
+                    <div id="capex-flags"></div>
                 </div>
 
                 <!-- Financing details -->
@@ -729,6 +757,13 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="form-group hidden" id="draws-group" style="margin-top: 1rem;">
+                            <label for="interest-accrual">Interest Accrues On</label>
+                            <select id="interest-accrual">
+                                <option value="full">Full loan from day 1 (Dutch)</option>
+                                <option value="draws">Drawn balance (rehab drawn evenly — typical)</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
@@ -744,6 +779,7 @@
                                 <span class="input-prefix">$</span>
                                 <input type="number" id="monthly-rent" value="2200" min="0" step="50">
                             </div>
+                            <div id="rent-note" class="tax-reassess-note"></div>
                         </div>
                         <div class="input-row">
                             <div class="form-group">
@@ -890,6 +926,10 @@
                             <div class="summary-row">
                                 <span class="label">Out-of-Pocket Cash:</span>
                                 <span class="value" id="summary-cash-invested">$0</span>
+                            </div>
+                            <div class="summary-row" id="summary-peak-row">
+                                <span class="label">Peak Cash Exposure:</span>
+                                <span class="value" id="summary-peak-cash">$0</span>
                             </div>
                             <div class="summary-row">
                                 <span class="label" id="summary-leverage-label">Financed Loan Amount:</span>

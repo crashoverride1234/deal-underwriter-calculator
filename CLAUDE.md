@@ -18,7 +18,12 @@ GitHub Pages from `main`.
   net profit $, rental targets = cash flow / DSCR / CoC, rounds DOWN to
   $100; reports unachievable and price-independent-unbounded cases) +
   `ruleOfThumbOffer()`/`suggestedRulePct()` (70%-rule flexed 65–75 by
-  absorption score).
+  absorption score), `estimateRehab()`/`capexFlags()` (tiered $/sqft scope
+  + DFW year-built era advisories), `marketTrend()` (1004MC-style
+  0–3/4–6/7–12-month sold buckets, ±3% = flat), `rentFromComps()` (median
+  $/sqft × subject sqft). underwrite() also models draw-based vs Dutch
+  interest (`interestOnDraws`; holdback averages half-drawn) and emits
+  flip `peakCashExposure` (cash + ⅓ holdback fronted between draws).
 - `app.js` — DOM wiring only. Charts update in place (never destroy/recreate
   per keystroke). Dynamic icons are inline SVG constants — Lucide's
   `createIcons()` runs once at load and replaces `<i>` tags with static SVGs,
@@ -73,7 +78,12 @@ GitHub Pages from `main`.
   `operationName` is REQUIRED in the POST body or it 400s). Providers whose
   secret is unset are skipped. RentCast: 50/mo free, only HTTP-200s billed.
   Melissa: ~1,000 credits/mo free. Worker also keeps `/property`, `/rentcast`,
-  `/melissa`, `/health` as individual debug routes.
+  `/melissa`, `/health` as individual debug routes, plus `/market` (keyless
+  realtor solds/actives/pendings — auto-fills the absorption meter, feeds
+  trend buckets + the competition readout; auto-runs with comp suggestion)
+  and `/rent` (RentCast rent AVM secret + HUD SAFMR via `HUD_API_KEY`
+  secret, DFW metro METRO19100M19100, + keyless realtor active rentals;
+  button-triggered on the calculator because the rent AVM bills a credit).
 - **Comp suggestions** (`/comps` route, auto-runs on ARV-page entry after any
   subject-page visit — wipes prior comps, auto-fills the top 4 into the
   cards, offers "Restore previous comps" if the search fails; no manual

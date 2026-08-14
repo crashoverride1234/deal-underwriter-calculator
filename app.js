@@ -34,6 +34,15 @@ const maoMinDscrInput = document.getElementById('mao-min-dscr');
 const maoMinCocInput = document.getElementById('mao-min-coc');
 const maoProfitGroup = document.getElementById('mao-profit-group');
 const maoResult = document.getElementById('mao-result');
+const rehabTierSelect = document.getElementById('rehab-tier');
+const rehabPerSqftInput = document.getElementById('rehab-per-sqft');
+const rehabContingencyInput = document.getElementById('rehab-contingency');
+const rehabEstimateNote = document.getElementById('rehab-estimate-note');
+const capexFlagsEl = document.getElementById('capex-flags');
+const drawsGroup = document.getElementById('draws-group');
+const interestAccrualSelect = document.getElementById('interest-accrual');
+const summaryPeakRow = document.getElementById('summary-peak-row');
+const summaryPeakCash = document.getElementById('summary-peak-cash');
 
 // Stress Test Elements
 const rehabBufferSlider = document.getElementById('rehab-buffer-slider');
@@ -208,6 +217,8 @@ function handleFinancingChange() {
 
 function refreshFinancingUI() {
     const type = financingTypeSelect.value;
+    // Draw-vs-Dutch interest only exists where the rehab rides in the loan
+    drawsGroup.classList.toggle('hidden', type !== 'hard_money' && type !== 'private_money');
     if (type === 'cash') {
         financingParamsDiv.classList.add('hidden');
         summaryLeverageLabel.textContent = 'Financed Loan Amount:';
@@ -240,7 +251,8 @@ function readInputs() {
         monthlyRent: monthlyRentInput.value,
         vacancyPercent: vacancyRateInput.value,
         operatingExpensesPercent: operatingExpensesInput.value,
-        monthlyTaxesIns: monthlyTaxesInsInput.value
+        monthlyTaxesIns: monthlyTaxesInsInput.value,
+        interestOnDraws: interestAccrualSelect.value
     };
 }
 
@@ -333,6 +345,77 @@ function updateMaxOffer() {
     }
 }
 
+// Rehab scope estimator + DFW big-ticket capex flags. The estimate line
+// reads the subject's sqft; the flags read its year built. One-click
+// buttons push numbers into the rehab budget — nothing applies silently.
+const capexAdded = new Set();
+let lastCapexYear = null;
+
+function updateRehabEstimator() {
+    const sqft = Engine.num(subjectSqftInput.value);
+    const est = Engine.estimateRehab({
+        sqft, perSqft: rehabPerSqftInput.value, contingencyPct: rehabContingencyInput.value
+    });
+    rehabEstimateNote.innerHTML = '';
+    if (!est) {
+        rehabEstimateNote.textContent = sqft > 0
+            ? 'Set a $/sqft to estimate the rehab from scope.'
+            : 'Fill the subject\'s living area on step 1 and the scope estimator prices the rehab from sqft.';
+        rehabEstimateNote.classList.remove('hidden');
+    } else {
+        rehabEstimateNote.append(
+            `${sqft.toLocaleString()} sqft × ${formatCurrency(Engine.num(rehabPerSqftInput.value))}/sqft `
+            + `+ ${Engine.num(rehabContingencyInput.value)}% contingency = `
+        );
+        const fig = document.createElement('span');
+        fig.className = 'tax-figure';
+        fig.textContent = formatCurrency(est.total);
+        rehabEstimateNote.appendChild(fig);
+        rehabEstimateNote.append(' (10% when inspected, 20% sight-unseen)');
+        if (Engine.num(rehabBudgetInput.value) !== est.total) {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary';
+            btn.textContent = 'Use as Rehab Budget';
+            btn.addEventListener('click', () => {
+                rehabBudgetInput.value = est.total;
+                calculateDeal();
+                updateRehabEstimator();
+            });
+            rehabEstimateNote.appendChild(btn);
+        }
+        rehabEstimateNote.classList.remove('hidden');
+    }
+
+    // Big-ticket era advisories from the subject's year built
+    const year = Engine.num(subjectYearInput.value);
+    if (year !== lastCapexYear) { capexAdded.clear(); lastCapexYear = year; }
+    capexFlagsEl.innerHTML = '';
+    Engine.capexFlags({ yearBuilt: year }).forEach(f => {
+        const row = document.createElement('div');
+        row.className = 'appraisal-warning';
+        row.append(`⚠ ${f.label}`);
+        if (f.addToBudget > 0) {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary';
+            btn.style.cssText = 'margin-left: 0.4rem; padding: 0.12rem 0.55rem; font-size: 0.7rem;';
+            if (capexAdded.has(f.key)) {
+                btn.disabled = true;
+                btn.textContent = `+${formatCurrency(f.addToBudget)} added ✓`;
+            } else {
+                btn.textContent = `+${formatCurrency(f.addToBudget)} to rehab`;
+                btn.addEventListener('click', () => {
+                    rehabBudgetInput.value = Engine.num(rehabBudgetInput.value) + f.addToBudget;
+                    capexAdded.add(f.key);
+                    calculateDeal();
+                    updateRehabEstimator();
+                });
+            }
+            row.appendChild(btn);
+        }
+        capexFlagsEl.appendChild(row);
+    });
+}
+
 // TX reassessment: the seller's tax bill understates the buyer's — the
 // county chases the sale price and homestead exemptions don't transfer.
 // Live projection under the taxes input; one click adopts it. Flip basis is
@@ -414,6 +497,9 @@ function formatPercent(val) {
 function updateSummary(m) {
     summaryTotalCapital.textContent = formatCurrency(m.totalProjectCosts + m.sellingRefiCosts);
     summaryCashInvested.textContent = formatCurrency(m.cashInvested);
+    // Flips only: what the investor fronts at the worst moment (draw reimbursement lag)
+    summaryPeakRow.classList.toggle('hidden', m.peakCashExposure === undefined);
+    if (m.peakCashExposure !== undefined) summaryPeakCash.textContent = formatCurrency(m.peakCashExposure);
     summaryLoanAmount.textContent = formatCurrency(m.loanAmount);
     summaryMonthlyHoldingCost.textContent = formatCurrency(m.monthlyHoldingCost);
     summaryTotalFinanceCosts.textContent = formatCurrency(m.financeFees);
@@ -1551,6 +1637,260 @@ function renderCandidates(list) {
     });
 }
 
+// ==================== Rent Ladder ====================
+// Worker /rent: RentCast rent AVM (secret) + HUD SAFMR by zip (secret) +
+// active realtor.com rentals (keyless). Button-triggered — a rent-AVM call
+// is billable, so it never fires behind the user's back.
+
+const rentNote = document.getElementById('rent-note');
+let rentData = null;
+let rentDataFor = null; // address the cached ladder belongs to
+
+function subjectZip() {
+    const zips = subjectAddressInput.value.match(/\b\d{5}\b/g);
+    return zips ? zips[zips.length - 1] : '';
+}
+
+function renderRentNote() {
+    const addr = subjectAddressInput.value.trim();
+    if (rentData && rentDataFor === addr) { renderRentLadder(); return; }
+    rentNote.innerHTML = '';
+    if (!lastSelectedCoords && !addr) {
+        rentNote.textContent = 'Set the subject address on step 1 and the market-rent ladder can price this field.';
+        return;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-secondary';
+    btn.style.cssText = 'padding: 0.2rem 0.7rem; font-size: 0.72rem;';
+    btn.textContent = '⌕ Estimate market rent';
+    btn.addEventListener('click', fetchRent);
+    rentNote.append('Market check: ');
+    rentNote.appendChild(btn);
+}
+
+async function fetchRent() {
+    const addr = subjectAddressInput.value.trim();
+    const q = new URLSearchParams();
+    if (lastSelectedCoords) {
+        q.set('latitude', String(lastSelectedCoords.lat));
+        q.set('longitude', String(lastSelectedCoords.lon));
+    } else if (addr) {
+        q.set('address', addr);
+    } else {
+        return;
+    }
+    const zip = subjectZip();
+    if (zip) q.set('zip', zip);
+    const sqft = Engine.num(subjectSqftInput.value);
+    if (sqft > 0) q.set('sqft', String(sqft));
+    const beds = Engine.num(subjectBedsInput.value);
+    if (beds > 0) q.set('beds', String(beds));
+    const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
+    if (baths > 0) q.set('baths', String(baths));
+
+    rentNote.textContent = 'Checking market rent…';
+    try {
+        const res = await fetch(`${workerBase()}/rent?${q}`, { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        rentData = await res.json();
+        rentDataFor = addr;
+        renderRentLadder();
+    } catch (e) {
+        rentNote.innerHTML = '';
+        rentNote.append('Rent check failed — connection or worker. ');
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = 'Retry';
+        btn.addEventListener('click', fetchRent);
+        rentNote.appendChild(btn);
+    }
+}
+
+function renderRentLadder() {
+    const d = rentData;
+    if (!d) return;
+    rentNote.innerHTML = '';
+    const sqft = Engine.num(subjectSqftInput.value);
+    const compsRead = Engine.rentFromComps({ sqft }, d.rentals);
+    const market = d.rentcast && d.rentcast.rent > 0
+        ? Math.round(d.rentcast.rent)
+        : (compsRead ? compsRead.estimate : 0);
+
+    if (!market) {
+        rentNote.append('No market-rent signal near the subject — no nearby rental listings'
+            + (d.rentcast ? '' : ' and no RentCast key on the worker') + '. Enter rent from your own comps.');
+        return;
+    }
+
+    const l1 = document.createElement('div');
+    l1.append('Market rent ≈ ');
+    const fig = document.createElement('span');
+    fig.className = 'tax-figure';
+    fig.textContent = `${formatCurrency(market)}/mo`;
+    l1.appendChild(fig);
+    const sources = [];
+    if (d.rentcast && d.rentcast.rent > 0) {
+        sources.push(`RentCast ${formatCurrency(d.rentcast.rent)}`
+            + (d.rentcast.low ? ` (${formatCurrency(d.rentcast.low)}–${formatCurrency(d.rentcast.high)})` : ''));
+    }
+    if (compsRead) {
+        sources.push(`${compsRead.used} listed rental${compsRead.used === 1 ? '' : 's'} nearby → ${formatCurrency(compsRead.estimate)}`
+            + (compsRead.ppsfMedian ? ` ($${compsRead.ppsfMedian.toFixed(2)}/sqft)` : ''));
+    }
+    if (sources.length) l1.append(' · ' + sources.join(' · '));
+    rentNote.appendChild(l1);
+
+    const beds = Math.round(Engine.num(subjectBedsInput.value));
+    if (d.hud && d.hud.byBedroom && d.hud.byBedroom[beds] > 0) {
+        const hud = document.createElement('div');
+        const std = d.hud.byBedroom[beds];
+        hud.textContent = `Section 8 SAFMR ${beds}BR ${d.hud.zip}: ${formatCurrency(std)}`
+            + (std >= market ? ' — voucher standard meets market: Section 8 candidate.' : '.');
+        rentNote.appendChild(hud);
+    }
+
+    // Lender reality: DSCR takes the LOWER of lease vs market rent (Form
+    // 1007 logic); conventional counts 75% of market
+    const userRent = Engine.num(monthlyRentInput.value);
+    const lender = document.createElement('div');
+    lender.append(`Lender view: DSCR uses the lower of lease vs market; conventional counts 75% ≈ ${formatCurrency(Math.round(market * 0.75))}.`);
+    if (userRent > market * 1.05) {
+        const warn = document.createElement('span');
+        warn.className = 'tax-figure';
+        warn.textContent = ` Your ${formatCurrency(userRent)} runs ${Math.round((userRent / market - 1) * 100)}% above market — expect underwriting at ${formatCurrency(market)}.`;
+        lender.appendChild(warn);
+    }
+    rentNote.appendChild(lender);
+
+    if (userRent !== market) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.style.cssText = 'margin-top: 0.3rem; padding: 0.2rem 0.7rem; font-size: 0.72rem;';
+        btn.textContent = `Use ${formatCurrency(market)}/mo`;
+        btn.addEventListener('click', () => {
+            monthlyRentInput.value = market;
+            calculateDeal();
+            renderRentLadder();
+        });
+        rentNote.appendChild(btn);
+    } else {
+        const ok = document.createElement('span');
+        ok.className = 'tax-applied';
+        ok.textContent = ' ✓ in use';
+        rentNote.appendChild(ok);
+    }
+}
+
+// ==================== Live Market Scan ====================
+// Worker /market (keyless realtor.com): recent solds, actives and pendings
+// within a mile. Auto-fills the absorption meter, buckets solds into the
+// appraiser's 0–3/4–6/7–12-month trend grid, and reads the competition
+// standing at the appraised ARV. Runs alongside comp suggestion.
+
+const marketScanEl = document.getElementById('market-scan');
+let marketScanData = null;
+let marketRunId = 0;
+
+async function scanMarket() {
+    const address = subjectAddressInput.value.trim();
+    if (!lastSelectedCoords && !address) return;
+    const q = new URLSearchParams();
+    if (lastSelectedCoords) {
+        q.set('latitude', String(lastSelectedCoords.lat));
+        q.set('longitude', String(lastSelectedCoords.lon));
+    } else {
+        q.set('address', address);
+    }
+    const runId = ++marketRunId;
+    marketScanData = null;
+    marketScanEl.textContent = 'Scanning live listings near the subject…';
+    marketScanEl.classList.remove('hidden');
+    try {
+        const res = await fetch(`${workerBase()}/market?${q}`, { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (runId !== marketRunId) return; // superseded / user left for the subject page
+        marketScanData = data;
+        // Auto-fill the absorption meter from live counts (still editable)
+        const sold90 = data.solds.filter(s =>
+            s.soldDate && (Date.now() - new Date(s.soldDate).getTime()) / 86400000 <= 90).length;
+        mktActivesInput.value = data.actives.length;
+        mktPendingsInput.value = data.pendings.length;
+        mktSold90Input.value = sold90;
+        updateAbsorption();
+        updateMaxOffer(); // rule % follows the fresh market temperature
+        renderMarketScan();
+    } catch (e) {
+        if (runId !== marketRunId) return;
+        marketScanEl.innerHTML = '';
+        marketScanEl.append('Market scan failed — counts stay manual. ');
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = 'Retry';
+        btn.addEventListener('click', scanMarket);
+        marketScanEl.appendChild(btn);
+    }
+}
+
+function renderMarketScan() {
+    if (!marketScanData) return;
+    const d = marketScanData;
+    const median = (arr) => {
+        if (!arr.length) return null;
+        const s = [...arr].sort((a, b) => a - b);
+        const m = Math.floor(s.length / 2);
+        return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    marketScanEl.innerHTML = '';
+    marketScanEl.classList.remove('hidden');
+
+    const l1 = document.createElement('div');
+    l1.append('Live within 1 mi: ');
+    const counts = document.createElement('span');
+    counts.className = 'scan-strong';
+    counts.textContent = `${d.actives.length} active · ${d.pendings.length} pending · `
+        + `${d.totals.sold12mo != null ? d.totals.sold12mo : d.solds.length} sold in 12 mo`;
+    l1.appendChild(counts);
+    l1.append(' — meter auto-filled. ');
+    const rescan = document.createElement('button');
+    rescan.className = 'btn btn-secondary';
+    rescan.textContent = '⟳';
+    rescan.title = 'Re-scan live listings';
+    rescan.addEventListener('click', scanMarket);
+    l1.appendChild(rescan);
+    marketScanEl.appendChild(l1);
+
+    const trend = Engine.marketTrend(d.solds);
+    if (trend.buckets.some(b => b.count > 0)) {
+        const l2 = document.createElement('div');
+        l2.append('Solds — ' + trend.buckets
+            .map(b => `${b.label}: ${b.count}${b.medianPrice ? ` @ ${formatCurrency(b.medianPrice)}` : ''}`)
+            .join(' · ') + (trend.direction ? ' → prices ' : ''));
+        if (trend.direction) {
+            const dir = document.createElement('span');
+            dir.className = `trend-${trend.direction}`;
+            dir.textContent = `${trend.direction} ${trend.changePct > 0 ? '+' : ''}${trend.changePct.toFixed(1)}%`;
+            l2.appendChild(dir);
+        }
+        marketScanEl.appendChild(l2);
+    }
+
+    const arv = lastAppraisal && lastAppraisal.arv > 0 ? lastAppraisal.arv : 0;
+    if (arv > 0) {
+        const band = d.actives.filter(a => a.listPrice > 0 && Math.abs(a.listPrice - arv) <= arv * 0.10);
+        const ppsf = median(d.actives.filter(a => a.listPrice > 0 && a.sqft > 0).map(a => a.listPrice / a.sqft));
+        const l3 = document.createElement('div');
+        l3.append(`Competition at your ${formatCurrency(arv)} ARV: `);
+        const b = document.createElement('span');
+        b.className = 'scan-strong';
+        b.textContent = `${band.length} active${band.length === 1 ? '' : 's'} within ±10%`;
+        l3.appendChild(b);
+        l3.append(` — you'd list as #${band.length + 1} in that band`
+            + (ppsf ? ` · actives ask ${formatCurrency(ppsf)}/sqft` : '') + '.');
+        marketScanEl.appendChild(l3);
+    }
+}
+
 // ==================== Site Map & Influence Scan ====================
 // Leaflet + Esri imagery for the eyeball read (pools, greenbelts, what the
 // lot actually backs to); Overpass (OSM, keyless + CORS-open) for the
@@ -1929,6 +2269,7 @@ function recalcAppraisal() {
         ? `Use ${formatCurrency(a.arv)} as ARV in the Deal Calculator →`
         : 'Add comps to estimate ARV';
 
+    renderMarketScan(); // competition band tracks the freshly blended ARV
     saveAppraisalState();
 }
 
@@ -2292,6 +2633,7 @@ function applyPropertyRecord(rec, fallbackAddress) {
         filled.push(`est. taxes+HOA $${monthly}/mo`);
     }
     updateTaxProjection();
+    updateRehabEstimator();
 
     // Absentee signal: tax bill mails somewhere other than the property
     const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -2696,12 +3038,14 @@ function resetCompsAndSuggest() {
     renderComps();
     recalcAppraisal();
     suggestComps();
+    scanMarket(); // live counts + trend + competition ride the same arrival
 }
 
 function switchPage(page) {
     if (page === 'subject') {
         subjectVisitedSinceArv = true;
         suggestRunId++; // the subject may be about to change — kill any in-flight comp search
+        marketRunId++;  // same for an in-flight market scan
     }
     pageSubjectBtn.classList.toggle('active', page === 'subject');
     pageArvBtn.classList.toggle('active', page === 'arv');
@@ -2765,6 +3109,18 @@ subjectOwnerOccupiedInput.addEventListener('change', updateTaxProjection);
 // Max-offer targets re-solve on their own; market inputs also flex the rule %
 [maoTargetProfitInput, maoTargetCfInput, maoMinDscrInput, maoMinCocInput, mktActivesInput, mktPendingsInput, mktSold90Input]
     .forEach(input => input.addEventListener('input', updateMaxOffer));
+// Rehab estimator: tier picks a $/sqft preset; all three drive the estimate line
+rehabTierSelect.addEventListener('change', () => {
+    rehabPerSqftInput.value = Engine.DEFAULTS.rehabTiers[rehabTierSelect.value] || rehabPerSqftInput.value;
+    updateRehabEstimator();
+});
+[rehabPerSqftInput, rehabContingencyInput, subjectSqftInput, subjectYearInput]
+    .forEach(input => input.addEventListener('input', updateRehabEstimator));
+interestAccrualSelect.addEventListener('change', calculateDeal);
+// Rent-ladder freshness: a new address invalidates the cached ladder; the
+// lender-haircut line tracks the live rent input
+subjectAddressInput.addEventListener('input', renderRentNote);
+monthlyRentInput.addEventListener('input', () => { if (rentData) renderRentLadder(); });
 [mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
 
 lookupBtn.addEventListener('click', lookupSubjectProperty);
@@ -2816,6 +3172,8 @@ try {
 renderComps();
 recalcAppraisal();
 updateAbsorption();
+updateRehabEstimator();
+renderRentNote();
 switchPage('subject'); // step 1 first
 
 // ==================== Native app (Capacitor) integration ====================
