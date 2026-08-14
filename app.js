@@ -1367,6 +1367,12 @@ function renderComps() {
             el.value = comp[el.dataset.field];
             el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
                 comp[el.dataset.field] = el.value;
+                if (el.dataset.field === 'label') {
+                    // Typing invalidates the previously picked location, same
+                    // as the subject field — the map pin and site scan must
+                    // never assert coordinates the current text didn't produce
+                    comp.lat = ''; comp.lon = '';
+                }
                 if (el.dataset.field === 'condition') {
                     // The user made the call — stop flagging it as assumed
                     comp.conditionUnverified = false;
@@ -1399,7 +1405,10 @@ function renderComps() {
             card.querySelector('.address-suggestions'),
             (s) => {
                 comp.label = s.line1 || s.text;
-                if (s.lat != null) { comp.lat = s.lat; comp.lon = s.lon; }
+                // Set-or-null like the subject flow: a coord-less suggestion
+                // must clear any stale pin from the previous pick
+                comp.lat = s.lat != null ? s.lat : '';
+                comp.lon = s.lon != null ? s.lon : '';
                 lookupCompProperty(comp, s.text, s.mprId || null,
                     (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null);
             }
@@ -2633,12 +2642,147 @@ function updateSubjectSummary() {
     subjectSummaryEl.classList.remove('hidden');
 }
 
+// ==================== Comps Map (ARV page) ====================
+// Numbered pins for every located comp around the subject — the "are these
+// actually neighbors?" eyeball check below the comp cards. recalcAppraisal
+// fires per keystroke, so the pin set rebuilds (and the view re-fits) only
+// when a LOCATION appears, moves, or vanishes; label/price edits restyle the
+// existing pins in place — pan/zoom AND an open popup survive typing.
+
+const compsMapWrap = document.getElementById('comps-map-wrap');
+const compsMapEl = document.getElementById('comps-map');
+const compsMapNote = document.getElementById('comps-map-note');
+let compsMap = null;
+let compsMapMarkers = null; // layer group holding the pins
+let compsMapCompPins = [];  // { marker, iconKey } parallel to the located list
+let compsMapSig = '';       // what's drawn (labels/prices/status included)
+let compsMapPosSig = '';    // just the coordinates — gates rebuild + re-fit
+let compsMapFitPending = false;
+
+function compPinIcon(text, extraClass) {
+    return L.divIcon({
+        className: 'comp-map-icon',
+        html: `<div class="comp-map-pin ${extraClass || ''}">${text}</div>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13]
+    });
+}
+
+// Popup content built via textContent — comp labels come from external
+// listing data and must never be interpreted as HTML
+function compPinPopup(title, lines) {
+    const div = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = title;
+    div.appendChild(strong);
+    lines.filter(Boolean).forEach(text => {
+        const row = document.createElement('div');
+        row.textContent = text;
+        div.appendChild(row);
+    });
+    return div;
+}
+
+function updateCompsMap() {
+    if (!compsMapEl || typeof L === 'undefined') return; // CDN unavailable
+    const subj = lastSelectedCoords;
+    const located = [];
+    const unlocated = [];
+    appraisalComps.forEach((comp, idx) => {
+        const lat = parseFloat(comp.lat), lon = parseFloat(comp.lon);
+        const priced = Engine.num(comp.salePrice) > 0;
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            located.push({ idx, lat, lon, priced, label: comp.label, salePrice: Engine.num(comp.salePrice) });
+        } else if (comp.label || priced) {
+            unlocated.push(idx + 1); // on a card but not placeable
+        }
+    });
+    const show = Boolean(subj) || located.length > 0;
+    compsMapWrap.classList.toggle('hidden', !show);
+    if (!show) { compsMapSig = ''; compsMapPosSig = ''; return; }
+
+    const pinContent = (p) => {
+        const dist = subj ? haversineMeters(subj.lat, subj.lon, p.lat, p.lon) : null;
+        return compPinPopup(p.label || `Comp ${p.idx + 1}`, [
+            p.priced ? formatCurrency(p.salePrice) : 'Unpriced — not in blend',
+            dist != null ? `${(dist / 1609.34).toFixed(2)} mi from subject` : null
+        ]);
+    };
+    const posSig = JSON.stringify([subj, located.map(p => [p.lat, p.lon])]);
+    const sig = JSON.stringify([subj, located]);
+    if (posSig !== compsMapPosSig || !compsMap) {
+        // A location appeared, moved, or vanished — rebuild the pin set and re-fit
+        compsMapPosSig = posSig;
+        compsMapSig = sig;
+        compsMapFitPending = true;
+        if (!compsMap) {
+            compsMap = L.map(compsMapEl);
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 19,
+                attribution: 'Imagery © Esri'
+            }).addTo(compsMap);
+            compsMapMarkers = L.layerGroup().addTo(compsMap);
+        }
+        compsMapMarkers.clearLayers();
+        compsMapCompPins = [];
+        if (subj) {
+            L.marker([subj.lat, subj.lon], { icon: compPinIcon('S', 'subject'), zIndexOffset: 1000 })
+                .bindPopup(compPinPopup(subjectAddressInput.value.trim() || 'Subject property', ['Subject property']))
+                .addTo(compsMapMarkers);
+        }
+        located.forEach(p => {
+            const iconKey = `${p.idx + 1}|${p.priced}`;
+            const marker = L.marker([p.lat, p.lon], { icon: compPinIcon(String(p.idx + 1), p.priced ? '' : 'excluded') })
+                .bindPopup(pinContent(p))
+                .addTo(compsMapMarkers);
+            compsMapCompPins.push({ marker, iconKey });
+        });
+    } else if (sig !== compsMapSig) {
+        // Same locations, different labels/prices/numbers — restyle the pins
+        // in place so per-keystroke recalcs never churn marker DOM or close
+        // an open popup (setPopupContent updates an open popup live)
+        compsMapSig = sig;
+        located.forEach((p, k) => {
+            const pin = compsMapCompPins[k];
+            if (!pin) return;
+            const iconKey = `${p.idx + 1}|${p.priced}`;
+            if (iconKey !== pin.iconKey) {
+                pin.iconKey = iconKey;
+                pin.marker.setIcon(compPinIcon(String(p.idx + 1), p.priced ? '' : 'excluded'));
+            }
+            pin.marker.setPopupContent(pinContent(p));
+        });
+    }
+    compsMapNote.classList.toggle('hidden', !unlocated.length);
+    compsMapNote.textContent = unlocated.length
+        ? `Comp${unlocated.length > 1 ? 's' : ''} ${unlocated.join(', ')}: no map location — pick the address from the autocomplete to place ${unlocated.length > 1 ? 'them' : 'it'}.`
+        : '';
+    fitCompsMap();
+}
+
+// Fitting needs real pixel dimensions, so it defers while the ARV page is
+// hidden (switchPage re-runs it on entry)
+function fitCompsMap() {
+    if (!compsMap || !compsMapFitPending || arvPage.classList.contains('hidden')) return;
+    compsMapFitPending = false;
+    compsMap.invalidateSize();
+    const pts = [];
+    compsMapMarkers.eachLayer(m => pts.push(m.getLatLng()));
+    if (!pts.length) return;
+    if (pts.length === 1) {
+        compsMap.setView(pts[0], 15);
+    } else {
+        compsMap.fitBounds(L.latLngBounds(pts).pad(0.18), { maxZoom: 17 });
+    }
+}
+
 function recalcAppraisal() {
     const a = Engine.appraise(readAppraisalInputs());
     lastAppraisal = a;
     updateWeightImpacts(a);
     updateSubjectSummary();
     refreshCompSubdivisions();
+    updateCompsMap();
 
     arvEstimateValue.textContent = formatCurrency(a.arv);
     arvPpsfNote.textContent = a.subjectPricePerSqft > 0
@@ -3489,6 +3633,16 @@ function switchPage(page) {
     if (page === 'arv' && subjectVisitedSinceArv) {
         subjectVisitedSinceArv = false;
         resetCompsAndSuggest();
+    }
+    if (page === 'arv') {
+        // Re-measure unconditionally: Leaflet's own window-resize handler
+        // fires even while this page is display:none and caches a 0×0 size
+        // that nothing else repairs (same reason the chart resizes below).
+        // Then fit, if a location change arrived while hidden.
+        requestAnimationFrame(() => {
+            if (compsMap) compsMap.invalidateSize();
+            fitCompsMap();
+        });
     }
     if (page === 'calculator' && chart) {
         // Chart may have been created while its container was hidden

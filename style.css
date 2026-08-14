@@ -778,6 +778,77 @@ input[type="range"]::-webkit-slider-thumb:active {
     line-height: 1.5;
 }
 
+/* Comp locations map (ARV page) — numbered pins around the subject */
+.comps-map-wrap {
+    margin-top: 1rem;
+}
+
+.comps-map {
+    height: 320px;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    z-index: 0; /* keep Leaflet panes under the comp address autocompletes */
+}
+
+.comp-map-icon {
+    background: none;
+    border: none;
+}
+
+.comp-map-pin {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.78rem;
+    border: 2px solid rgba(255, 255, 255, 0.9);
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+.comp-map-pin.subject {
+    background: var(--accent-warning);
+    color: #111827;
+}
+
+.comp-map-pin.excluded {
+    background: #6b7280;
+}
+
+.comps-map-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    margin-top: 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.comps-map-legend > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.comps-map-legend .comp-map-pin {
+    width: 18px;
+    height: 18px;
+    font-size: 0.6rem;
+    border-width: 1.5px;
+}
+
+.comps-map-note {
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
 .site-influences {
     margin-top: 0.6rem;
     display: flex;
