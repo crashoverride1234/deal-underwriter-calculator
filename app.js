@@ -2057,6 +2057,103 @@ function renderSiteInfluences(nearest) {
     siteInfluencesEl.appendChild(note);
 }
 
+// ---- Public-records scans: flood zone, expansive soil, permit history ----
+
+function influenceChipDiv(c) {
+    const div = document.createElement('div');
+    div.className = `influence-chip ${c.kind}`;
+    div.textContent = (c.kind === 'bad' ? '⚠ ' : c.kind === 'good' ? '✓ ' : '') + c.text;
+    return div;
+}
+
+// FEMA NFHL via Esri's Living Atlas mirror (CORS-open, keyless). The view
+// carries HAZARD polygons only, so an empty result means no special-hazard
+// zone is mapped at the point. hazards.fema.gov itself is a dead end —
+// no CORS headers for browsers AND 403/525 for Workers (checked 2026-08-14).
+const NFHL_VIEW_URL = 'https://services5.arcgis.com/7weheFjxuNkGGiZi/arcgis/rest/services/USA_Flood_Hazard_Areas_view/FeatureServer/0/query';
+
+async function floodScan(lat, lon) {
+    const q = new URLSearchParams({
+        geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+        outFields: 'FLD_ZONE,ZONE_SUBTY,SFHA_TF,STATIC_BFE', returnGeometry: 'false', f: 'json'
+    });
+    const res = await fetch(`${NFHL_VIEW_URL}?${q}`, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const d = await res.json();
+    if (d.error) return null;
+    const attrs = d.features && d.features[0] && d.features[0].attributes;
+    if (!attrs) return { kind: 'good', text: 'Flood: no special flood hazard zone mapped here (FEMA NFHL)' };
+    const read = Engine.readFloodZone(attrs.FLD_ZONE, attrs.ZONE_SUBTY);
+    if (!read) return null;
+    const bfe = (attrs.STATIC_BFE != null && attrs.STATIC_BFE > -9000) ? ` (base flood elevation ${attrs.STATIC_BFE} ft)` : '';
+    return { kind: read.severity === 'info' ? 'note' : read.severity, text: read.label + bfe };
+}
+
+// USDA Soil Data Access (CORS-open, keyless): dominant component's linear
+// extensibility — the shrink-swell number behind DFW foundation trouble
+async function soilScan(lat, lon) {
+    const la = Number(lat);
+    const lo = Number(lon);
+    if (!Number.isFinite(la) || !Number.isFinite(lo)) return null;
+    const sql = 'SELECT TOP 1 c.compname, ch.lep_r FROM component c '
+        + 'JOIN chorizon ch ON ch.cokey = c.cokey WHERE c.mukey IN '
+        + `(SELECT * FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('point(${lo} ${la})')) `
+        + "AND c.majcompflag = 'Yes' AND ch.lep_r IS NOT NULL "
+        + 'ORDER BY c.comppct_r DESC, ch.lep_r DESC';
+    const res = await fetch('https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: sql, format: 'JSON' })
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    const row = d && d.Table && d.Table[0];
+    if (!row) return null;
+    const read = Engine.readShrinkSwell(row[1], row[0]);
+    if (!read) return null;
+    return { kind: read.severity === 'info' ? 'note' : read.severity, text: 'Soil — ' + read.label };
+}
+
+// City permit feeds are per-city; only Dallas publishes a live keyless one.
+// Fort Worth researched 2026-08-14: the BLDS Socrata feed is dead (stale
+// since 2015), data.fortworthtexas.gov migrated to ArcGIS Hub, and the
+// city's public ArcGIS org exposes no permits layer — slot it here the day
+// one exists. Other DFW suburbs (incl. Benbrook) publish nothing.
+const PERMIT_SOURCES = {
+    dallas: {
+        query: (street) => 'https://www.dallasopendata.com/resource/e7gq-4sah.json'
+            + `?$where=${encodeURIComponent(`upper(street_address) like '${street}%'`)}`
+            + `&$order=issued_date DESC&$limit=12`,
+        map: (r) => ({
+            type: r.permit_type || '',
+            date: (r.issued_date || '').slice(0, 10),
+            desc: r.work_description || ''
+        })
+    }
+};
+
+async function permitScan(address) {
+    const parts = String(address || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) return null;
+    const cityLabel = parts[1];
+    const src = PERMIT_SOURCES[cityLabel.toLowerCase()];
+    if (!src) return [{ kind: 'note', text: `Permits: ${cityLabel} publishes no open permit data (Dallas only so far)` }];
+    const street = parts[0].toUpperCase().replace(/'/g, '');
+    const res = await fetch(src.query(street), { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const rows = (await res.json()).map(src.map);
+    if (!rows.length) return [{ kind: 'note', text: 'Permits: none on file at this address (city open data)' }];
+    const chips = [];
+    const hay = (r) => `${r.type} ${r.desc}`;
+    const foundation = rows.find(r => /foundation|pier/i.test(hay(r)));
+    if (foundation) chips.push({ kind: 'bad', text: `Permit history: foundation work on file (${foundation.date || 'undated'}) — ask for the warranty transfer` });
+    const roof = rows.find(r => /roof/i.test(hay(r)));
+    if (roof) chips.push({ kind: 'good', text: `Permit history: roof permit ${roof.date || 'on file'}` });
+    const latest = rows.slice(0, 3).map(r => `${r.date || '—'} ${(r.type || r.desc).slice(0, 40)}`.trim()).join(' · ');
+    chips.push({ kind: 'note', text: `Permits on file: ${rows.length}${rows.length >= 12 ? '+' : ''} — ${latest}` });
+    return chips;
+}
+
 async function scanSubjectSite() {
     scanSiteBtn.disabled = true;
     siteInfluencesEl.classList.remove('hidden');
@@ -2068,6 +2165,13 @@ async function scanSubjectSite() {
             return;
         }
         showSiteMap(coords.lat, coords.lon);
+        // Public-records pass (flood / soil / permits) runs alongside the
+        // map and vision passes — each source fails independently and quietly
+        const recordsPromise = Promise.all([
+            floodScan(coords.lat, coords.lon).catch(() => null),
+            soilScan(coords.lat, coords.lon).catch(() => null),
+            permitScan(subjectAddressInput.value).catch(() => null)
+        ]);
         // Measured pass (Overpass) and vision pass are independent — a busy
         // Overpass must not take the AI read down with it
         let poolSeen = false;
@@ -2130,6 +2234,12 @@ async function scanSubjectSite() {
             auto.textContent = '✓ Pool field auto-set to Yes from the imagery';
             siteInfluencesEl.appendChild(auto);
         }
+
+        // Public-records chips: FEMA flood zone, USDA shrink-swell, permits
+        const [floodChip, soilChip, permitChips] = await recordsPromise;
+        [floodChip, soilChip].concat(permitChips || [])
+            .filter(Boolean)
+            .forEach(c => siteInfluencesEl.appendChild(influenceChipDiv(c)));
     } catch (e) {
         siteInfluencesEl.textContent = 'Map scan failed — Overpass may be busy; try again in a minute.';
     } finally {

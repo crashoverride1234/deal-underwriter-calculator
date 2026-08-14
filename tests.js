@@ -494,6 +494,33 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition(undefined) === null);
 });
 
+// ---- readFloodZone / readShrinkSwell: site-record classification ----
+
+test('flood zone: A/V zones read as mandatory-insurance SFHA, X reads clean', () => {
+    const ae = Engine.readFloodZone('AE');
+    assert(ae.severity === 'bad' && ae.sfha === true, 'AE is an SFHA');
+    assert(Engine.readFloodZone('VE').sfha === true, 'VE is an SFHA');
+    assert(Engine.readFloodZone('AO', '').sfha === true, 'AO is an SFHA');
+    const x = Engine.readFloodZone('X', 'AREA OF MINIMAL FLOOD HAZARD');
+    assert(x.severity === 'good' && x.sfha === false, 'plain X is clean');
+});
+
+test('flood zone: shaded X reads as a disclosure item; D undetermined; blank is null', () => {
+    const shaded = Engine.readFloodZone('X', '0.2 PCT ANNUAL CHANCE FLOOD HAZARD');
+    assert(shaded.severity === 'info', 'shaded X is informational');
+    assert(Engine.readFloodZone('D').severity === 'info', 'zone D undetermined');
+    assert(Engine.readFloodZone('') === null && Engine.readFloodZone(null) === null, 'no zone = no read');
+});
+
+test('shrink-swell: LEP bands map to high/moderate/low; missing is null', () => {
+    const high = Engine.readShrinkSwell(9.1, 'Sanger');
+    assert(high.severity === 'bad' && high.level === 'high', '9.1% is high');
+    assert(high.label.indexOf('Sanger') === 0, 'soil name leads the label');
+    assert(Engine.readShrinkSwell('4.5').level === 'moderate', '4.5% is moderate');
+    assert(Engine.readShrinkSwell(1.2).level === 'low', '1.2% is low');
+    assert(Engine.readShrinkSwell(null) === null && Engine.readShrinkSwell('') === null, 'no LEP = no read');
+});
+
 // ---- marketTrend: 1004MC-style trailing buckets ----
 
 test('market trend: buckets fill by sale age and direction reads newest vs oldest median', () => {

@@ -421,6 +421,48 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
+    // ---- Flood-zone read (FEMA NFHL) ----
+    // A*/V* zones are Special Flood Hazard Areas: flood insurance is
+    // MANDATORY on any federally backed loan — a hold carry cost AND a drag
+    // on every financed exit buyer. Shaded X (0.2% annual chance) is a
+    // disclosure item; plain X is clean. Returns null when no zone given.
+    function readFloodZone(zone, subtype) {
+        if (!zone) return null;
+        const z = String(zone).toUpperCase().trim();
+        const sub = String(subtype || '').toUpperCase();
+        if (z.charAt(0) === 'A' || z.charAt(0) === 'V') {
+            return {
+                severity: 'bad', sfha: true,
+                label: `Flood zone ${z} — Special Flood Hazard Area: flood insurance mandatory for any financed buyer`
+            };
+        }
+        if (z === 'X' || z === 'B' || z === 'C') {
+            const shaded = z === 'B' || sub.includes('0.2') || sub.includes('LEVEE');
+            return shaded
+                ? { severity: 'info', sfha: false, label: `Flood zone ${z} (0.2% annual chance) — insurance optional but cheap; disclose it` }
+                : { severity: 'good', sfha: false, label: `Flood zone ${z} — minimal flood hazard` };
+        }
+        if (z === 'D') return { severity: 'info', sfha: false, label: 'Flood zone D — risk undetermined (no flood study)' };
+        return { severity: 'info', sfha: false, label: `Flood zone ${z}` };
+    }
+
+    // ---- Expansive-soil read (USDA SSURGO linear extensibility) ----
+    // lep_r is the shrink-swell percentage of the dominant soil component;
+    // ~6%+ is the expansive clay that moves DFW foundations. Null when the
+    // survey has no number — never a guess.
+    function readShrinkSwell(lepR, soilName) {
+        const lep = parseFloat(lepR);
+        if (!Number.isFinite(lep)) return null;
+        const name = soilName ? `${soilName} soil: ` : '';
+        if (lep >= 6) {
+            return { severity: 'bad', level: 'high', label: `${name}HIGH shrink-swell clay (LEP ${lep}%) — budget a foundation inspection; piers run $1k–3.5k each` };
+        }
+        if (lep >= 3) {
+            return { severity: 'info', level: 'moderate', label: `${name}moderate shrink-swell (LEP ${lep}%) — watch drainage and slab watering` };
+        }
+        return { severity: 'good', level: 'low', label: `${name}low shrink-swell (LEP ${lep}%)` };
+    }
+
     // ---- Market trend (1004MC-style trailing buckets) ----
     // Buckets the trailing year's solds 0–3 / 4–6 / 7–12 months back and
     // reads direction the way an appraiser's market-conditions grid does:
@@ -629,5 +671,5 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell };
 }));

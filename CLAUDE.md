@@ -108,6 +108,18 @@ GitHub Pages from `main`.
   power line / commercial / park-green-space and parcel-mapped pools within
   ~400 m. Subject scan + per-comp scan buttons; comp coords ride along on
   records/candidates (`lat`/`lon`). OSM absence ≠ absence in reality.
+  The subject scan also runs a **public-records pass** (all verified live
+  2026-08-14): FEMA NFHL flood zone browser-direct from Esri's Living Atlas
+  mirror (`USA_Flood_Hazard_Areas_view` FeatureServer, CORS-open; hazard
+  polygons only, so 0 features = nothing mapped; hazards.fema.gov itself is
+  a DEAD END — no CORS for browsers, 403/525 for Workers; engine
+  `readFloodZone()`), USDA SSURGO shrink-swell browser-direct
+  (sdmdataaccess `Tabular/post.rest`, CORS-open; dominant component `lep_r`;
+  engine `readShrinkSwell()`, ≥6% = the DFW clay warning), and city permit
+  history (`PERMIT_SOURCES` per-city table — Dallas Socrata `e7gq-4sah` is
+  the only live keyless feed; Fort Worth's BLDS feed died in 2015 and its
+  ArcGIS org has no permits layer — do not re-research, just add cities
+  when feeds appear).
 - **AI vision** (worker `/vision`, Workers AI `[ai]` binding in wrangler.toml,
   free daily allocation): llava-1.5-7b judges adjacency from imagery — Esri
   keyless `export` snapshot (~150 m box) for pool / road-adjacency / rail /
