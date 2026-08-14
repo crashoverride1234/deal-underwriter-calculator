@@ -421,6 +421,53 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
+    // ---- Property-tax protest check ----
+    // TX owners protest when the assessment exceeds their evidence of value
+    // (purchase price and/or the comp grid — the app's adjustment table IS
+    // hearing evidence). Savings use the record-derived effective rate.
+    // Null unless genuinely over-assessed — no manufactured grievances.
+    function protestOpportunity(inputs) {
+        const assessed = num(inputs.assessedValue);
+        const annualTaxes = num(inputs.annualTaxes);
+        const evidence = num(inputs.evidenceValue);
+        if (assessed <= 0 || annualTaxes <= 0 || evidence <= 0) return null;
+        if (evidence >= assessed) return null;
+        const rate = annualTaxes / assessed;
+        return {
+            overAssessedBy: Math.round(assessed - evidence),
+            estAnnualSavings: Math.round((assessed - evidence) * rate),
+            effectiveRatePct: rate * 100
+        };
+    }
+
+    // ---- Hail-history read (NWS local storm reports) ----
+    // severe = reports ≥1.0" within the radius over the trailing 5 years.
+    // 3+ is hail-alley territory: roof-age scrutiny, ACV schedules, and
+    // %-of-dwelling wind/hail deductibles all follow from it.
+    function readHailHistory(summary) {
+        if (!summary || !Number.isFinite(Number(summary.count))) return null;
+        const severe = num(summary.countSevere);
+        const radius = num(summary.radiusMi) || 3;
+        const max = Number(summary.maxMag);
+        const latest = summary.latest || null;
+        if (severe >= 3) {
+            return {
+                severity: 'bad',
+                label: `Hail alley: ${severe} reports ≥1.0" within ${radius} mi in 5 yrs`
+                    + `${Number.isFinite(max) ? ` (max ${max}"` + (latest ? `, latest ${latest}` : '') + ')' : ''}`
+                    + ' — verify roof age vs storm dates; expect %-of-dwelling hail deductibles'
+            };
+        }
+        if (severe >= 1) {
+            return {
+                severity: 'info',
+                label: `Hail: ${severe} report${severe === 1 ? '' : 's'} ≥1.0" within ${radius} mi in 5 yrs`
+                    + `${latest ? ` (latest ${latest})` : ''} — check the roof's age against the storm dates`
+            };
+        }
+        return { severity: 'good', label: `Hail: no ≥1.0" reports within ${radius} mi in the last 5 yrs` };
+    }
+
     // ---- Flood-zone read (FEMA NFHL) ----
     // A*/V* zones are Special Flood Hazard Areas: flood insurance is
     // MANDATORY on any federally backed loan — a hold carry cost AND a drag
@@ -671,5 +718,5 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory };
 }));

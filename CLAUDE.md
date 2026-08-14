@@ -74,7 +74,11 @@ GitHub Pages from `main`.
   → browser-pasted keys as deliberate overrides (RentCast direct with
   variant + lat/long-radius retries, then Melissa direct) → Worker `/lookup`,
   which runs the canonical server-side order in ONE round trip:
-  RentCast (secret) → Melissa (secret) → realtor.com GraphQL (keyless;
+  TAD parcels (keyless Tarrant FeatureServer, gated by county bbox + a
+  SITUS street-number guard against wrong-parcel geocodes; no tax bill, so
+  a hit is merged with the keyless realtor rung; saves RentCast quota in
+  the home county) → RentCast (secret) → Melissa (secret) → realtor.com
+  GraphQL (keyless;
   `operationName` is REQUIRED in the POST body or it 400s). Providers whose
   secret is unset are skipped. RentCast: 50/mo free, only HTTP-200s billed.
   Melissa: ~1,000 credits/mo free. Worker also keeps `/property`, `/rentcast`,
@@ -119,7 +123,16 @@ GitHub Pages from `main`.
   history (`PERMIT_SOURCES` per-city table — Dallas Socrata `e7gq-4sah` is
   the only live keyless feed; Fort Worth's BLDS feed died in 2015 and its
   ArcGIS org has no permits layer — do not re-research, just add cities
-  when feeds appear).
+  when feeds appear), plus hail history via worker `/hail` (IEM lsr.py CSV,
+  WFO=FWD, geojson removed upstream; ~1 MB parsed + cached per isolate-day;
+  engine `readHailHistory()`, 3+ ≥1.0" reports in 3 mi/5 yr = hail alley).
+  ARV page also runs a protest check (`protestOpportunity()`: assessed vs
+  min(user-entered purchase price, blended ARV) — the price only counts
+  once typed for THIS subject (`purchaseEnteredForSubject`); savings at the
+  derived rate, May-15 deadline note; the printable evidence packet renders
+  into hidden `#protest-packet` + `body.protest-print` print CSS +
+  `window.print()` — deliberately NOT window.open (popup blockers); button
+  hidden on native).
 - **AI vision** (worker `/vision`, Workers AI `[ai]` binding in wrangler.toml,
   free daily allocation): llava-1.5-7b judges adjacency from imagery — Esri
   keyless `export` snapshot (~150 m box) for pool / road-adjacency / rail /

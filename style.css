@@ -1341,7 +1341,27 @@ input[type="range"]::-webkit-slider-thumb:active {
 }
 
 /* PDF Print Customization */
+/* Protest packet: hidden on screen, the ONLY thing on paper in packet mode */
+#protest-packet { display: none; }
+
 @media print {
+    body.protest-print .container { display: none !important; }
+    body.protest-print #protest-packet {
+        display: block !important;
+        font-family: Georgia, serif;
+        color: #111;
+        line-height: 1.5;
+    }
+    body.protest-print #protest-packet h1 { font-size: 1.3rem; margin: 0 0 0.2rem; }
+    body.protest-print #protest-packet h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+    body.protest-print #protest-packet .muted { color: #555; font-size: 0.85rem; }
+    body.protest-print #protest-packet .big { font-size: 1.05rem; font-weight: bold; }
+    body.protest-print #protest-packet table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+    body.protest-print #protest-packet th,
+    body.protest-print #protest-packet td { border: 1px solid #999; padding: 0.35rem 0.5rem; text-align: right; }
+    body.protest-print #protest-packet th:first-child,
+    body.protest-print #protest-packet td:first-child { text-align: left; }
+
     body {
         background: white !important;
         color: black !important;

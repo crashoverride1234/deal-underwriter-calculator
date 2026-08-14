@@ -8,9 +8,17 @@
  * Routes (all GET):
  *   /health                        → { ok, providers } — connectivity check
  *   /lookup?address=...[&mpr_id=][&latitude=&longitude=]
- *                                  → unified ladder: RentCast (secret) →
- *                                    Melissa (secret) → realtor.com (keyless);
+ *                                  → unified ladder: TAD parcels (keyless,
+ *                                    Tarrant County only, enriched with the
+ *                                    keyless realtor.com rung for the tax
+ *                                    bill) → RentCast (secret) → Melissa
+ *                                    (secret) → realtor.com (keyless);
  *                                    first hit wins, source labeled
+ *   /hail?latitude=&longitude=[&radius=]
+ *                                  → NWS local storm reports (IEM CSV,
+ *                                    keyless): hail counts/magnitudes near
+ *                                    the point, trailing 5 years; the ~1 MB
+ *                                    upstream CSV is cached per isolate-day
  *   /comps?address=... | latitude=&longitude=
  *          [&sqft=&beds=&baths=&radius=&months=&limit=]
  *                                  → comp candidates near the subject:
@@ -434,6 +442,39 @@ async function handleLookup(params, env, cors) {
   if (!address) return json({ error: 'address is required' }, 400, cors);
   const providerErrors = [];
 
+  // Tarrant County parcels are free from TAD's public FeatureServer — in
+  // the home county this rung replaces a billable RentCast call WHEN the
+  // keyless realtor enrich can supply the tax bill TAD doesn't carry.
+  // A tax-less TAD record must NOT short-circuit the keyed rungs: the
+  // client caches records per address with no TTL, so returning a degraded
+  // record here would starve the tax-reassessment and protest features for
+  // that address permanently. TAD is instead held as a gap-filler for
+  // whichever later rung hits, and only returned bare when everything
+  // else missed (still better than a 404).
+  const lat0 = parseFloat(params.get('latitude'));
+  const lon0 = parseFloat(params.get('longitude'));
+  let tad = null;
+  if (inTarrant(lat0, lon0)) {
+    try { tad = await tadRecord(lat0, lon0, address); }
+    catch (e) { providerErrors.push('TAD: ' + e.message); }
+  }
+  if (tad) {
+    try {
+      let mprId = params.get('mpr_id');
+      if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
+      if (mprId && /^\d+$/.test(mprId)) {
+        const rr = await realtorRecord(mprId);
+        // Same wrong-house guard as the TAD rung itself: an mpr_id resolved
+        // from a bare address string can be a different property entirely
+        if (rr && streetMatch(address, rr.formattedAddress)) {
+          const merged = mergeRecords(tad, rr);
+          if (merged.annualTaxes) return json(merged, 200, cors);
+          tad = merged; // keep the extra fields; still hunting a tax bill
+        }
+      }
+    } catch (e) { providerErrors.push('realtor enrich: ' + e.message); }
+  }
+
   if (env.RENTCAST_API_KEY) {
     try {
       let rec = await rentcastRecord(new URLSearchParams({ address }), env);
@@ -443,14 +484,14 @@ async function handleLookup(params, env, cors) {
           radius: '0.05', limit: '1'
         }), env);
       }
-      if (rec) return json(rec, 200, cors);
+      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
     } catch (e) { providerErrors.push('RentCast: ' + e.message); }
   }
 
   if (env.MELISSA_API_KEY) {
     try {
       const rec = await melissaRecord(address, env);
-      if (rec) return json(rec, 200, cors);
+      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
     } catch (e) { providerErrors.push('Melissa: ' + e.message); }
   }
 
@@ -459,10 +500,11 @@ async function handleLookup(params, env, cors) {
     if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
     if (mprId && /^\d+$/.test(mprId)) {
       const rec = await realtorRecord(mprId);
-      if (rec) return json(rec, 200, cors);
+      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
     }
   } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
 
+  if (tad) return json(tad, 200, cors); // parcel truth beats a 404
   return json({ error: 'no record', providerErrors }, 404, cors);
 }
 
@@ -658,6 +700,205 @@ async function handleRent(params, env, cors) {
 
   await Promise.all(jobs);
   return json(out, 200, cors);
+}
+
+// ---- TAD (Tarrant Appraisal District) parcel rung ----
+// Public keyless ArcGIS FeatureServer, verified live 2026-08-14. Point-in-
+// parcel query; a SITUS street-number mismatch with the requested address
+// is treated as a miss so a geocode landing on the neighbor's parcel can
+// never fill the wrong house's data.
+const TAD_PARCELS_URL = 'https://mapit.tarrantcounty.com/arcgis/rest/services/Dynamic/TADParcels/FeatureServer/0/query';
+
+// Tarrant's TIGER extent is ~(-97.549..-97.033, 32.548..32.991); a small pad
+// keeps edge parcels in without sending Irving/Grand Prairie (Dallas Co.)
+// on guaranteed-miss TAD round trips.
+function inTarrant(lat, lon) {
+  return Number.isFinite(lat) && Number.isFinite(lon)
+    && lat >= 32.52 && lat <= 33.01 && lon >= -97.60 && lon <= -97.02;
+}
+
+// Do two address strings plausibly name the same house? Leading street
+// numbers must agree numerically, a fractional address ("2115 1/2 Lipscomb")
+// only matches a candidate carrying the same fraction (the main house's
+// parcel must never fill the half-address), and the first street-name token
+// (directionals stripped) must agree when both sides have one. Unparseable
+// input doesn't block — this is a wrong-house guard, not a validator.
+const DIRECTIONALS = ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW', 'NORTH', 'SOUTH', 'EAST', 'WEST'];
+
+function streetMatch(reqAddress, candAddress) {
+  const parse = (s) => {
+    const m = /^(\d+)\s*(\d+\/\d+)?\s+(.+)$/.exec(String(s || '').toUpperCase().trim());
+    if (!m) return null;
+    const toks = m[3].replace(/[^A-Z0-9/ ]/g, ' ').split(/\s+/)
+      .filter(t => t && DIRECTIONALS.indexOf(t) === -1);
+    return { no: parseInt(m[1], 10), frac: m[2] || null, name: toks[0] || '' };
+  };
+  const a = parse(reqAddress);
+  const b = parse(candAddress);
+  if (!a || !b) return true;
+  if (a.no !== b.no) return false;
+  if ((a.frac || b.frac) && a.frac !== b.frac) return false;
+  if (a.name && b.name && a.name !== b.name) return false;
+  return true;
+}
+
+async function tadRecord(lat, lon, address) {
+  const q = new URLSearchParams({
+    geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+    outFields: 'SITUS_ADDR,OWNER_NAME,OWNER_ADDR,OWNER_CITY,OWNER_ZIP,ACCOUNT,LEGAL_1,LEGAL_2,'
+      + 'SubdivisionName,SCHOOL,DEED_DATE,GARAGE_CAP,BEDROOMS,BATHROOMS,YEAR_BUILT,LIVING_ARE,'
+      + 'SW_POOL,LAND_SQFT,LAND_ACRES,CENTRAL_HE,CENTRAL_AI,LAND_VALUE,IMPR_VALUE,TOTAL_VALU,'
+      + 'APPRAISEDV,EXEMPTION_',
+    returnGeometry: 'false', f: 'json'
+  });
+  const res = await fetch(`${TAD_PARCELS_URL}?${q}`);
+  if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error('ArcGIS: ' + (data.error.message || 'query error'));
+  const a = data.features && data.features[0] && data.features[0].attributes;
+  if (!a) return null;
+  const trim = (s) => { const t = s == null ? '' : String(s).trim(); return t || null; };
+  // Wrong-parcel guard: number + street-name + fraction must plausibly agree
+  if (!streetMatch(address, trim(a.SITUS_ADDR))) return null;
+  if (!numOrNull(a.LIVING_ARE)) return null; // vacant/unimproved parcel — not a usable SFR record
+  return {
+    sqft: numOrNull(a.LIVING_ARE),
+    beds: numOrNull(a.BEDROOMS),   // TAD stores 0 for unknown — numOrNull maps it to null
+    baths: numOrNull(a.BATHROOMS),
+    lot: numOrNull(a.LAND_SQFT) || (numOrNull(a.LAND_ACRES) ? Math.round(a.LAND_ACRES * 43560) : null),
+    year: numOrNull(a.YEAR_BUILT),
+    garage: numOrNull(a.GARAGE_CAP),
+    pool: trim(a.SW_POOL) === 'Y' ? true : null, // blank ≠ proven no-pool
+    stories: null,
+    subdivision: trim(a.SubdivisionName),
+    hoa: null,
+    propType: null,
+    county: 'Tarrant',
+    zoning: null,
+    apn: trim(a.ACCOUNT),
+    legal: [trim(a.LEGAL_1), trim(a.LEGAL_2)].filter(Boolean).join(' ') || null,
+    garageType: null,
+    foundation: null,
+    roof: null,
+    exterior: null,
+    heating: trim(a.CENTRAL_HE) === 'Y' ? 'Central' : null,
+    cooling: trim(a.CENTRAL_AI) === 'Y' ? 'Central' : null,
+    assessedValue: numOrNull(a.TOTAL_VALU) || numOrNull(a.APPRAISEDV),
+    assessedLand: numOrNull(a.LAND_VALUE),
+    assessedImprov: numOrNull(a.IMPR_VALUE),
+    annualTaxes: null,   // TAD publishes value, not the bill — realtor enrich fills it
+    lastSaleDate: numOrNull(a.DEED_DATE) ? new Date(a.DEED_DATE).toISOString().slice(0, 10) : null,
+    lastSalePrice: null, // TX non-disclosure
+    listPrice: null,
+    listingStatus: null,
+    hoaFee: null,
+    ownerNames: trim(a.OWNER_NAME),
+    ownerType: null,
+    ownerOccupied: null,
+    ownerMailing: [trim(a.OWNER_ADDR), trim(a.OWNER_CITY), trim(a.OWNER_ZIP)].filter(Boolean).join(', ') || null,
+    lat, lon,
+    formattedAddress: null, // keep the client's canonical picked address
+    source: 'TAD (Tarrant)',
+    extra: { school: trim(a.SCHOOL), exemptions: trim(a.EXEMPTION_), lat, lon }
+  };
+}
+
+// Fill a primary record's gaps from another provider (never overwrite).
+// formattedAddress is deliberately excluded: the client keeps its canonical
+// picked address, and a filler must never rewrite the subject's identity.
+function mergeRecords(primary, filler) {
+  const out = { ...primary };
+  for (const [k, v] of Object.entries(filler || {})) {
+    if (k === 'source' || k === 'extra' || k === 'formattedAddress') continue;
+    if ((out[k] === null || out[k] === undefined || out[k] === '') && v !== null && v !== undefined && v !== '') {
+      out[k] = v;
+    }
+  }
+  out.extra = { ...((filler && filler.extra) || {}), ...(primary.extra || {}) };
+  out.source = `${primary.source} + ${(filler && filler.source) || 'unknown'}`;
+  return out;
+}
+
+// ---- Hail history (NWS local storm reports via IEM) ----
+// lsr.py only speaks CSV now (geojson removed upstream); the 5-year WFO-FWD
+// pull is ~1 MB, so it's parsed once and cached per isolate-day and clients
+// get a tiny distance-filtered summary.
+let lsrCache = null; // { fetchedAt, rows: [{lat, lon, mag, date}] }
+
+function csvFields(line) {
+  const out = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"') {
+      inQ = true;
+    } else if (ch === ',') {
+      out.push(cur); cur = '';
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+async function handleHail(params, env, cors) {
+  const lat = parseFloat(params.get('latitude'));
+  const lon = parseFloat(params.get('longitude'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude required' }, 400, cors);
+  }
+  const radiusMi = Math.min(10, parseFloat(params.get('radius')) || 3);
+  if (!lsrCache || Date.now() - lsrCache.fetchedAt > 86400000) {
+    const now = new Date();
+    const start = new Date(now.getTime() - 5 * 365.25 * 86400000);
+    const iso = (d) => d.toISOString().slice(0, 16) + 'Z';
+    const q = new URLSearchParams({ wfo: 'FWD', fmt: 'csv', sts: iso(start), ets: iso(now) });
+    const res = await fetch('https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py?' + q);
+    if (!res.ok) return json({ error: `IEM upstream HTTP ${res.status}` }, 502, cors);
+    // Header: VALID,VALID2,LAT,LON,MAG,WFO,TYPECODE,TYPETEXT,CITY,...
+    // VALID/VALID2 are UTC; DFW hail peaks in the evening, so ~38% of
+    // reports land past midnight UTC — dates must be read in Central time
+    // or the chip cites storm dates that match no claim or news report.
+    const centralDay = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit'
+    });
+    const lines = (await res.text()).split('\n');
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const f = csvFields(lines[i]);
+      if (f.length < 8 || f[6] !== 'H') continue;
+      const la = parseFloat(f[2]);
+      const lo = parseFloat(f[3]);
+      const mag = parseFloat(f[4]);
+      const v = f[0] || ''; // YYYYMMDDHHMM (UTC)
+      if (!Number.isFinite(la) || !Number.isFinite(lo) || !Number.isFinite(mag) || v.length < 12) continue;
+      const utc = new Date(Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8), +v.slice(8, 10), +v.slice(10, 12)));
+      rows.push({ lat: la, lon: lo, mag, date: centralDay.format(utc) });
+    }
+    // A 5-year WFO-FWD pull is never legitimately empty (thousands of hail
+    // rows) — zero parsed rows is an upstream anomaly and must not be
+    // cached, or every scan for a day gets a confident false "no hail".
+    if (!rows.length) return json({ error: 'IEM returned no parseable rows' }, 502, cors);
+    lsrCache = { fetchedAt: Date.now(), rows };
+  }
+  const events = lsrCache.rows
+    .map(r => ({ ...r, miles: milesBetween(lat, lon, r.lat, r.lon) }))
+    .filter(r => r.miles <= radiusMi)
+    .sort((a, b) => b.mag - a.mag);
+  const severe = events.filter(e => e.mag >= 1);
+  return json({
+    radiusMi,
+    years: 5,
+    count: events.length,
+    countSevere: severe.length,
+    maxMag: events.length ? events[0].mag : null,
+    latest: events.length ? events.reduce((m, e) => (e.date > m ? e.date : m), '') : null,
+    events: events.slice(0, 5).map(e => ({ date: e.date, mag: e.mag, miles: Math.round(e.miles * 10) / 10 }))
+  }, 200, cors);
 }
 
 // Comp candidates near a point: realtor.com sold listings (keyless) merged
@@ -982,6 +1223,8 @@ export default {
           return await handleMarket(url.searchParams, env, cors);
         case '/rent':
           return await handleRent(url.searchParams, env, cors);
+        case '/hail':
+          return await handleHail(url.searchParams, env, cors);
         case '/vision':
           return await handleVision(url.searchParams, env, cors);
         case '/property':

@@ -266,6 +266,7 @@ function calculateDeal() {
     updateSummary(m);
     updateTaxProjection();
     updateMaxOffer();
+    updateProtestNote(); // purchase price is protest evidence
 }
 
 // Max-offer back-solver: the daily question is "what do I offer", so run
@@ -339,10 +340,126 @@ function updateMaxOffer() {
         btn.textContent = `Use ${formatCurrency(r.maxPrice)} as Purchase Price`;
         btn.addEventListener('click', () => {
             purchasePriceInput.value = r.maxPrice;
+            purchaseEnteredForSubject = true; // deliberate act — counts as evidence
             calculateDeal();
         });
         maoResult.appendChild(btn);
     }
+}
+
+// ==================== Property-Tax Protest Check ====================
+// The appraisal grid is literally protest evidence: when the county's
+// assessed value exceeds the user's evidence of value (purchase price or
+// the comp-derived value, whichever is LOWER), surface the case and print
+// the packet. TX deadline: May 15 or 30 days after the appraisal notice.
+
+const protestNote = document.getElementById('protest-note');
+
+// The purchase price only counts as protest evidence if the user typed it
+// for THIS subject — the calculator field survives subject switches (and
+// ships a demo default), and a stale price must never end up in a packet
+// handed to a review board.
+let purchaseEnteredForSubject = false;
+
+function updateProtestNote() {
+    const arv = lastAppraisal && lastAppraisal.arv > 0 ? lastAppraisal.arv : 0;
+    const price = purchaseEnteredForSubject ? Engine.num(purchasePriceInput.value) : 0;
+    const candidates = [arv, price].filter(v => v > 0);
+    const evidence = candidates.length ? Math.min(...candidates) : 0;
+    const p = Engine.protestOpportunity({
+        assessedValue: subjectAssessedValueInput.value,
+        annualTaxes: subjectAnnualTaxesInput.value,
+        evidenceValue: evidence
+    });
+    if (!p) {
+        protestNote.classList.add('hidden');
+        protestNote.innerHTML = '';
+        return;
+    }
+    const basis = (price > 0 && price <= arv) || arv <= 0 ? 'purchase price' : 'comp-grid value';
+    protestNote.innerHTML = '';
+    protestNote.append('Protest check: county assessed '
+        + `${formatCurrency(Engine.num(subjectAssessedValueInput.value))} vs your ${basis} ${formatCurrency(evidence)} — `);
+    const fig = document.createElement('span');
+    fig.className = 'tax-figure';
+    fig.textContent = `over-assessed by ${formatCurrency(p.overAssessedBy)} ≈ ${formatCurrency(p.estAnnualSavings)}/yr`;
+    protestNote.appendChild(fig);
+    protestNote.append(` at the ${p.effectiveRatePct.toFixed(2)}% rate. Deadline: May 15 (or 30 days after the notice).`);
+    const isNative = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+    if (!isNative) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.style.cssText = 'margin-left: 0.4rem; padding: 0.15rem 0.6rem; font-size: 0.72rem;';
+        btn.textContent = 'Print protest packet';
+        btn.addEventListener('click', () => printProtestPacket(p, evidence, basis));
+        protestNote.appendChild(btn);
+    }
+    protestNote.classList.remove('hidden');
+}
+
+// Printable evidence packet: built into a hidden div and printed via the
+// app's existing window.print() pattern (a body class flips the print CSS
+// to show ONLY the packet — no popups, so no popup blockers). All user
+// data goes in via textContent — nothing user-typed touches innerHTML.
+function printProtestPacket(p, evidence, basis) {
+    const packet = document.getElementById('protest-packet');
+    packet.innerHTML = '';
+    const el = (tag, text, parent) => {
+        const e = document.createElement(tag);
+        if (text) e.textContent = text;
+        (parent || packet).appendChild(e);
+        return e;
+    };
+    el('h1', 'Property Tax Protest — Evidence Summary');
+    el('div', subjectAddressInput.value.trim()).className = 'big';
+    const apn = subjectApnInput.value.trim();
+    el('div', `${apn ? 'Account/APN: ' + apn + ' · ' : ''}Prepared ${new Date().toLocaleDateString()}`).className = 'muted';
+
+    el('h2', 'The case');
+    el('div', `County assessed value: ${formatCurrency(Engine.num(subjectAssessedValueInput.value))}`);
+    el('div', `Owner's evidence of market value (${basis === 'comp-grid value'
+        ? 'comparable grid, adjusted to renovated standard — an upper bound; the as-is value runs lower by remaining repair costs'
+        : basis}): ${formatCurrency(evidence)}`);
+    el('div', `Over-assessment: ${formatCurrency(p.overAssessedBy)} — estimated tax impact ${formatCurrency(p.estAnnualSavings)}/yr at the ${p.effectiveRatePct.toFixed(2)}% effective rate.`).className = 'big';
+
+    // The adjustment grid only prints when it SUPPORTS the case — a grid
+    // indicating more than the assessment would contradict the price
+    // evidence on the same page (that deal is an equity protest, not value)
+    const assessedNow = Engine.num(subjectAssessedValueInput.value);
+    const gridComps = (lastAppraisal && lastAppraisal.arv > 0 && lastAppraisal.arv < assessedNow
+        && lastAppraisal.comps) || [];
+    if (gridComps.length) {
+        el('h2', 'Comparable sales (adjusted to renovated standard)');
+        const table = el('table');
+        const thead = el('thead', null, table);
+        const hrow = el('tr', null, thead);
+        ['Comparable', 'Sale price', 'Net adj.', 'Adjusted value', 'Weight'].forEach(h => el('th', h, hrow));
+        const tbody = el('tbody', null, table);
+        gridComps.forEach((c, i) => {
+            const row = el('tr', null, tbody);
+            el('td', c.label || `Comp ${i + 1}`, row);
+            el('td', formatCurrency(c.salePrice), row);
+            el('td', (c.netAdjustment >= 0 ? '+' : '') + formatCurrency(c.netAdjustment), row);
+            el('td', formatCurrency(c.adjustedValue), row);
+            el('td', '×' + c.weight.toFixed(2), row);
+        });
+        el('div', `Indicated value from the grid: ${formatCurrency(lastAppraisal.arv)} `
+            + `(range ${formatCurrency(lastAppraisal.low)}–${formatCurrency(lastAppraisal.high)}).`);
+    }
+
+    el('h2', 'Notes');
+    el('div', 'Texas is a non-disclosure state: prices above are list-at-sale proxies unless verified against MLS. '
+        + 'Verify each comparable in NTREIS Matrix before the hearing. Protest deadline is May 15 or 30 days after '
+        + 'the appraisal notice, whichever is later.').className = 'muted';
+
+    document.body.classList.add('protest-print');
+    const cleanup = () => document.body.classList.remove('protest-print');
+    window.addEventListener('afterprint', cleanup, { once: true });
+    // Backstop scheduled BEFORE print(): a throwing print() (job conflict,
+    // sandbox) must not leave the class stuck — Export PDF would then print
+    // the stale packet instead of the app.
+    setTimeout(cleanup, 2500);
+    try { window.print(); } catch (e) { cleanup(); }
 }
 
 // Rehab scope estimator + DFW big-ticket capex flags. The estimate line
@@ -2114,6 +2231,16 @@ async function soilScan(lat, lon) {
     return { kind: read.severity === 'info' ? 'note' : read.severity, text: 'Soil — ' + read.label };
 }
 
+// NWS hail history via the worker (IEM's 5-year CSV is ~1 MB — the worker
+// caches it daily and returns a tiny distance-filtered summary)
+async function hailScan(lat, lon) {
+    const res = await fetch(`${workerBase()}/hail?latitude=${lat}&longitude=${lon}`, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const read = Engine.readHailHistory(await res.json());
+    if (!read) return null;
+    return { kind: read.severity === 'info' ? 'note' : read.severity, text: read.label };
+}
+
 // City permit feeds are per-city; only Dallas publishes a live keyless one.
 // Fort Worth researched 2026-08-14: the BLDS Socrata feed is dead (stale
 // since 2015), data.fortworthtexas.gov migrated to ArcGIS Hub, and the
@@ -2170,6 +2297,7 @@ async function scanSubjectSite() {
         const recordsPromise = Promise.all([
             floodScan(coords.lat, coords.lon).catch(() => null),
             soilScan(coords.lat, coords.lon).catch(() => null),
+            hailScan(coords.lat, coords.lon).catch(() => null),
             permitScan(subjectAddressInput.value).catch(() => null)
         ]);
         // Measured pass (Overpass) and vision pass are independent — a busy
@@ -2235,9 +2363,9 @@ async function scanSubjectSite() {
             siteInfluencesEl.appendChild(auto);
         }
 
-        // Public-records chips: FEMA flood zone, USDA shrink-swell, permits
-        const [floodChip, soilChip, permitChips] = await recordsPromise;
-        [floodChip, soilChip].concat(permitChips || [])
+        // Public-records chips: flood zone, shrink-swell, hail, permits
+        const [floodChip, soilChip, hailChip, permitChips] = await recordsPromise;
+        [floodChip, soilChip, hailChip].concat(permitChips || [])
             .filter(Boolean)
             .forEach(c => siteInfluencesEl.appendChild(influenceChipDiv(c)));
     } catch (e) {
@@ -2380,6 +2508,7 @@ function recalcAppraisal() {
         : 'Add comps to estimate ARV';
 
     renderMarketScan(); // competition band tracks the freshly blended ARV
+    updateProtestNote(); // assessed-vs-evidence case tracks the blend too
     saveAppraisalState();
 }
 
@@ -3124,6 +3253,8 @@ attachAddressAutocomplete(subjectAddressInput, addressSuggestionsBox, (s) => {
 subjectAddressInput.addEventListener('input', () => {
     lastSelectedCoords = null; // typing invalidates the previously picked location
     lastSelectedMprId = null;
+    purchaseEnteredForSubject = false; // a new subject voids the old price as evidence
+    updateProtestNote();
 });
 
 // ==================== Page switching ====================
@@ -3215,6 +3346,15 @@ addCompBtn.addEventListener('click', () => {
 // Tax-projection inputs live on the subject page; keep the calculator note current
 [subjectAssessedValueInput, subjectAnnualTaxesInput, subjectHoaFeeInput]
     .forEach(input => input.addEventListener('input', updateTaxProjection));
+[subjectAssessedValueInput, subjectAnnualTaxesInput]
+    .forEach(input => input.addEventListener('input', updateProtestNote));
+// Typing a price is what makes it evidence for the current subject.
+// Re-render after setting the flag: the calculateDeal listener registered
+// earlier already ran updateProtestNote with the flag still false.
+purchasePriceInput.addEventListener('input', () => {
+    purchaseEnteredForSubject = true;
+    updateProtestNote();
+});
 subjectOwnerOccupiedInput.addEventListener('change', updateTaxProjection);
 // Max-offer targets re-solve on their own; market inputs also flex the rule %
 [maoTargetProfitInput, maoTargetCfInput, maoMinDscrInput, maoMinCocInput, mktActivesInput, mktPendingsInput, mktSold90Input]

@@ -494,6 +494,32 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition(undefined) === null);
 });
 
+// ---- protestOpportunity: assessed vs evidence ----
+
+test('protest: over-assessment prices the savings at the derived rate', () => {
+    const p = Engine.protestOpportunity({ assessedValue: 320000, annualTaxes: 7040, evidenceValue: 285000 });
+    assert(p.overAssessedBy === 35000, 'over-assessed delta');
+    assert(p.estAnnualSavings === 770, '35k × 2.2%');
+    assertNear(p.effectiveRatePct, 2.2, 1e-9, 'derived rate');
+});
+
+test('protest: at/under assessment or missing data is null — no manufactured grievances', () => {
+    assert(Engine.protestOpportunity({ assessedValue: 280000, annualTaxes: 6000, evidenceValue: 280000 }) === null, 'equal = no case');
+    assert(Engine.protestOpportunity({ assessedValue: 280000, annualTaxes: 6000, evidenceValue: 300000 }) === null, 'under-assessed = no case');
+    assert(Engine.protestOpportunity({ assessedValue: 0, annualTaxes: 6000, evidenceValue: 250000 }) === null);
+    assert(Engine.protestOpportunity({ assessedValue: 280000, annualTaxes: '', evidenceValue: 250000 }) === null);
+});
+
+// ---- readHailHistory ----
+
+test('hail history: 3+ severe reports read as hail alley, 1-2 informational, 0 clean', () => {
+    const alley = Engine.readHailHistory({ count: 9, countSevere: 4, radiusMi: 3, maxMag: 2.5, latest: '2025-05-28' });
+    assert(alley.severity === 'bad' && alley.label.includes('4 reports') && alley.label.includes('2.5"'), 'hail alley');
+    assert(Engine.readHailHistory({ count: 2, countSevere: 1, radiusMi: 3 }).severity === 'info', 'one severe = info');
+    assert(Engine.readHailHistory({ count: 3, countSevere: 0, radiusMi: 3 }).severity === 'good', 'small hail only = clean');
+    assert(Engine.readHailHistory(null) === null && Engine.readHailHistory({}) === null, 'no data = no read');
+});
+
 // ---- readFloodZone / readShrinkSwell: site-record classification ----
 
 test('flood zone: A/V zones read as mandatory-insurance SFHA, X reads clean', () => {
