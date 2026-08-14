@@ -10,7 +10,10 @@ GitHub Pages from `main`.
 
 - `engine.js` — pure calculation core (UMD: browser global `UnderwriterEngine`
   + Node module). ALL business math lives here, no DOM:
-  `underwrite()`, `appraise()`, `marketAbsorption()`, `calcAmortizedPayment()`.
+  `underwrite()`, `appraise()`, `marketAbsorption()`, `calcAmortizedPayment()`,
+  `classifyCondition()`, `projectPropertyTax()` (TX post-sale reassessment:
+  effective rate from the record × buyer's basis; flip basis = purchase,
+  rental basis = max(purchase, ARV); homesteaded seller ⇒ floor).
 - `app.js` — DOM wiring only. Charts update in place (never destroy/recreate
   per keystroke). Dynamic icons are inline SVG constants — Lucide's
   `createIcons()` runs once at load and replaces `<i>` tags with static SVGs,

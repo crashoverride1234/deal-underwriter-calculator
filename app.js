@@ -27,6 +27,7 @@ const monthlyRentInput = document.getElementById('monthly-rent');
 const vacancyRateInput = document.getElementById('vacancy-rate');
 const operatingExpensesInput = document.getElementById('operating-expenses');
 const monthlyTaxesInsInput = document.getElementById('monthly-taxes-ins');
+const taxReassessNote = document.getElementById('tax-reassess-note');
 
 // Stress Test Elements
 const rehabBufferSlider = document.getElementById('rehab-buffer-slider');
@@ -243,6 +244,68 @@ function calculateDeal() {
         updateRentalUI(m);
     }
     updateSummary(m);
+    updateTaxProjection();
+}
+
+// TX reassessment: the seller's tax bill understates the buyer's — the
+// county chases the sale price and homestead exemptions don't transfer.
+// Live projection under the taxes input; one click adopts it. Flip basis is
+// the purchase price (what you carry during the hold); rental basis is the
+// stabilized value (the county will find the renovation).
+function updateTaxProjection() {
+    const price = Engine.num(purchasePriceInput.value);
+    const basis = currentStrategy === 'rental'
+        ? Math.max(price, Engine.num(arvInput.value))
+        : price;
+    const proj = Engine.projectPropertyTax({
+        assessedValue: subjectAssessedValueInput.value,
+        annualTaxes: subjectAnnualTaxesInput.value,
+        newBasis: basis
+    });
+    if (!proj) {
+        taxReassessNote.classList.add('hidden');
+        taxReassessNote.innerHTML = '';
+        return;
+    }
+    const sellerAnnual = Engine.num(subjectAnnualTaxesInput.value);
+    const hoaMonthly = Math.round(Engine.num(subjectHoaFeeInput.value));
+    const target = proj.projectedMonthly + hoaMonthly;
+    const inUse = Math.abs(Engine.num(monthlyTaxesInsInput.value) - target) <= 1;
+    const down = proj.deltaAnnual < 0;
+
+    taxReassessNote.innerHTML = '';
+    taxReassessNote.append(
+        `TX reassessment — seller pays ${formatCurrency(sellerAnnual)}/yr; at your `
+        + `${formatCurrency(basis)} ${currentStrategy === 'rental' ? 'stabilized basis' : 'purchase'} expect `
+    );
+    const fig = document.createElement('span');
+    fig.className = 'tax-figure' + (down ? ' down' : '');
+    fig.textContent = `${formatCurrency(proj.projectedAnnual)}/yr`
+        + ` (${proj.effectiveRatePct.toFixed(2)}% eff. rate → ${formatCurrency(target)}/mo${hoaMonthly ? ' incl. HOA' : ''})`;
+    taxReassessNote.appendChild(fig);
+    if (down) {
+        taxReassessNote.append('. Assessed above your basis — protest candidate.');
+    } else if (subjectOwnerOccupiedInput.value === 'yes') {
+        taxReassessNote.append('. Seller looks homesteaded, so treat this as a floor.');
+    } else {
+        taxReassessNote.append('.');
+    }
+    if (inUse) {
+        const ok = document.createElement('span');
+        ok.className = 'tax-applied';
+        ok.textContent = ' ✓ in use';
+        taxReassessNote.appendChild(ok);
+    } else {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = `Use ${formatCurrency(target)}/mo`;
+        btn.addEventListener('click', () => {
+            monthlyTaxesInsInput.value = target;
+            calculateDeal();
+        });
+        taxReassessNote.appendChild(btn);
+    }
+    taxReassessNote.classList.remove('hidden');
 }
 
 // Formatting helpers
@@ -2135,11 +2198,14 @@ function applyPropertyRecord(rec, fallbackAddress) {
     if (extraCount) filled.push(`+${extraCount} detail fields`);
 
     // Seed the calculator's monthly Taxes/Ins/HOA from real tax + HOA data
+    // (the reassessment note on the calculator page then flags how far the
+    // seller's bill sits from what the buyer will actually pay)
     if (rec.annualTaxes > 0) {
         const monthly = Math.round(rec.annualTaxes / 12 + (rec.hoaFee || 0));
         monthlyTaxesInsInput.value = monthly;
         filled.push(`est. taxes+HOA $${monthly}/mo`);
     }
+    updateTaxProjection();
 
     // Absentee signal: tax bill mails somewhere other than the property
     const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -2606,6 +2672,10 @@ addCompBtn.addEventListener('click', () => {
 
 [subjectStoriesInput, subjectPoolInput, subjectHoaInput, subjectOwnerOccupiedInput]
     .forEach(sel => sel.addEventListener('change', recalcAppraisal));
+// Tax-projection inputs live on the subject page; keep the calculator note current
+[subjectAssessedValueInput, subjectAnnualTaxesInput, subjectHoaFeeInput]
+    .forEach(input => input.addEventListener('input', updateTaxProjection));
+subjectOwnerOccupiedInput.addEventListener('change', updateTaxProjection);
 [mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
 
 lookupBtn.addEventListener('click', lookupSubjectProperty);

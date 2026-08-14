@@ -406,6 +406,29 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
+    // ---- Texas post-sale property-tax reassessment ----
+    // TX appraisal districts chase the sale price and the seller's homestead
+    // cap/exemptions do not transfer, so the seller's tax bill systematically
+    // understates what the buyer will pay. Derive the effective rate from the
+    // record (annualTaxes / assessedValue) and apply it to the buyer's new
+    // basis. Returns null when any input is missing — never a phantom
+    // projection. NOTE: the derived rate still embeds the seller's own
+    // exemptions, so for a homesteaded seller the projection is a FLOOR —
+    // callers should say so.
+    function projectPropertyTax(inputs) {
+        const assessed = num(inputs.assessedValue);
+        const currentAnnual = num(inputs.annualTaxes);
+        const basis = num(inputs.newBasis);
+        if (assessed <= 0 || currentAnnual <= 0 || basis <= 0) return null;
+        const projectedAnnual = Math.round(basis * currentAnnual / assessed);
+        return {
+            effectiveRatePct: (currentAnnual / assessed) * 100,
+            projectedAnnual,
+            projectedMonthly: Math.round(projectedAnnual / 12),
+            deltaAnnual: projectedAnnual - Math.round(currentAnnual)
+        };
+    }
+
     // ---- Listing-remarks condition read ----
     // Maps listing-remarks language onto the appraisal's condition buckets.
     // Returns { condition: 'renovated'|'average'|'dated', evidence } or null
@@ -430,5 +453,5 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax };
 }));

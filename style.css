@@ -825,6 +825,34 @@ input[type="range"]::-webkit-slider-thumb:active {
     border: 1px solid var(--border-color);
 }
 
+/* TX tax-reassessment projection under the taxes input */
+.tax-reassess-note {
+    margin-top: 0.45rem;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.tax-reassess-note .tax-figure {
+    color: var(--accent-warning);
+    font-weight: 600;
+}
+
+.tax-reassess-note .tax-figure.down {
+    color: var(--accent-success);
+}
+
+.tax-reassess-note button {
+    margin-left: 0.35rem;
+    padding: 0.12rem 0.55rem;
+    font-size: 0.7rem;
+}
+
+.tax-reassess-note .tax-applied {
+    color: var(--accent-success);
+    font-weight: 600;
+}
+
 /* Comp suggestion candidates panel */
 .comp-candidates {
     margin-bottom: 1rem;

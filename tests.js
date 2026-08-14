@@ -494,6 +494,35 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition(undefined) === null);
 });
 
+// ---- projectPropertyTax: TX post-sale reassessment ----
+
+test('tax projection: effective rate from record applied to the new basis', () => {
+    const p = Engine.projectPropertyTax({ assessedValue: 300000, annualTaxes: 6000, newBasis: 450000 });
+    assertNear(p.effectiveRatePct, 2.0, 1e-9, 'effective rate');
+    assert(p.projectedAnnual === 9000, 'projected annual');
+    assert(p.projectedMonthly === 750, 'projected monthly');
+    assert(p.deltaAnnual === 3000, 'delta vs seller bill');
+});
+
+test('tax projection: basis below assessment projects a DECREASE (protest candidate)', () => {
+    const p = Engine.projectPropertyTax({ assessedValue: 400000, annualTaxes: 8800, newBasis: 350000 });
+    assert(p.projectedAnnual === 7700, 'projected annual down');
+    assert(p.deltaAnnual === -1100, 'negative delta');
+});
+
+test('tax projection: any missing input yields null, never a phantom', () => {
+    assert(Engine.projectPropertyTax({ assessedValue: 0, annualTaxes: 6000, newBasis: 400000 }) === null);
+    assert(Engine.projectPropertyTax({ assessedValue: 300000, annualTaxes: '', newBasis: 400000 }) === null);
+    assert(Engine.projectPropertyTax({ assessedValue: 300000, annualTaxes: 6000, newBasis: 0 }) === null);
+    assert(Engine.projectPropertyTax({}) === null);
+});
+
+test('tax projection: garbage inputs are sanitized like every other engine input', () => {
+    assert(Engine.projectPropertyTax({ assessedValue: 'abc', annualTaxes: 6000, newBasis: 400000 }) === null);
+    const p = Engine.projectPropertyTax({ assessedValue: '300000', annualTaxes: '6000', newBasis: '400000' });
+    assert(p !== null && p.projectedAnnual === 8000, 'numeric strings accepted');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);
