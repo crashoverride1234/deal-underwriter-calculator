@@ -494,6 +494,50 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition(undefined) === null);
 });
 
+// ---- maxOffer: back-solve the purchase price from targets ----
+
+test('maxOffer: flip target profit is met at the answer and broken just above it', () => {
+    const r = Engine.maxOffer({ ...FLIP_BASE }, { targetProfit: 40000 });
+    assert(r.achievable && !r.unbounded, 'achievable and bounded');
+    assert(r.maxPrice % 100 === 0, 'rounded to $100');
+    assert(r.metricsAtMax.netProfit >= 40000, 'meets the target at the max price');
+    const above = Engine.underwrite({ ...FLIP_BASE, purchasePrice: r.maxPrice + 500 });
+    assert(above.netProfit < 40000, 'fails just above the max price');
+});
+
+test('maxOffer: financed flip prices the full loan model, not an approximation', () => {
+    const cash = Engine.maxOffer({ ...FLIP_BASE }, { targetProfit: 30000 });
+    const hard = Engine.maxOffer({ ...FLIP_BASE, financingType: 'hard_money' }, { targetProfit: 30000 });
+    assert(hard.achievable, 'hard money achievable');
+    assert(hard.metricsAtMax.netProfit >= 30000, 'meets target under hard money');
+    assert(hard.maxPrice < cash.maxPrice, 'points + carry cost lowers the max offer vs cash');
+});
+
+test('maxOffer: rental cash-on-cash floor binds an all-cash buy', () => {
+    const r = Engine.maxOffer({ ...RENTAL_BASE }, { minCoC: 8 });
+    assert(r.achievable && !r.unbounded, 'achievable and bounded');
+    assert(r.metricsAtMax.cocReturn >= 8, 'CoC met at max');
+    const above = Engine.underwrite({ ...RENTAL_BASE, purchasePrice: r.maxPrice + 2000 });
+    assert(above.cocReturn < 8, 'CoC broken just above the max');
+});
+
+test('maxOffer: absurd target reports unachievable, price-independent targets report unbounded', () => {
+    assert(Engine.maxOffer({ ...FLIP_BASE }, { targetProfit: 10000000 }).achievable === false);
+    // All-cash rental judged only on cash flow: price never touches the metric
+    const u = Engine.maxOffer({ ...RENTAL_BASE }, { targetCashFlow: 100 });
+    assert(u.unbounded === true, 'unbounded when no provided target depends on price');
+});
+
+test('rule of thumb: ARV × rule% − rehab, with the market-flexed suggestion ladder', () => {
+    assert(Engine.ruleOfThumbOffer(300000, 40000, 70) === 170000);
+    assert(Engine.suggestedRulePct(85) === 75, 'hot');
+    assert(Engine.suggestedRulePct(65) === 72, 'warm');
+    assert(Engine.suggestedRulePct(50) === 70, 'balanced');
+    assert(Engine.suggestedRulePct(25) === 68, 'cool');
+    assert(Engine.suggestedRulePct(5) === 65, 'cold');
+    assert(Engine.suggestedRulePct(null) === 70, 'unknown market falls back to 70');
+});
+
 // ---- projectPropertyTax: TX post-sale reassessment ----
 
 test('tax projection: effective rate from record applied to the new basis', () => {

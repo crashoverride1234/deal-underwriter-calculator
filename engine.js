@@ -406,6 +406,65 @@
         return { soldPerMonth, monthsOfInventory, absorptionRatePct, pendingRatio, score, temperature };
     }
 
+    // ---- Max-offer back-solver ----
+    // Inverts underwrite(): given the deal's other inputs and the investor's
+    // floor targets, finds the highest purchase price that still meets every
+    // target under the chosen financing. Profit and cash flow fall as price
+    // rises (bigger loan, bigger points, bigger carry), so a binary search
+    // converges and reuses the full deal model rather than approximating it.
+    // Targets: flip → { targetProfit }; rental → any of
+    // { targetCashFlow, minDscr, minCoC } (omitted targets aren't enforced).
+    // Returns { achievable, unbounded, maxPrice, metricsAtMax }; maxPrice is
+    // rounded DOWN to $100 so the answer never overshoots the target.
+    function maxOffer(inputs, targets) {
+        const t = targets || {};
+        const has = (v) => v !== undefined && v !== null && v !== '';
+        const strategy = inputs.strategy === 'rental' ? 'rental' : 'flip';
+        const meets = (m) => {
+            if (strategy === 'flip') return m.netProfit >= num(t.targetProfit);
+            if (has(t.targetCashFlow) && !(m.monthlyCashFlow >= num(t.targetCashFlow))) return false;
+            if (has(t.minDscr) && !(m.dscrRatio >= num(t.minDscr))) return false;
+            if (has(t.minCoC) && !(m.cocReturn >= num(t.minCoC))) return false;
+            return true;
+        };
+        const probe = (price) => meets(underwrite({ ...inputs, purchasePrice: price }));
+        if (!probe(0)) return { achievable: false, unbounded: false, maxPrice: 0, metricsAtMax: null };
+        let lo = 0;
+        let hi = (num(inputs.arv) + num(inputs.rehabBudget)) * 3 + 500000;
+        if (probe(hi)) {
+            // Every provided target is price-independent here (e.g. all-cash
+            // rental judged only on cash flow) — price doesn't bind.
+            return { achievable: true, unbounded: true, maxPrice: null, metricsAtMax: null };
+        }
+        for (let i = 0; i < 60; i++) {
+            const mid = (lo + hi) / 2;
+            if (probe(mid)) lo = mid; else hi = mid;
+        }
+        const maxPrice = Math.floor(lo / 100) * 100;
+        return {
+            achievable: true, unbounded: false, maxPrice,
+            metricsAtMax: underwrite({ ...inputs, purchasePrice: maxPrice })
+        };
+    }
+
+    // The classic quick screen (MAO = ARV × rule% − rehab) and the flex the
+    // pros apply to the rule: hot absorption supports a richer percentage,
+    // a cold market demands a thinner one.
+    function ruleOfThumbOffer(arv, rehabBudget, rulePct) {
+        return Math.round(num(arv) * num(rulePct) / 100 - num(rehabBudget));
+    }
+
+    function suggestedRulePct(absorptionScore) {
+        if (absorptionScore === null || absorptionScore === undefined || absorptionScore === '') return 70;
+        const s = Number(absorptionScore);
+        if (!Number.isFinite(s)) return 70;
+        if (s >= 80) return 75;
+        if (s >= 60) return 72;
+        if (s >= 40) return 70;
+        if (s >= 20) return 68;
+        return 65;
+    }
+
     // ---- Texas post-sale property-tax reassessment ----
     // TX appraisal districts chase the sale price and the seller's homestead
     // cap/exemptions do not transfer, so the seller's tax bill systematically
@@ -453,5 +512,5 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct };
 }));

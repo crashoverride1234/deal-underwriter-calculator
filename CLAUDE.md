@@ -13,7 +13,12 @@ GitHub Pages from `main`.
   `underwrite()`, `appraise()`, `marketAbsorption()`, `calcAmortizedPayment()`,
   `classifyCondition()`, `projectPropertyTax()` (TX post-sale reassessment:
   effective rate from the record × buyer's basis; flip basis = purchase,
-  rental basis = max(purchase, ARV); homesteaded seller ⇒ floor).
+  rental basis = max(purchase, ARV); homesteaded seller ⇒ floor),
+  `maxOffer()` (binary-search inversion of underwrite(): flip target =
+  net profit $, rental targets = cash flow / DSCR / CoC, rounds DOWN to
+  $100; reports unachievable and price-independent-unbounded cases) +
+  `ruleOfThumbOffer()`/`suggestedRulePct()` (70%-rule flexed 65–75 by
+  absorption score).
 - `app.js` — DOM wiring only. Charts update in place (never destroy/recreate
   per keystroke). Dynamic icons are inline SVG constants — Lucide's
   `createIcons()` runs once at load and replaces `<i>` tags with static SVGs,

@@ -771,6 +771,41 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Max Offer back-solver: targets in, price out -->
+                <div class="input-section-title">
+                    <i data-lucide="crosshair"></i> Max Offer
+                </div>
+                <div class="inputs-group">
+                    <div class="form-group" id="mao-profit-group">
+                        <label for="mao-target-profit">Target Net Profit</label>
+                        <div class="input-wrapper has-prefix">
+                            <span class="input-prefix">$</span>
+                            <input type="number" id="mao-target-profit" value="25000" min="0" step="1000">
+                        </div>
+                    </div>
+                    <div class="input-row mao-rental hidden">
+                        <div class="form-group">
+                            <label for="mao-target-cf">Min Cash Flow / mo</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="mao-target-cf" value="200" step="25">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="mao-min-dscr">Min DSCR</label>
+                            <input type="number" id="mao-min-dscr" value="1.25" min="0" step="0.05">
+                        </div>
+                        <div class="form-group">
+                            <label for="mao-min-coc">Min Cash-on-Cash</label>
+                            <div class="input-wrapper has-suffix">
+                                <input type="number" id="mao-min-coc" value="8" min="0" step="0.5">
+                                <span class="input-suffix">%</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="mao-result" class="mao-result"></div>
+                </div>
             </div>
 
             <!-- Dashboard Panel (Right Column) -->

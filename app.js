@@ -28,6 +28,12 @@ const vacancyRateInput = document.getElementById('vacancy-rate');
 const operatingExpensesInput = document.getElementById('operating-expenses');
 const monthlyTaxesInsInput = document.getElementById('monthly-taxes-ins');
 const taxReassessNote = document.getElementById('tax-reassess-note');
+const maoTargetProfitInput = document.getElementById('mao-target-profit');
+const maoTargetCfInput = document.getElementById('mao-target-cf');
+const maoMinDscrInput = document.getElementById('mao-min-dscr');
+const maoMinCocInput = document.getElementById('mao-min-coc');
+const maoProfitGroup = document.getElementById('mao-profit-group');
+const maoResult = document.getElementById('mao-result');
 
 // Stress Test Elements
 const rehabBufferSlider = document.getElementById('rehab-buffer-slider');
@@ -157,6 +163,8 @@ function switchStrategy(strategy) {
         sliderVarianceLabel.textContent = 'Appraised Value Variance';
         rentalOperationsSection.classList.remove('hidden');
     }
+    maoProfitGroup.classList.toggle('hidden', strategy === 'rental');
+    document.querySelectorAll('.mao-rental').forEach(el => el.classList.toggle('hidden', strategy !== 'rental'));
 
     buildMetricCards(strategy);
     populateFinancingDropdown();
@@ -245,6 +253,84 @@ function calculateDeal() {
     }
     updateSummary(m);
     updateTaxProjection();
+    updateMaxOffer();
+}
+
+// Max-offer back-solver: the daily question is "what do I offer", so run
+// the model in reverse — floor targets in, highest workable price out —
+// with the 70%-rule screen beside it, flexed by live market temperature.
+function updateMaxOffer() {
+    const arv = Engine.num(arvInput.value);
+    if (arv <= 0) {
+        maoResult.textContent = 'Set an ARV above (or send one over from the ARV page) and the max offer computes here.';
+        return;
+    }
+    const inputs = readInputs();
+    const targets = currentStrategy === 'rental'
+        ? { targetCashFlow: maoTargetCfInput.value, minDscr: maoMinDscrInput.value, minCoC: maoMinCocInput.value }
+        : { targetProfit: maoTargetProfitInput.value };
+    const r = Engine.maxOffer(inputs, targets);
+
+    maoResult.innerHTML = '';
+    if (!r.achievable) {
+        maoResult.textContent = 'No purchase price meets these targets — even at $0 the other costs eat the return. Ease a target or rework the deal.';
+        return;
+    }
+    if (r.unbounded) {
+        maoResult.textContent = 'These targets never bind the price (all-cash cash flow doesn\'t move with it) — set a cash-on-cash floor to get a max offer.';
+        return;
+    }
+
+    const price = document.createElement('div');
+    price.className = 'mao-price';
+    price.textContent = formatCurrency(r.maxPrice);
+    maoResult.appendChild(price);
+
+    const m = r.metricsAtMax;
+    const at = document.createElement('div');
+    at.textContent = currentStrategy === 'rental'
+        ? `at that price: ${formatCurrency(m.monthlyCashFlow)}/mo cash flow · `
+          + `${Number.isFinite(m.dscrRatio) ? m.dscrRatio.toFixed(2) + ' DSCR' : 'no debt'} · `
+          + `${Number.isFinite(m.cocReturn) ? m.cocReturn.toFixed(1) + '% CoC' : '∞ CoC'}`
+        : `at that price: ${formatCurrency(m.netProfit)} profit · ${m.roi.toFixed(1)}% ROI`;
+    maoResult.appendChild(at);
+
+    if (currentStrategy === 'flip') {
+        const abs = Engine.marketAbsorption({
+            activeListings: mktActivesInput.value,
+            pendingListings: mktPendingsInput.value,
+            soldLast90Days: mktSold90Input.value
+        });
+        const known = abs.temperature !== 'unknown';
+        const pct = Engine.suggestedRulePct(known ? abs.score : null);
+        const rule = document.createElement('div');
+        rule.textContent = `${pct}%-rule check: ${formatCurrency(Engine.ruleOfThumbOffer(arv, rehabBudgetInput.value, pct))} `
+            + `(${pct}% of ARV − rehab${known ? `, ${abs.temperature} market` : ', default — fill the market meter to flex it'})`;
+        maoResult.appendChild(rule);
+    }
+
+    const cur = Engine.num(purchasePriceInput.value);
+    if (cur > 0) {
+        const verdict = document.createElement('div');
+        const under = r.maxPrice - cur;
+        verdict.className = 'mao-verdict ' + (under >= 0 ? 'good' : 'bad');
+        verdict.textContent = under >= 0
+            ? (under === 0 ? '✓ current price sits exactly at your max'
+                           : `✓ current price is ${formatCurrency(under)} under your max`)
+            : `✗ current price exceeds your max by ${formatCurrency(-under)}`;
+        maoResult.appendChild(verdict);
+    }
+
+    if (cur !== r.maxPrice) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.textContent = `Use ${formatCurrency(r.maxPrice)} as Purchase Price`;
+        btn.addEventListener('click', () => {
+            purchasePriceInput.value = r.maxPrice;
+            calculateDeal();
+        });
+        maoResult.appendChild(btn);
+    }
 }
 
 // TX reassessment: the seller's tax bill understates the buyer's — the
@@ -2676,6 +2762,9 @@ addCompBtn.addEventListener('click', () => {
 [subjectAssessedValueInput, subjectAnnualTaxesInput, subjectHoaFeeInput]
     .forEach(input => input.addEventListener('input', updateTaxProjection));
 subjectOwnerOccupiedInput.addEventListener('change', updateTaxProjection);
+// Max-offer targets re-solve on their own; market inputs also flex the rule %
+[maoTargetProfitInput, maoTargetCfInput, maoMinDscrInput, maoMinCocInput, mktActivesInput, mktPendingsInput, mktSold90Input]
+    .forEach(input => input.addEventListener('input', updateMaxOffer));
 [mktActivesInput, mktPendingsInput, mktSold90Input].forEach(input => input.addEventListener('input', updateAbsorption));
 
 lookupBtn.addEventListener('click', lookupSubjectProperty);
