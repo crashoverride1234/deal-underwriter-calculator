@@ -132,7 +132,18 @@ GitHub Pages from `main`.
   derived rate, May-15 deadline note; the printable evidence packet renders
   into hidden `#protest-packet` + `body.protest-print` print CSS +
   `window.print()` — deliberately NOT window.open (popup blockers); button
-  hidden on native).
+  hidden on native). Remaining senses (all verified live 2026-08-14, all
+  browser-direct via shared `arcgisPointQuery()`): TEA school district +
+  A–F rating (SY25-26 polygons + the DATED txschools ratings view —
+  auto-rediscovered from the TEA org service list when republished;
+  `suggestSchoolRatings()` seeds the qualitative School District rating
+  across district lines, only when still 'similar', evidence on hover);
+  TxDOT AADT (busiest counted road within ½ mi); crime density
+  (`CRIME_SOURCES` per-city — Dallas Socrata within_circle only; FW's
+  fresh table stores coords as TEXT and its point layer is CORS-blocked +
+  stale, dead end); ACS tract income + rent burden via Esri Living Atlas
+  (api.census.gov itself now REQUIRES a key — keyless claim retired
+  2026-08-14; no national median-gross-rent layer exists).
 - **AI vision** (worker `/vision`, Workers AI `[ai]` binding in wrangler.toml,
   free daily allocation): llava-1.5-7b judges adjacency from imagery — Esri
   keyless `export` snapshot (~150 m box) for pool / road-adjacency / rail /

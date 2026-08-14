@@ -1382,6 +1382,11 @@ function renderComps() {
                 recalcAppraisal();
             });
         });
+        // Hover shows why an auto-seeded School District rating was chosen
+        if (comp.schoolsEvidence) {
+            const schoolSel = card.querySelector('[data-rating="schools"]');
+            if (schoolSel) schoolSel.title = comp.schoolsEvidence;
+        }
         card.querySelector('.comp-remove').addEventListener('click', () => {
             appraisalComps.splice(idx, 1);
             renderComps();
@@ -1561,6 +1566,9 @@ async function suggestComps() {
             .sort((a, b) => b.score - a.score);
         if (autoApplyCandidates(ranked) > 0) preResetComps = null; // replacement secured
         renderCandidates(ranked);
+        // Evidence-based School District ratings for the fresh comps (async;
+        // seeds only untouched 'similar' ratings, never user choices)
+        suggestSchoolRatings().catch(() => {});
     } catch (e) {
         if (runId !== suggestRunId) return;
         compCandidatesPanel.innerHTML = '';
@@ -2231,6 +2239,183 @@ async function soilScan(lat, lon) {
     return { kind: read.severity === 'info' ? 'note' : read.severity, text: 'Soil — ' + read.label };
 }
 
+// Shared ArcGIS point query — TAD, FEMA, TEA, TxDOT and the ACS layers all
+// speak the same REST dialect (returns attribute objects, [] on no hit,
+// null on transport/API error)
+async function arcgisPointQuery(layerUrl, lon, lat, extraParams) {
+    const q = new URLSearchParams({
+        geometry: `${lon},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+        returnGeometry: 'false', f: 'json', ...(extraParams || {})
+    });
+    const res = await fetch(`${layerUrl}/query?${q}`, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const d = await res.json();
+    if (d.error) return null;
+    return (d.features || []).map(f => f.attributes);
+}
+
+// ---- School district + TEA A–F rating (keyless, verified 2026-08-14) ----
+// Boundaries: TEA's SY25-26 district polygons. Ratings: the txschools.gov
+// feature view — its service name carries a refresh date, so the known name
+// is tried first and rediscovered from the TEA org's service list if it
+// ever 400s (TEA republishes under a new date).
+const TEA_ORG = 'https://services2.arcgis.com/5MVN2jsqIrNZD4tP/arcgis/rest/services';
+const TEA_DISTRICT_POLYGONS = `${TEA_ORG}/School_Districts__2026/FeatureServer/0`;
+let teaRatingsUrl = `${TEA_ORG}/districts_schools_2026_0814D__view/FeatureServer/0`;
+const teaGradeCache = new Map();    // district name -> 'A'..'F' | null
+const districtCache = new Map();    // "lat,lon" (4dp) -> district name | null
+
+async function teaDistrictGrade(districtName) {
+    if (teaGradeCache.has(districtName)) return teaGradeCache.get(districtName);
+    const fetchGrade = async () => {
+        const where = `district_name = '${districtName.replace(/'/g, "''")}'`;
+        const res = await fetch(`${teaRatingsUrl}/query?` + new URLSearchParams({
+            where, outFields: 'district_name,rating', returnGeometry: 'false', f: 'json'
+        }));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+        if (d.error) throw new Error('view gone');
+        const row = (d.features || [])[0];
+        const rating = row && row.attributes.rating;
+        return rating && /^[A-F]/.test(rating) ? rating.charAt(0) : null;
+    };
+    let grade = null;
+    try {
+        grade = await fetchGrade();
+    } catch (e) {
+        // The dated view was republished — rediscover it from the org list
+        try {
+            const list = await (await fetch(`${TEA_ORG}?f=json`)).json();
+            const views = (list.services || []).map(s => s.name)
+                .filter(n => /^districts_schools_\d{4}_\d{4}D_?_view$/.test(n)).sort();
+            if (views.length) {
+                teaRatingsUrl = `${TEA_ORG}/${views[views.length - 1]}/FeatureServer/0`;
+                grade = await fetchGrade().catch(() => null);
+            }
+        } catch (e2) { /* ratings stay unknown */ }
+    }
+    teaGradeCache.set(districtName, grade);
+    return grade;
+}
+
+async function schoolDistrictAndGrade(lat, lon) {
+    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    let district = districtCache.get(key);
+    if (district === undefined) {
+        const rows = await arcgisPointQuery(TEA_DISTRICT_POLYGONS, lon, lat, { outFields: 'NAME' });
+        district = (rows && rows[0] && rows[0].NAME) || null;
+        districtCache.set(key, district);
+    }
+    if (!district) return null;
+    return { district, grade: await teaDistrictGrade(district) };
+}
+
+async function schoolScan(lat, lon) {
+    const s = await schoolDistrictAndGrade(lat, lon);
+    if (!s) return null;
+    const kind = !s.grade ? 'note' : (s.grade === 'A' || s.grade === 'B') ? 'good' : s.grade === 'C' ? 'note' : 'bad';
+    return { kind, text: `School district: ${s.district}${s.grade ? ` — TEA rating ${s.grade}` : ' (no TEA rating on file)'}` };
+}
+
+// After comps auto-apply, seed the qualitative School District rating from
+// actual TEA grades — evidence instead of gut feel. Only ever seeds a
+// still-default 'similar' rating (never overrides the user), only across
+// district lines, and records its evidence on the comp.
+async function suggestSchoolRatings() {
+    if (!lastSelectedCoords) return;
+    const compsAtStart = appraisalComps;
+    const rank = (g) => ({ A: 5, B: 4, C: 3, D: 2, F: 1 })[g] || null;
+    const subj = await schoolDistrictAndGrade(lastSelectedCoords.lat, lastSelectedCoords.lon);
+    if (!subj || !rank(subj.grade)) return;
+    let changed = false;
+    await Promise.all(appraisalComps.map(async (comp) => {
+        const lat = parseFloat(comp.lat);
+        const lon = parseFloat(comp.lon);
+        if (!comp.label || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+        const c = await schoolDistrictAndGrade(lat, lon).catch(() => null);
+        if (!c || !rank(c.grade) || c.district === subj.district) return;
+        const suggested = rank(c.grade) > rank(subj.grade) ? 'superior'
+            : rank(c.grade) < rank(subj.grade) ? 'inferior' : 'similar';
+        if (suggested !== 'similar' && comp.ratings.schools === 'similar') {
+            comp.ratings.schools = suggested;
+            comp.schoolsEvidence = `TEA: ${c.district} ${c.grade} vs subject ${subj.district} ${subj.grade}`;
+            changed = true;
+        }
+    }));
+    if (changed && appraisalComps === compsAtStart) {
+        renderComps();
+        recalcAppraisal();
+    }
+}
+
+// ---- TxDOT traffic counts (keyless, verified 2026-08-14) ----
+const TXDOT_AADT_URL = 'https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/TxDOT_AADT_Annuals_(Public_View)/FeatureServer/0';
+
+async function trafficScan(lat, lon) {
+    const rows = await arcgisPointQuery(TXDOT_AADT_URL, lon, lat, {
+        distance: '800', units: 'esriSRUnit_Meter',
+        outFields: 'AADT_RPT_QTY,AADT_RPT_YEAR', resultRecordCount: '25'
+    });
+    if (!rows || !rows.length) return null; // no counted road within ~½ mi — quiet
+    const top = rows.reduce((m, r) => ((r.AADT_RPT_QTY || 0) > (m.AADT_RPT_QTY || 0) ? r : m), {});
+    if (!(top.AADT_RPT_QTY > 0)) return null;
+    return {
+        kind: 'note',
+        text: `Traffic: busiest counted road within ½ mi carries ~${top.AADT_RPT_QTY.toLocaleString()} vehicles/day (TxDOT ${top.AADT_RPT_YEAR})`
+    };
+}
+
+// ---- Crime density (per-city, like permits) ----
+// Dallas PD publishes fresh geocoded incidents on Socrata (CORS-open,
+// within_circle verified 2026-08-14). Fort Worth researched the same day:
+// the fresh AGOL table stores coordinates as TEXT (no spatial queries) and
+// the city's point layer is CORS-blocked AND stale (2018) — beat-level
+// counts would need a worker proxy; revisit if a real feed appears.
+const CRIME_SOURCES = {
+    dallas: async (lat, lon) => {
+        const since = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+        const where = `within_circle(geocoded_column, ${lat}, ${lon}, 402) AND date1 > '${since}'`;
+        const res = await fetch('https://www.dallasopendata.com/resource/qv6i-rri7.json?$select=count(*)&$where='
+            + encodeURIComponent(where), { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) return null;
+        const d = await res.json();
+        const n = d && d[0] ? parseInt(d[0].count, 10) : NaN;
+        if (!Number.isFinite(n)) return null;
+        return { kind: 'note', text: `Crime: ${n.toLocaleString()} police incidents within ¼ mi in 12 mo (Dallas PD)` };
+    }
+};
+
+async function crimeScan(address, lat, lon) {
+    const parts = String(address || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) return null;
+    const src = CRIME_SOURCES[parts[1].toLowerCase()];
+    return src ? src(lat, lon) : null; // quiet outside covered cities
+}
+
+// ---- Neighborhood panel (Esri Living Atlas ACS tract layers, keyless) ----
+// NOTE researched 2026-08-14: api.census.gov itself now REQUIRES an API key
+// ("Missing Key" on keyless calls) — the Living Atlas mirrors are the
+// keyless path. Income layer verified live; no national median-gross-rent
+// layer exists, so the panel is income + rent burden (the rent ladder
+// already covers rent levels).
+const ACS_INCOME_TRACT = 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Median_Income_by_Race_and_Age_Selp_Emp_Boundaries/FeatureServer/2';
+const ACS_HOUSING_TRACT = 'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Housing_Costs_Boundaries/FeatureServer/2';
+
+async function acsScan(lat, lon) {
+    const [inc, hous] = await Promise.all([
+        arcgisPointQuery(ACS_INCOME_TRACT, lon, lat, { outFields: 'B19049_001E,NAME' }).catch(() => null),
+        arcgisPointQuery(ACS_HOUSING_TRACT, lon, lat, { outFields: 'B25070_calc_pctGE30pctE' }).catch(() => null)
+    ]);
+    const income = inc && inc[0] ? inc[0].B19049_001E : null;
+    const burden = hous && hous[0] ? hous[0].B25070_calc_pctGE30pctE : null;
+    const bits = [];
+    if (income > 0) bits.push(`median household income ${formatCurrency(income)}`);
+    if (Number.isFinite(burden)) bits.push(`${Math.round(burden)}% of renters pay ≥30% of income`);
+    if (!bits.length) return null;
+    const tract = inc && inc[0] && inc[0].NAME ? `${inc[0].NAME}: ` : '';
+    return { kind: 'note', text: `Neighborhood (ACS 5-yr) — ${tract}${bits.join(' · ')}` };
+}
+
 // NWS hail history via the worker (IEM's 5-year CSV is ~1 MB — the worker
 // caches it daily and returns a tiny distance-filtered summary)
 async function hailScan(lat, lon) {
@@ -2298,6 +2483,10 @@ async function scanSubjectSite() {
             floodScan(coords.lat, coords.lon).catch(() => null),
             soilScan(coords.lat, coords.lon).catch(() => null),
             hailScan(coords.lat, coords.lon).catch(() => null),
+            schoolScan(coords.lat, coords.lon).catch(() => null),
+            trafficScan(coords.lat, coords.lon).catch(() => null),
+            crimeScan(subjectAddressInput.value, coords.lat, coords.lon).catch(() => null),
+            acsScan(coords.lat, coords.lon).catch(() => null),
             permitScan(subjectAddressInput.value).catch(() => null)
         ]);
         // Measured pass (Overpass) and vision pass are independent — a busy
@@ -2363,9 +2552,11 @@ async function scanSubjectSite() {
             siteInfluencesEl.appendChild(auto);
         }
 
-        // Public-records chips: flood zone, shrink-swell, hail, permits
-        const [floodChip, soilChip, hailChip, permitChips] = await recordsPromise;
-        [floodChip, soilChip, hailChip].concat(permitChips || [])
+        // Public-records chips: flood, soil, hail, schools, traffic, crime,
+        // neighborhood, permits
+        const [floodChip, soilChip, hailChip, schoolChip, trafficChip, crimeChip, acsChip, permitChips] = await recordsPromise;
+        [floodChip, soilChip, hailChip, schoolChip, trafficChip, crimeChip, acsChip]
+            .concat(permitChips || [])
             .filter(Boolean)
             .forEach(c => siteInfluencesEl.appendChild(influenceChipDiv(c)));
     } catch (e) {
