@@ -53,7 +53,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (44 tests as of 2026-07). Must pass before deploy.
+- **Test**: `node tests.js` (72 tests as of 2026-08-16). Must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -112,6 +112,18 @@ GitHub Pages from `main`.
   power line / commercial / park-green-space and parcel-mapped pools within
   ~400 m. Subject scan + per-comp scan buttons; comp coords ride along on
   records/candidates (`lat`/`lon`). OSM absence ≠ absence in reality.
+  **Comps map** (ARV page, below the comp cards, shipped 2026-08-16):
+  `updateCompsMap()` in app.js draws an "S" subject pin + numbered comp
+  pins (gray = unpriced/out of blend) with label/price/distance popups.
+  Two signatures gate the work per keystroke: coordinates-only `posSig`
+  rebuilds the pin set + re-fits; content-only `sig` restyles pins IN
+  PLACE (`setIcon`/`setPopupContent`) so pan/zoom and an open popup
+  survive typing. Typing in a comp label CLEARS `comp.lat/lon` (mirrors
+  the subject field — a pin must never assert coords the text didn't
+  produce; label-only comps get a "no map location" note). ARV entry
+  calls `invalidateSize()` unconditionally — Leaflet's window-resize
+  handler fires while the page is display:none and caches a 0×0 size that
+  nothing else heals (same trap as the calculator chart).
   The subject scan also runs a **public-records pass** (all verified live
   2026-08-14): FEMA NFHL flood zone browser-direct from Esri's Living Atlas
   mirror (`USA_Flood_Hazard_Areas_view` FeatureServer, CORS-open; hazard
