@@ -7,6 +7,21 @@ compatibility_date = "2026-01-01"
 # instead of wiping them on each deploy; secrets always persist.
 keep_vars = true
 
+# ---- MLS feed: the non-secret half of the configuration ----
+# These carry no credential, so they live in version control and deploy with
+# the worker. That leaves exactly TWO things to set by hand as secrets:
+# MLS_RETS_USERNAME and MLS_RETS_PASSWORD. Until both exist the whole MLS
+# rung is inert and the worker behaves exactly as it did before.
+#
+# Host and transport confirmed from a real NTREIS login response, 2026-08-26.
+[vars]
+MLS_TRANSPORT = "rets"
+MLS_RETS_LOGIN_URL = "https://ntrdd.mlsmatrix.com/rets/Login.ashx"
+MLS_SYSTEM_NAME = "NTREIS"
+# Rendered under every comp list. This is the standard wording; replace it
+# with whatever the signed data licence actually demands.
+MLS_ATTRIBUTION = "Information deemed reliable but not guaranteed. Data provided by NTREIS."
+
 # Workers AI (free daily allocation) — vision model for the /vision route
 [ai]
 binding = "AI"

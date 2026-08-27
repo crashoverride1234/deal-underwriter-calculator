@@ -2348,8 +2348,26 @@ async function handleMlsProbe(params, env, cors) {
     steps: []
   };
   if (!out.configured) {
-    out.auth.error = 'no MLS secrets configured — set MLS_API_BASE + MLS_CLIENT_ID/MLS_CLIENT_SECRET (RESO) '
-      + 'or MLS_RETS_LOGIN_URL + MLS_RETS_USERNAME/MLS_RETS_PASSWORD (classic RETS)';
+    // Name the specific gap. Once a transport is pinned, listing the other
+    // transport's variables is just noise to read past.
+    const missing = [];
+    if (transport === 'rets') {
+      if (!env.MLS_RETS_LOGIN_URL) missing.push('MLS_RETS_LOGIN_URL');
+      if (!env.MLS_RETS_USERNAME) missing.push('MLS_RETS_USERNAME');
+      if (!env.MLS_RETS_PASSWORD) missing.push('MLS_RETS_PASSWORD');
+    } else if (transport === 'reso') {
+      if (!env.MLS_API_BASE) missing.push('MLS_API_BASE');
+      if (!env.MLS_STATIC_TOKEN) {
+        if (!env.MLS_CLIENT_ID) missing.push('MLS_CLIENT_ID');
+        if (!env.MLS_CLIENT_SECRET) missing.push('MLS_CLIENT_SECRET');
+        if (!env.MLS_TOKEN_URL) missing.push('MLS_TOKEN_URL');
+      }
+    }
+    out.missingSecrets = missing;
+    out.auth.error = missing.length
+      ? `still need: ${missing.join(', ')} — set each with: npx wrangler secret put <NAME>`
+      : 'no MLS transport configured — set MLS_API_BASE + MLS_CLIENT_ID/MLS_CLIENT_SECRET (RESO Web API) '
+        + 'or MLS_RETS_LOGIN_URL + MLS_RETS_USERNAME/MLS_RETS_PASSWORD (classic RETS)';
     return json(out, 200, cors);
   }
 
