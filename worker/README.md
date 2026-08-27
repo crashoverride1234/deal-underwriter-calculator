@@ -55,14 +55,29 @@ unconfigured worker behaves exactly as it did before.
 
 ### Setting it up
 
+**For NTREIS**, the non-secret half is already committed in
+[`wrangler.toml`](wrangler.toml) — transport, login URL, system name and
+attribution — so only two secrets remain. Run each on its own and paste the
+value when prompted (this keeps the credential out of shell history, unlike
+piping it in with `echo`):
+
+```
+npx wrangler secret put MLS_RETS_USERNAME
+npx wrangler secret put MLS_RETS_PASSWORD
+```
+
+Then skip to step 2. `/mls/probe` names any secret still missing.
+
+For any other feed:
+
 1. Set the secrets (see [`.dev.vars.example`](.dev.vars.example) for the full
    annotated list). Minimum for a RESO Web API feed:
 
    ```
-   echo <value> | npx wrangler secret put MLS_API_BASE
-   echo <value> | npx wrangler secret put MLS_TOKEN_URL
-   echo <value> | npx wrangler secret put MLS_CLIENT_ID
-   echo <value> | npx wrangler secret put MLS_CLIENT_SECRET
+   npx wrangler secret put MLS_API_BASE
+   npx wrangler secret put MLS_TOKEN_URL
+   npx wrangler secret put MLS_CLIENT_ID
+   npx wrangler secret put MLS_CLIENT_SECRET
    ```
 
    ...or for classic RETS: `MLS_RETS_LOGIN_URL`, `MLS_RETS_USERNAME`,

@@ -104,9 +104,12 @@ back-solver; TX post-sale tax reassessment; comp condition read from listing
 remarks; blank start on every open; auto-suggested comps on ARV entry.
 
 **Keys / secrets status**:
-- Worker MLS secrets (`MLS_*`) — NOT set. This is the one thing standing
-  between the app and true sold prices. Full annotated list in
-  `worker/.dev.vars.example`; setup runbook in `worker/README.md`.
+- Worker MLS secrets — the non-secret half (MLS_TRANSPORT=rets, the NTREIS
+  login URL, system name, attribution) is committed in `worker/wrangler.toml`
+  and deployed. Only `MLS_RETS_USERNAME` and `MLS_RETS_PASSWORD` remain, and
+  `/mls/probe` names them under `missingSecrets`. Those two are the ONLY
+  thing between the app and true sold prices. Runbook: `worker/README.md`;
+  full annotated variable list: `worker/.dev.vars.example`.
 - Worker `RENTCAST_API_KEY` — SET and live (50 lookups/mo free; only
   HTTP-200s billed; app-side localStorage cache keeps repeats free).
 - Worker `MELISSA_API_KEY` — NOT set (user never supplied one; ~1,000 free
