@@ -38,6 +38,21 @@ GitHub Pages from `main`.
 - `sw.js` — service worker. **RULE: bump `CACHE_NAME` on every deployable
   change.** Same-origin = network-first; CDN = cache-first; live API hosts and
   `*.workers.dev` = network-only (never cached).
+- `backtest.mjs` — accuracy harness: `node backtest.mjs --n 40`. Scores the
+  engine against real closed NTREIS sales with an AS-OF reconstruction (the
+  comp window is anchored at the test sale's close date, a 7-day reporting lag
+  is excluded, rows whose `ModificationTimestamp` is later than the anchor are
+  rejected because MLS rows mutate after closing, and the subject is removed
+  from its own comps by id, parcel AND street line). Reports the IAAO panel,
+  not MdAPE alone — COD under 5 is a sales-chasing red flag, not a win.
+  `--compare-condition` / `--compare-comps` / `--compare-rate` run a PAIRED
+  test: the same sales through both variants, sign test plus a deterministic
+  bootstrap. Paired is the point — between-property variance dominates two
+  independent MdAPEs, so at the low-hundreds sample this tool will ever have,
+  only the paired design can resolve a real change. Results append to
+  `backtest-results.json` (gitignored) so runs accumulate.
+  **Any accuracy claim about this app must come from here.** In-sample metrics
+  on a small local model roughly halve the true error.
 - `tests.js` — engine unit tests: `node tests.js`, or open `test.html` in a
   browser. Every engine change needs tests; UI-only changes need browser
   verification instead.
@@ -66,7 +81,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (99 tests as of 2026-08-27) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (114 tests as of 2026-08-27) AND `node worker/tests.mjs`
   (83 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.

@@ -1668,73 +1668,17 @@ let compsMeta = { priceTruth: null, mls: null };
 // next-door sale that's the wrong house (2,000 sqft bigger, 50 years newer)
 // can never ride proximity to the top.
 function candidateScore(c) {
-    const sSqft = Engine.num(subjectSqftInput.value);
-    const sBeds = Engine.num(subjectBedsInput.value);
-    const sBaths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
-    const sYear = Engine.num(subjectYearInput.value);
-    const sGarage = Engine.num(subjectGarageInput.value);
-    const sSingleStory = Engine.num(subjectStoriesInput.value) === 1;
-
-    // The weighting used to be 40 location + 30 time + 30 similarity. Inside
-    // a one-mile, twelve-month search that is almost all constant: every
-    // candidate banked 45–55 points before similarity was consulted, so 30
-    // points had to separate a three-foot twin from a house 25% bigger. It
-    // couldn't, and the twin lost. Similarity now carries the set.
-
-    let score = 0;
-
-    // 1. Size — 32 pts. The dominant material fact: a $/sqft model breaks
-    //    down across size classes, and every dollar of the GLA adjustment
-    //    downstream is an admission that this comp was the wrong size.
-    if (sSqft > 0 && c.sqft) {
-        const dev = Math.abs(c.sqft - sSqft) / sSqft;
-        score += 32 * Math.max(0, 1 - dev / 0.30);
-    } else {
-        score += 8; // unknown size can't be trusted to the top
-    }
-
-    // 2. Location — 26 pts, fading to 0 at 2 miles
-    score += (c.distanceMi != null)
-        ? 26 * Math.max(0, 1 - c.distanceMi / 2)
-        : 8; // unknown location = middling, never top-tier
-
-    // 3. Time — 18 pts, fading to 0 at 12 months
-    if (c.soldDate) {
-        const months = (Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
-        score += 18 * Math.max(0, 1 - months / 12);
-    } else {
-        score += 5;
-    }
-
-    // 4. Vintage — 12 pts. In a street of 1930s bungalows a 2018 new build is
-    //    a different product, not a comp with an age adjustment.
-    if (sYear && c.yearBuilt) score += 12 * Math.max(0, 1 - Math.abs(c.yearBuilt - sYear) / 25);
-
-    // 5. Room count — 12 pts (beds 7, baths 5)
-    if (sBeds && c.beds != null) score += 7 * Math.max(0, 1 - Math.abs(c.beds - sBeds) / 2);
-    if (sBaths && c.baths != null) score += 5 * Math.max(0, 1 - Math.abs(c.baths - sBaths) / 2);
-
-    // 6. Common-sense gates — material wrongness caps what proximity can buy
-    let gate = 1;
-    if (sSqft > 0 && c.sqft) {
-        const dev = Math.abs(c.sqft - sSqft) / sSqft;
-        if (dev > 0.5) gate *= 0.25;       // different class of house
-        else if (dev > 0.3) gate *= 0.55;  // stretch comp at best
-    }
-    if (sBeds && c.beds != null && Math.abs(c.beds - sBeds) >= 2) gate *= 0.6;
-    if (sYear && c.yearBuilt && Math.abs(c.yearBuilt - sYear) > 40) gate *= 0.5;
-    if (sGarage > 0 && c.garage != null && Math.abs(c.garage - sGarage) >= 2) gate *= 0.85;
-    if (c.stories != null && (c.stories === 1) !== sSingleStory) gate *= 0.9;
-    // A different KIND of dwelling is not a comp at any distance. The worker
-    // filters sub-type server-side, but a fallback source may not carry it.
-    if (c.propType && /condo|townh|duplex|triplex|quad|mobile|manufactur|apartment/i.test(c.propType)) {
-        gate *= 0.35;
-    }
-    // Segment mismatch: a price per foot far off the rest of the set means a
-    // new build or a teardown, not a house the grid can adjust into place.
-    if (c.ppsfOutlier) gate *= 0.5;
-
-    return Math.max(0, Math.round(score * gate));
+    // The scoring itself lives in the engine so the back-test harness ranks
+    // comps exactly the way this page does; here we only read the subject off
+    // the form.
+    return Engine.scoreComp({
+        sqft: subjectSqftInput.value,
+        beds: subjectBedsInput.value,
+        baths: totalBaths(subjectBathsFullInput, subjectBathsHalfInput),
+        yearBuilt: subjectYearInput.value,
+        garageSpaces: subjectGarageInput.value,
+        stories: subjectStoriesInput.value
+    }, c);
 }
 
 async function suggestComps() {

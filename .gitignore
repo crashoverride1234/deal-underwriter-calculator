@@ -4,3 +4,5 @@ underwriter-deploy.zip
 
 # Local tooling config
 .claude/
+
+backtest-results.json

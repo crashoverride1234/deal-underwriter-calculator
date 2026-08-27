@@ -715,6 +715,263 @@
         return { ...read, trusted: true };
     }
 
+    // ---- Comp similarity ----
+    /**
+     * Score one candidate 0–100 against the subject.
+     *
+     * Lives here rather than in the DOM layer so the back-test scores comps
+     * exactly the way the app does — a harness that ranked differently from
+     * production would be measuring a model nobody runs.
+     *
+     * asOf lets the back-test age comps against the test sale's close date
+     * instead of today, which is the whole point of an as-of reconstruction.
+     *
+     * The weighting used to be 40 location + 30 time + 30 similarity. Inside
+     * a one-mile, twelve-month search that is almost all constant: every
+     * candidate banked 45–55 points before similarity was consulted, so 30
+     * points had to separate a three-foot twin from a house 25% bigger. It
+     * couldn't, and the twin lost. Similarity now carries the set.
+     */
+    function scoreComp(subject, c, asOf) {
+        const s = subject || {};
+        const sSqft = num(s.sqft);
+        const sBeds = num(s.beds);
+        const sBaths = num(s.baths);
+        const sYear = num(s.yearBuilt);
+        const sGarage = num(s.garageSpaces);
+        const sSingleStory = num(s.stories) === 1;
+        const now = asOf ? new Date(asOf).getTime() : Date.now();
+
+        let score = 0;
+
+        // 1. Size — 32 pts. The dominant material fact: a $/sqft model breaks
+        //    down across size classes, and every dollar of the GLA adjustment
+        //    downstream is an admission that this comp was the wrong size.
+        if (sSqft > 0 && c.sqft) {
+            score += 32 * Math.max(0, 1 - (Math.abs(c.sqft - sSqft) / sSqft) / 0.30);
+        } else {
+            score += 8; // unknown size can't be trusted to the top
+        }
+
+        // 2. Location — 26 pts, fading to 0 at 2 miles
+        score += (c.distanceMi != null)
+            ? 26 * Math.max(0, 1 - c.distanceMi / 2)
+            : 8; // unknown location = middling, never top-tier
+
+        // 3. Time — 18 pts, fading to 0 at 12 months
+        if (c.soldDate) {
+            const months = (now - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
+            score += 18 * Math.max(0, 1 - months / 12);
+        } else {
+            score += 5;
+        }
+
+        // 4. Vintage — 12 pts. In a street of 1930s bungalows a 2018 new build
+        //    is a different product, not a comp with an age adjustment.
+        if (sYear && c.yearBuilt) score += 12 * Math.max(0, 1 - Math.abs(c.yearBuilt - sYear) / 25);
+
+        // 5. Room count — 12 pts (beds 7, baths 5)
+        if (sBeds && c.beds != null) score += 7 * Math.max(0, 1 - Math.abs(c.beds - sBeds) / 2);
+        if (sBaths && c.baths != null) score += 5 * Math.max(0, 1 - Math.abs(c.baths - sBaths) / 2);
+
+        // 6. Common-sense gates — material wrongness caps what proximity buys
+        let gate = 1;
+        if (sSqft > 0 && c.sqft) {
+            const dev = Math.abs(c.sqft - sSqft) / sSqft;
+            if (dev > 0.5) gate *= 0.25;       // different class of house
+            else if (dev > 0.3) gate *= 0.55;  // stretch comp at best
+        }
+        if (sBeds && c.beds != null && Math.abs(c.beds - sBeds) >= 2) gate *= 0.6;
+        if (sYear && c.yearBuilt && Math.abs(c.yearBuilt - sYear) > 40) gate *= 0.5;
+        if (sGarage > 0 && c.garage != null && Math.abs(c.garage - sGarage) >= 2) gate *= 0.85;
+        if (c.stories != null && (c.stories === 1) !== sSingleStory) gate *= 0.9;
+        // A different KIND of dwelling is not a comp at any distance. The
+        // worker filters sub-type server-side, but a fallback source may not.
+        if (c.propType && /condo|townh|duplex|triplex|quad|mobile|manufactur|apartment/i.test(c.propType)) {
+            gate *= 0.35;
+        }
+        // Segment mismatch: a price per foot far off the rest of the set means
+        // a new build or a teardown, not a house the grid can adjust into place.
+        if (c.ppsfOutlier) gate *= 0.5;
+
+        return Math.max(0, Math.round(score * gate));
+    }
+
+    // ---- Back-test scoring ----
+    /**
+     * Accuracy statistics for a set of {estimate, actual} pairs.
+     *
+     * Reports the whole panel, never MdAPE alone, because each one catches a
+     * failure the others miss. Two in particular:
+     *
+     *   COD below 5 is a RED FLAG, not a win — in ratio-study practice it
+     *   means the estimates are chasing the sales they are being scored
+     *   against, which is exactly what happens if an adjustment rate was
+     *   fitted on a comp set containing the test property.
+     *
+     *   PRB catches systematic drift by price tier — over-valuing cheap
+     *   houses and under-valuing expensive ones nets out to a flattering
+     *   MdAPE while being wrong in both directions.
+     *
+     * The one-sided tail matters more here than the two-sided error: an
+     * underwriter's loss is asymmetric, because over-valuing buys a bad deal
+     * while under-valuing only passes on a good one.
+     */
+    function backtestMetrics(pairs) {
+        const rows = (pairs || []).filter(p =>
+            p && num(p.estimate) > 0 && num(p.actual) > 0);
+        const n = rows.length;
+        if (!n) return null;
+
+        const median = (arr) => {
+            if (!arr.length) return null;
+            const s = [...arr].sort((a, b) => a - b);
+            const m = Math.floor(s.length / 2);
+            return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+        };
+
+        const ratios = rows.map(p => num(p.estimate) / num(p.actual));
+        const errs = rows.map(p => (num(p.estimate) - num(p.actual)) / num(p.actual));
+        const absErrs = errs.map(Math.abs);
+
+        const medianRatio = median(ratios);
+        // IAAO coefficient of dispersion: average absolute deviation from the
+        // MEDIAN ratio, as a percentage of it
+        const cod = 100 * (ratios.reduce((s, r) => s + Math.abs(r - medianRatio), 0) / n) / medianRatio;
+
+        // Price-related differential: mean ratio over sales-weighted mean
+        // ratio. Above 1 means cheap properties are being over-valued.
+        const meanRatio = ratios.reduce((a, b) => a + b, 0) / n;
+        const sumActual = rows.reduce((s, p) => s + num(p.actual), 0);
+        const sumEstimate = rows.reduce((s, p) => s + num(p.estimate), 0);
+        const weightedMeanRatio = sumEstimate / sumActual;
+        const prd = weightedMeanRatio > 0 ? meanRatio / weightedMeanRatio : null;
+
+        // Price-related bias: regression of percentage ratio difference on
+        // log2 of value. The coefficient reads as "ratio change per doubling
+        // of price", so ±0.05 is the accepted band.
+        let prb = null;
+        if (n >= 5) {
+            const xs = [], ys = [];
+            for (const p of rows) {
+                const est = num(p.estimate), act = num(p.actual);
+                const ratio = est / act;
+                // Independent variable uses the ratio-adjusted value so the
+                // dependent variable is not regressed on part of itself
+                const value = (act * medianRatio + est) / 2;
+                if (value > 0) {
+                    xs.push(Math.log(value) / Math.LN2);
+                    ys.push((ratio - medianRatio) / medianRatio);
+                }
+            }
+            if (xs.length >= 5) {
+                const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+                const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+                let sxy = 0, sxx = 0;
+                for (let i = 0; i < xs.length; i++) {
+                    sxy += (xs[i] - mx) * (ys[i] - my);
+                    sxx += (xs[i] - mx) * (xs[i] - mx);
+                }
+                if (sxx > 0) prb = sxy / sxx;
+            }
+        }
+
+        const within = (t) => 100 * rows.filter((_, i) => absErrs[i] <= t).length / n;
+
+        return {
+            n,
+            medianRatio: Math.round(medianRatio * 10000) / 10000,
+            mdape: Math.round(median(absErrs) * 10000) / 100,
+            pe10: Math.round(within(0.10) * 10) / 10,
+            pe20: Math.round(within(0.20) * 10) / 10,
+            cod: Math.round(cod * 100) / 100,
+            prd: prd === null ? null : Math.round(prd * 10000) / 10000,
+            prb: prb === null ? null : Math.round(prb * 10000) / 10000,
+            // The asymmetric tail an underwriter actually cares about
+            overBy20Pct: Math.round(1000 * rows.filter((_, i) => errs[i] > 0.20).length / n) / 10,
+            underBy20Pct: Math.round(1000 * rows.filter((_, i) => errs[i] < -0.20).length / n) / 10,
+            medianSignedError: Math.round(median(errs) * 10000) / 100,
+            // Half-width of the 95% CI for a median, in PERCENTILE points of
+            // the error distribution. At n=100 the median is only pinned to
+            // the 40th-60th percentile — the number that stops a 40-deal
+            // MdAPE from being quoted as if it meant something.
+            medianCiPercentilePoints: Math.round(10 * 98 / Math.sqrt(n)) / 10
+        };
+    }
+
+    /**
+     * Compare two model variants scored on the SAME test sales.
+     *
+     * The reason this exists: between-property variance dominates two
+     * independent MdAPEs, so comparing them needs an order of magnitude more
+     * sales than comparing per-sale differences does. A tool that will only
+     * ever accumulate low hundreds of test sales cannot afford the former.
+     *
+     * Reports a sign test (distribution-free, works on tiny samples) and a
+     * bootstrap CI on the median improvement.
+     */
+    function pairedComparison(pairsA, pairsB, opts) {
+        const key = (p) => String(p.id || p.address || '');
+        const mapB = new Map((pairsB || []).map(p => [key(p), p]));
+        const both = [];
+        for (const a of pairsA || []) {
+            const b = mapB.get(key(a));
+            if (!b || !(num(a.actual) > 0)) continue;
+            const errA = Math.abs(num(a.estimate) - num(a.actual)) / num(a.actual);
+            const errB = Math.abs(num(b.estimate) - num(b.actual)) / num(b.actual);
+            both.push({ id: key(a), errA, errB, diff: errA - errB });
+        }
+        const n = both.length;
+        if (!n) return null;
+
+        const bWins = both.filter(d => d.diff > 0).length;
+        const aWins = both.filter(d => d.diff < 0).length;
+        const ties = n - bWins - aWins;
+
+        const median = (arr) => {
+            const s = [...arr].sort((x, y) => x - y);
+            const m = Math.floor(s.length / 2);
+            return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+        };
+        const diffs = both.map(d => d.diff);
+
+        // Deterministic bootstrap: a fixed stride walk rather than a random
+        // resample, so the same inputs always produce the same interval and a
+        // back-test result can be reproduced exactly.
+        const iterations = (opts && opts.iterations) || 2000;
+        const medians = [];
+        for (let i = 0; i < iterations; i++) {
+            const sample = [];
+            for (let j = 0; j < n; j++) {
+                sample.push(diffs[(i * 7919 + j * 104729) % n]);
+            }
+            medians.push(median(sample));
+        }
+        medians.sort((x, y) => x - y);
+        const lo = medians[Math.floor(iterations * 0.025)];
+        const hi = medians[Math.floor(iterations * 0.975)];
+
+        // Two-sided sign test, normal approximation with continuity correction
+        const decisive = bWins + aWins;
+        let z = null, significant = false;
+        if (decisive >= 8) {
+            z = (Math.abs(bWins - decisive / 2) - 0.5) / (Math.sqrt(decisive) / 2);
+            significant = z > 1.96;
+        }
+
+        return {
+            n, bWins, aWins, ties,
+            medianImprovementPct: Math.round(median(diffs) * 10000) / 100,
+            ci95: [Math.round(lo * 10000) / 100, Math.round(hi * 10000) / 100],
+            signTestZ: z === null ? null : Math.round(z * 100) / 100,
+            significant,
+            // The interval straddling zero is the honest "cannot tell yet"
+            verdict: !significant
+                ? (decisive < 8 ? 'too few decisive pairs to call' : 'no significant difference')
+                : (bWins > aWins ? 'B is better' : 'A is better')
+        };
+    }
+
     // ---- Rent from comps ----
     // Median $/sqft across usable rent comps × the subject's sqft (plain
     // median rent when the subject sqft is unknown). Rounded to $25;
@@ -910,5 +1167,6 @@
     }
 
     return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory,
-        deriveMarketRates, pricePerSqftOutliers, reconcileCondition };
+        deriveMarketRates, pricePerSqftOutliers, reconcileCondition,
+        backtestMetrics, pairedComparison, scoreComp };
 }));

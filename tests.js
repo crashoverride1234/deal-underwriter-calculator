@@ -29,6 +29,12 @@ function assertNear(actual, expected, tol, label) {
     }
 }
 
+function eq(actual, expected, label) {
+    if (actual !== expected) {
+        throw new Error(`${label || 'value'}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+}
+
 // ---- Shared baseline scenarios ----
 
 const FLIP_BASE = {
@@ -750,6 +756,164 @@ test('derive: the rate is always inside a defensible band of the median', () => 
     const r = Engine.deriveMarketRates(comps);
     assert(r.pricePerSqftAdj >= r.medianPricePerSqft * 0.20, 'not below the floor');
     assert(r.pricePerSqftAdj <= r.medianPricePerSqft * 0.90, 'not above the ceiling');
+});
+
+// ---- backtestMetrics: the panel, because MdAPE alone hides failures ----
+
+test('backtest: a perfect estimator scores perfectly on every statistic', () => {
+    const rows = [300000, 450000, 600000, 800000, 1000000, 250000].map(v => ({ estimate: v, actual: v }));
+    const m = Engine.backtestMetrics(rows);
+    assertNear(m.medianRatio, 1, 1e-9);
+    assertNear(m.mdape, 0, 1e-9);
+    assert(m.pe10 === 100 && m.pe20 === 100);
+    assertNear(m.cod, 0, 1e-9);
+    assertNear(m.prd, 1, 1e-9);
+    assert(m.overBy20Pct === 0 && m.underBy20Pct === 0);
+});
+
+test('backtest: a uniform bias moves the ratio but NOT the dispersion', () => {
+    // This is why median ratio and COD are both reported: one catches level,
+    // the other catches spread, and a model can fail either independently.
+    const rows = [300000, 450000, 600000, 800000].map(v => ({ estimate: v * 1.1, actual: v }));
+    const m = Engine.backtestMetrics(rows);
+    assertNear(m.medianRatio, 1.1, 1e-9, 'level is off by 10%');
+    assertNear(m.cod, 0, 1e-9, 'but every estimate is off by the SAME 10%');
+    assertNear(m.mdape, 10, 1e-9);
+    assertNear(m.medianSignedError, 10, 1e-9, 'signed error exposes the direction');
+});
+
+test('backtest: the over/under split is asymmetric, as an underwriter needs', () => {
+    const rows = [
+        { estimate: 130, actual: 100 },  // +30% — bought a bad deal
+        { estimate: 125, actual: 100 },  // +25%
+        { estimate: 100, actual: 100 },
+        { estimate: 70, actual: 100 }    // −30% — only passed on a good one
+    ];
+    const m = Engine.backtestMetrics(rows);
+    eq(m.overBy20Pct, 50, 'half the set over-valued by >20%');
+    eq(m.underBy20Pct, 25);
+});
+
+test('backtest: PRB catches price-tier drift that MdAPE cannot see', () => {
+    // Over-values cheap houses, under-values expensive ones. The absolute
+    // errors are symmetric so MdAPE looks respectable and the model is broken.
+    const rows = [
+        { estimate: 120000, actual: 100000 }, { estimate: 230000, actual: 200000 },
+        { estimate: 420000, actual: 400000 }, { estimate: 780000, actual: 800000 },
+        { estimate: 1450000, actual: 1600000 }, { estimate: 2750000, actual: 3200000 }
+    ];
+    const m = Engine.backtestMetrics(rows);
+    assert(m.prb !== null, 'PRB computed');
+    assert(m.prb < -0.05, 'negative drift with price is detected: ' + m.prb);
+});
+
+test('backtest: the median CI width shrinks with n and is reported honestly', () => {
+    const make = (n) => Array.from({ length: n }, (_, i) => ({ estimate: 100 + i, actual: 100 }));
+    // 98/sqrt(n) percentile points — at n=100 the median is only pinned
+    // between the 40th and 60th percentile of the error distribution
+    assertNear(Engine.backtestMetrics(make(100)).medianCiPercentilePoints, 9.8, 0.1);
+    assertNear(Engine.backtestMetrics(make(400)).medianCiPercentilePoints, 4.9, 0.1);
+});
+
+test('backtest: no usable pairs returns null rather than a flattering zero', () => {
+    assert(Engine.backtestMetrics([]) === null);
+    assert(Engine.backtestMetrics([{ estimate: 0, actual: 100 }]) === null);
+    assert(Engine.backtestMetrics(null) === null);
+});
+
+// ---- pairedComparison: the small-sample workhorse ----
+
+test('paired: a consistent improvement is detected on a handful of sales', () => {
+    // Between-property variance dominates two independent MdAPEs; comparing
+    // per-sale differences sees the same effect with far fewer rows.
+    const a = [], b = [];
+    for (let i = 0; i < 20; i++) {
+        const actual = 300000 + i * 10000;
+        a.push({ id: 'p' + i, estimate: actual * 1.12, actual });  // 12% off
+        b.push({ id: 'p' + i, estimate: actual * 1.04, actual });  // 4% off
+    }
+    const r = Engine.pairedComparison(a, b);
+    eq(r.n, 20);
+    eq(r.bWins, 20, 'B closer on every single sale');
+    assert(r.significant === true, 'sign test fires');
+    assert(r.verdict === 'B is better', r.verdict);
+    assert(r.medianImprovementPct > 7, 'about 8 points better: ' + r.medianImprovementPct);
+});
+
+test('paired: noise is reported as no difference, not as a win', () => {
+    const a = [], b = [];
+    for (let i = 0; i < 20; i++) {
+        const actual = 400000;
+        // alternating, equal magnitude — genuinely a coin flip
+        a.push({ id: 'p' + i, estimate: actual * (i % 2 ? 1.05 : 0.95), actual });
+        b.push({ id: 'p' + i, estimate: actual * (i % 2 ? 0.95 : 1.05), actual });
+    }
+    const r = Engine.pairedComparison(a, b);
+    assert(r.significant === false, 'must not claim a winner');
+    assert(/no significant difference|too few/.test(r.verdict), r.verdict);
+});
+
+test('paired: too few decisive pairs refuses to call it', () => {
+    const a = [{ id: 'x', estimate: 110, actual: 100 }, { id: 'y', estimate: 120, actual: 100 }];
+    const b = [{ id: 'x', estimate: 105, actual: 100 }, { id: 'y', estimate: 115, actual: 100 }];
+    const r = Engine.pairedComparison(a, b);
+    eq(r.n, 2);
+    assert(r.significant === false);
+    assert(r.verdict === 'too few decisive pairs to call', r.verdict);
+});
+
+test('paired: only sales scored by BOTH variants are compared', () => {
+    const a = [{ id: 'x', estimate: 110, actual: 100 }, { id: 'orphan', estimate: 200, actual: 100 }];
+    const b = [{ id: 'x', estimate: 105, actual: 100 }];
+    eq(Engine.pairedComparison(a, b).n, 1, 'the unpaired sale is dropped, not counted');
+});
+
+test('paired: the bootstrap interval is deterministic across runs', () => {
+    const a = [], b = [];
+    for (let i = 0; i < 15; i++) {
+        const actual = 350000 + i * 5000;
+        a.push({ id: 'p' + i, estimate: actual * 1.10, actual });
+        b.push({ id: 'p' + i, estimate: actual * 1.03, actual });
+    }
+    const r1 = Engine.pairedComparison(a, b);
+    const r2 = Engine.pairedComparison(a, b);
+    eq(r1.ci95[0], r2.ci95[0], 'same inputs, same interval — a result must reproduce');
+    eq(r1.ci95[1], r2.ci95[1]);
+});
+
+// ---- scoreComp: the ranking, now shared with the back-test ----
+
+test('score: a near-twin beats a bigger, closer house', () => {
+    // The failure that started the rework: a 1,845 sqft comp lost to a 2,304
+    // sqft one because 70 of 100 points were location and time.
+    const subject = { sqft: 1842, beds: 3, baths: 2, yearBuilt: 1948 };
+    const twin = { sqft: 1845, beds: 3, baths: 2, yearBuilt: 1939, distanceMi: 0.79, soldDate: '2026-06-26' };
+    const bigger = { sqft: 2304, beds: 3, baths: 3, yearBuilt: 1940, distanceMi: 0.53, soldDate: '2026-06-26' };
+    const asOf = '2026-08-27';
+    assert(Engine.scoreComp(subject, twin, asOf) > Engine.scoreComp(subject, bigger, asOf),
+        'the three-foot twin must win despite being further away');
+});
+
+test('score: comps are aged against the as-of date, not today', () => {
+    const subject = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950 };
+    const comp = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950, distanceMi: 0.5, soldDate: '2024-01-15' };
+    // Fresh relative to a 2024 test sale; stale relative to today
+    assert(Engine.scoreComp(subject, comp, '2024-03-01') > Engine.scoreComp(subject, comp, '2026-08-27'),
+        'a back-test must not penalise a comp for being old NOW');
+});
+
+test('score: a condo is gated out of a house comp set at any distance', () => {
+    const subject = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950 };
+    const base = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950, distanceMi: 0.05, soldDate: '2026-06-01' };
+    const condo = { ...base, propType: 'Condominium' };
+    assert(Engine.scoreComp(subject, condo) < Engine.scoreComp(subject, base) * 0.5, 'heavily gated');
+});
+
+test('score: a price-per-foot outlier is halved — different segment, not a comp', () => {
+    const subject = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950 };
+    const base = { sqft: 1800, beds: 3, baths: 2, yearBuilt: 1950, distanceMi: 0.4, soldDate: '2026-06-01' };
+    assertNear(Engine.scoreComp(subject, { ...base, ppsfOutlier: true }),
+        Engine.scoreComp(subject, base) * 0.5, 1.5, 'halved');
 });
 
 // ---- reconcileCondition: the sale price overrules the marketing copy ----

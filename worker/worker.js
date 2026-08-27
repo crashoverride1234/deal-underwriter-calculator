@@ -1271,9 +1271,17 @@ async function resoSearch(env, opts, f) {
   if (env.MLS_ORIGINATING_SYSTEM) {
     clauses.push(`${f.originatingSystem} eq ${odataStr(env.MLS_ORIGINATING_SYSTEM.trim())}`);
   }
+  const anchor = Number.isFinite(opts.asOf) ? opts.asOf : Date.now();
   if (opts.sinceDays > 0) {
     const field = opts.dateField || f.closeDate;
-    clauses.push(`${field} ge ${odataDay(Date.now() - opts.sinceDays * 86400000)}`);
+    clauses.push(`${field} ge ${odataDay(anchor - opts.sinceDays * 86400000)}`);
+  }
+  if (Number.isFinite(opts.asOf)) {
+    // See the RETS builder: an as-of reconstruction needs both a close-date
+    // ceiling (reporting lag) and a modification ceiling (post-close edits).
+    const field = opts.dateField || f.closeDate;
+    clauses.push(`${field} le ${odataDay(anchor - (opts.reportingLagDays || 7) * 86400000)}`);
+    clauses.push(`${f.modified} le ${odataDay(anchor)}`);
   }
   const haveGeo = Number.isFinite(opts.lat) && Number.isFinite(opts.lon) && opts.radiusMi > 0;
   if (haveGeo && !opts.postalOnly) {
@@ -1896,6 +1904,10 @@ function retsDmql(env, opts, f) {
   if (opts.statuses && opts.statuses.length) {
     parts.push(`(${f.status}=|${opts.statuses.join(',')})`);
   }
+  // The window is anchored on opts.asOf when the caller supplies one. That is
+  // what makes a back-test honest: reconstructing the comp set that EXISTED
+  // when the test sale closed, not the one visible today.
+  const anchor = Number.isFinite(opts.asOf) ? opts.asOf : Date.now();
   if (opts.sinceDays > 0) {
     const field = opts.dateField || f.closeDate;
     // The trailing + is DMQL2's "or later". It reaches the server as %2B —
@@ -1903,8 +1915,19 @@ function retsDmql(env, opts, f) {
     // become a syntax error.
     // One extra day of slack because the RETS server keeps GMT while the data
     // is Central: without it the most recent closings fall outside the window.
-    const since = Date.now() - (opts.sinceDays + 1) * 86400000;
+    const since = anchor - (opts.sinceDays + 1) * 86400000;
     parts.push(`(${field}=${odataDay(since)}+)`);
+  }
+  if (Number.isFinite(opts.asOf)) {
+    // Ceiling on the close date, minus a reporting-lag buffer: a sale does not
+    // appear in the feed the instant it closes, so a back-test that admits
+    // same-week closings is using information the model could not have had.
+    const field = opts.dateField || f.closeDate;
+    parts.push(`(${field}=${odataDay(anchor - (opts.reportingLagDays || 7) * 86400000)}-)`);
+    // And the row itself must not have been touched since. MLS records mutate
+    // after closing — concessions, DOM and remarks are routinely backfilled —
+    // so today's row is NOT the row that existed at the anchor date.
+    parts.push(`(${f.modified}=${odataDay(anchor)}-)`);
   }
   // Property type, but ONLY when it was configured explicitly. The RESO
   // default of 'Residential' is a Data Dictionary label, and a RETS server
@@ -2390,6 +2413,7 @@ async function mlsComps(env, lat, lon, radiusMi, months, limit, zip, subject) {
   const s = subject || {};
   const sqft = numOrNull(s.sqft);
   const beds = numOrNull(s.beds);
+  const asOf = Number.isFinite(s.asOf) ? s.asOf : undefined;
 
   // Widen rather than come back nearly empty. A tight box is the right first
   // ask — the nearest sales are the best comps — but on a large-lot or thinly
@@ -2399,7 +2423,7 @@ async function mlsComps(env, lat, lon, radiusMi, months, limit, zip, subject) {
     statuses: mlsStatuses(env, 'closed'),
     propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
     subTypes: mlsSubTypes(env),
-    lat, lon, radiusMi: r, zip,
+    lat, lon, radiusMi: r, zip, asOf,
     sqftMin: sqft ? sqft * (1 - MLS_SQFT_TOLERANCE * loosen) : 0,
     sqftMax: sqft ? sqft * (1 + MLS_SQFT_TOLERANCE * loosen) : 0,
     bedsMin: beds ? Math.max(1, beds - MLS_BEDS_TOLERANCE * loosen) : 0,
@@ -2419,7 +2443,28 @@ async function mlsComps(env, lat, lon, radiusMi, months, limit, zip, subject) {
     // server hiccup must not throw away the comps already in hand
     if (wider && wider.length > rows.length) rows = wider;
   }
-  return rows.map(r => mlsToCandidate(r, env)).filter(c => c.address);
+  const f = mlsFields(env);
+  // A test property must never appear among its own comparables, and it can
+  // appear under more than one identity: a relist, an expired listing and both
+  // legs of a flip are separate ListingKeys for one house. Match on the parcel
+  // and the normalized street line as well as the key.
+  const dropKeys = new Set((s.excludeKeys || []).filter(Boolean).map(String));
+  const dropParcels = new Set((s.excludeParcels || []).filter(Boolean).map(String));
+  const dropAddrs = new Set((s.excludeAddresses || [])
+    .filter(Boolean).map(a => String(a).toLowerCase().replace(/[^a-z0-9]/g, '')));
+
+  return rows
+    .filter(r => {
+      if (dropKeys.size && dropKeys.has(String(mlsFlat(r[f.mlsNumber]) || ''))) return false;
+      if (dropParcels.size && dropParcels.has(String(mlsFlat(r[f.parcel]) || ''))) return false;
+      if (dropAddrs.size) {
+        const line = mlsStreetAddress(r, f);
+        if (line && dropAddrs.has(line.toLowerCase().replace(/[^a-z0-9]/g, ''))) return false;
+      }
+      return true;
+    })
+    .map(r => mlsToCandidate(r, env))
+    .filter(c => c.address);
 }
 
 /**
@@ -2514,6 +2559,74 @@ async function mlsLeases(env, lat, lon, radiusMi, zip) {
   ).filter(x => x.rent > 0);
   rows.errors = errors;
   return rows;
+}
+
+/**
+ * /backtest/sample — draw the test universe for an accuracy back-test.
+ *
+ * Deliberately NOT /comps: this is the set of sales the engine will be scored
+ * AGAINST, so it must not be shaped by any of the similarity banding that
+ * /comps applies. Every closed sale in the window is eligible; letting the
+ * comp filter pick the test set would only ever measure the engine on the
+ * houses it already finds easy.
+ */
+async function handleBacktestSample(params, env, cors) {
+  if (!mlsConfigured(env)) {
+    return json({ error: 'MLS feed not configured — a back-test needs real closed sales' }, 501, cors);
+  }
+  const lat = parseFloat(params.get('latitude'));
+  const lon = parseFloat(params.get('longitude'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude required' }, 400, cors);
+  }
+  const radius = Math.min(10, parseFloat(params.get('radius')) || 3);
+  const months = Math.min(36, parseInt(params.get('months'), 10) || 24);
+  const limit = Math.min(300, parseInt(params.get('limit'), 10) || 200);
+  const f = mlsFields(env);
+
+  try {
+    const rows = await mlsSearch(env, {
+      statuses: mlsStatuses(env, 'closed'),
+      propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
+      subTypes: mlsSubTypes(env),
+      lat, lon, radiusMi: radius, zip: params.get('zip') || '',
+      sinceDays: Math.round(months * 30.44),
+      limit, orderby: 'closeDateDesc'
+    });
+    const sales = rows.map(r => ({
+      mlsNumber: mlsFlat(r[f.mlsNumber]),
+      parcel: mlsFlat(r[f.parcel]),
+      address: mlsStreetAddress(r, f),
+      zip: mlsFlat(r[f.postal]),
+      subdivision: mlsFlat(r[f.subdivision]),
+      lat: mlsCoord(r[f.lat]),
+      lon: mlsCoord(r[f.lon]),
+      closePrice: numOrNull(r[f.closePrice]),
+      closeDate: mlsFlat(r[f.closeDate]),
+      sqft: numOrNull(r[f.sqft]) || numOrNull(r[f.sqftAlt]),
+      beds: numOrNull(r[f.beds]),
+      baths: mlsBaths(r, f),
+      lotSqft: mlsLotSqft(r, f),
+      yearBuilt: numOrNull(r[f.year]),
+      garage: numOrNull(r[f.garage]),
+      stories: mlsStories(r, f),
+      pool: mlsPool(r, f),
+      remarks: mlsFlat(r[f.remarks]),
+      propertyCondition: mlsFlat(r[f.condition]),
+      concessions: numOrNull(r[f.concessions]),
+      concessionsReported: mlsConcessionsReported(r, f),
+      dom: mlsDom(r, f)
+    })).filter(x => x.closePrice > 0 && x.closeDate && x.lat != null && x.sqft > 0);
+
+    return json({
+      subject: { latitude: lat, longitude: lon, radiusMi: radius, months },
+      count: sales.length,
+      truncated: Boolean(rows.truncated),
+      sales
+    }, 200, cors);
+  } catch (e) {
+    return json({ error: mlsSystemName(env) + ': ' + e.message }, 502, cors);
+  }
 }
 
 // ---- /mls/probe: the one-round-trip field-mapping diagnostic ----
@@ -2860,7 +2973,15 @@ async function handleComps(params, env, cors) {
   if (mlsConfigured(env)) {
     try {
       const found = await mlsComps(env, lat, lon, radius, months, limit, params.get('zip') || '', {
-        sqft: params.get('sqft'), beds: params.get('beds')
+        sqft: params.get('sqft'),
+        beds: params.get('beds'),
+        // Back-test controls. asOf reconstructs the comp set that EXISTED at
+        // that instant; the exclude lists keep a test property out of its own
+        // comparables under every identity it might carry.
+        asOf: params.get('asOf') ? Date.parse(params.get('asOf')) : undefined,
+        excludeKeys: (params.get('excludeKeys') || '').split(',').filter(Boolean),
+        excludeParcels: (params.get('excludeParcels') || '').split(',').filter(Boolean),
+        excludeAddresses: (params.get('excludeAddresses') || '').split('|').filter(Boolean)
       });
       mlsCount = found.length;
       candidates.push(...found);
@@ -3187,6 +3308,8 @@ export default {
               attribution: env.MLS_ATTRIBUTION || null
             } : null
           }, 200, cors);
+        case '/backtest/sample':
+          return await handleBacktestSample(url.searchParams, env, cors);
         case '/mls/probe':
           return await handleMlsProbe(url.searchParams, env, cors);
         case '/lookup':
