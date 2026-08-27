@@ -43,7 +43,7 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 
 - **Every turn ends deployed and live**, not just coded. Cadence per feature:
   implement → verify end-to-end in a browser preview against LIVE APIs (real
-  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (47/47) →
+  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (67/67) →
   bump `CACHE_NAME` in `sw.js` → commit + push to `main` → poll the live URL
   for a marker string with no-cache headers to confirm the Pages deploy → tell
   him concretely what to tap/test, with the numbers you verified.
@@ -135,7 +135,21 @@ tier hard cap means no billing risk; rotate the worker name if abused.
 2. Multi-year rental projections with depreciation from the land/improvement
    split; exit-strategy comparator; saved-deal archive (substrate for comp
    alerts + budget-vs-actual); Texas seller-net sheet; BRRRR seasoning.
-3. **MLS feed — BUILT 2026-08-27, waiting on credentials.** The whole rung
+3. **MLS feed — BUILT 2026-08-27. NTREIS confirmed as CLASSIC RETS.**
+   James pasted a real NTREIS login response on 2026-08-27:
+   `https://ntrdd.mlsmatrix.com/rets/Login.ashx` (CoreLogic Matrix,
+   ReplyCode 0, user id redacted), capabilities Login / Logout / Search /
+   GetMetadata / GetObject / Update / PostObject. So the RETS transport is
+   the live path, not the RESO one. That paste immediately caught a real
+   bug — NTREIS packs every capability `key=value` onto ONE space-separated
+   line, and the line-based parser read the whole block as a single key and
+   found no Search URL. Fixed and pinned by tests using the verbatim
+   response. Still needed from him: the RETS username/password as worker
+   secrets, then `/mls/probe` output so the field map can be written (a
+   RETS server does NOT use RESO Data Dictionary names — the probe reads
+   METADATA-TABLE and suggests the map).
+
+   Original licensing notes: The whole rung
    ships: both transports (RESO Web API + classic RETS), all four routes
    (`/lookup`, `/comps`, `/market`, `/rent`), the `/mls/probe` diagnostic,
    47 unit tests, and the licence-compliance guards. It is INERT until the
@@ -192,7 +206,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v36`).
-- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (47).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v37`).
+- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (67).
 - MLS credentials NEVER go in the browser — Worker secrets only. There is
   deliberately no paste-a-key field for them, unlike RentCast/Melissa.

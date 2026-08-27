@@ -79,21 +79,36 @@ unconfigured worker behaves exactly as it did before.
    curl "https://<your-worker>.workers.dev/mls/probe"
    ```
 
-   It reports which transport authenticated, how far the handshake got, the
-   field names the server *actually* publishes (`fieldsSeen`), which of the
-   fields this app wants are missing (`missingExpectedFields`), and the
-   normalized record they map to. Field names only; add `?sample=1` for one
-   full row (that row is licensed content — treat it accordingly).
+   It reports which transport authenticated and how far the handshake got.
 
-3. If `missingExpectedFields` is non-empty, write the corrections into
-   `MLS_FIELD_MAP` as JSON and re-probe:
+   **On classic RETS** it then reads the server's own metadata and returns
+   `resources`, `classes` (so you can confirm `MLS_RETS_CLASS`), the full
+   `fieldsSeen` list, and — the useful part — a **`suggestedFieldMap`** ready
+   to paste straight into `MLS_FIELD_MAP`, plus `unmatchedFields` for
+   anything it could not bind. Add `?class=RESI` to inspect a different
+   class (the residential-lease one, for instance).
+
+   **On RESO Web API** it runs one sample search instead and reports
+   `fieldsSeen` and `missingExpectedFields`.
+
+   Field names only in both cases; add `?sample=1` for raw rows (licensed
+   content — treat it accordingly).
+
+3. Write the map it suggests and re-probe:
 
    ```
-   echo '{"sqft":"SqFtTotal","remarks":"PublicRemarksLong"}' | npx wrangler secret put MLS_FIELD_MAP
+   echo '{"closePrice":"L_SoldPrice","beds":"LM_Int1_1"}' | npx wrangler secret put MLS_FIELD_MAP
    ```
 
-Field names default to the RESO Data Dictionary 2.0, so a conforming feed
-needs no map at all.
+Field names default to the RESO Data Dictionary 2.0, so a conforming RESO
+feed needs no map at all. **A classic RETS server always does** — it doesn't
+speak Data Dictionary, which is exactly why the probe reads its metadata.
+
+If a session ever gets stuck on a one-session-per-login server:
+
+```
+curl "https://<your-worker>.workers.dev/mls/probe?logout=1"
+```
 
 ### What changes once it's live
 
@@ -126,9 +141,19 @@ the feed's state and render the licence's required attribution.
 - **Classic RETS is one session per login** on most servers, and a second
   Login silently kills the first. Logins are single-flighted here; if a
   session gets stuck, `GET /mls/probe?logout=1` closes it.
-- The classic-RETS transport is **unverified against a live server** — it was
-  written from the spec. `/mls/probe` exercises the whole handshake and
-  reports exactly where it stops.
+- **RETS auth negotiates itself.** Basic is tried first; a 401 carrying a
+  Digest challenge is answered with a proper RFC 2617 digest, because Matrix
+  commonly rejects Basic. A mid-session 401 means a stale nonce and re-logins
+  once. If the MLS registered a User-Agent *and* issued a UA password, set
+  `MLS_RETS_UA` and `MLS_RETS_UA_PASSWORD` — reply codes 20041/20037 mean the
+  server wants that header and hasn't got it.
+- **A RETS server does not use RESO field names**, so `MLS_RETS_STANDARD_NAMES`
+  defaults to `0` (the server's own SystemNames) and the probe's suggested map
+  binds to those. Flipping it to `1` without rewriting the map makes every
+  mapped field read null.
+- The classic-RETS transport is exercised against real captured responses but
+  **not yet end to end against a live server**. `/mls/probe` runs the whole
+  handshake and reports exactly where it stops.
 
 ## Optional: restrict who can call it
 

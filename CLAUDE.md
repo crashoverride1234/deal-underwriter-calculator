@@ -44,10 +44,13 @@ GitHub Pages from `main`.
 - `worker/` — Cloudflare Worker proxy. Holds the licensed **MLS feed** (the
   primary source; see "MLS feed" below), keyless property auto-fill
   (realtor.com GraphQL), and optional RentCast/Melissa via Worker secrets.
-  `worker/tests.mjs` (`node worker/tests.mjs`) unit-tests the MLS normalizers
-  against synthetic RESO and RETS payloads — the only verification possible
-  without licensed credentials. Extra named exports at the bottom of
-  `worker.js` exist for that harness; Cloudflare only consumes the default.
+  `worker/tests.mjs` (`node worker/tests.mjs`) unit-tests the MLS transport:
+  normalizers against synthetic RESO and RETS payloads, MD5 against the RFC
+  1321 vectors, HTTP Digest against the RFC 2617 worked example, and the
+  capability parser against NTREIS's verbatim login response. That is the
+  only verification possible without licensed credentials. Extra named
+  exports at the bottom of `worker.js` exist for that harness; Cloudflare
+  only consumes the default.
 - `native/` — Capacitor 8 iOS/Android store apps wrapping the same web files
   (see `native/README.md`). `build-www.mjs` stages `www/` (vendors the CDN
   libs, strips the SW); native-only behavior sits at the bottom of `app.js`
@@ -64,7 +67,7 @@ GitHub Pages from `main`.
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
 - **Test**: `node tests.js` (85 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (47 MLS-normalizer tests). Both must pass before deploy.
+  (67 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -85,8 +88,14 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   client_credentials bearer; Trestle/Cotality, Bridge, MLS Grid, Spark).
   `rets` = classic RETS 1.7.2/1.8 (Login handshake → DMQL2 →
   COMPACT-DECODED). "A RETS feed" means either one in 2026, hence both.
-  The RETS half is written from the spec and **unverified against a live
-  server**; `/mls/probe` exercises the whole handshake and says where it stops.
+- **NTREIS is the RETS one** (confirmed from a real login response
+  2026-08-26): CoreLogic Matrix at `https://ntrdd.mlsmatrix.com/rets/`,
+  capabilities Login/Logout/Search/GetMetadata/GetObject/Update/PostObject.
+  Two things that response proved and that a naive client gets wrong:
+  the capability URLs are **absolute**, and every `key=value` sits on **ONE
+  line separated by spaces** rather than one per line as the spec's examples
+  show. `retsCapabilities()` handles both shapes, and an EMPTY value
+  (`MemberName=`) must not swallow the pair after it — NTREIS sends two.
 - **Credentials are Worker secrets ONLY.** A data licence forbids shipping
   them to a browser, so unlike RentCast/Melissa there is deliberately no
   client-side paste path. Full annotated list: `worker/.dev.vars.example`.
@@ -129,8 +138,31 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   20022) so logins are single-flighted; `/mls/probe?logout=1` clears a stuck
   one. Workers has no cookie jar — the RETS session cookie is replayed by
   hand — and no DOMParser, so COMPACT-DECODED is parsed with regex.
-  `redirect: 'manual'` on both RETS calls: Workers replays Authorization and
+  `redirect: 'manual'` on every RETS call: Workers replays Authorization and
   Cookie across a redirect, including to another host.
+- **RETS auth**: Basic is tried first and a 401 carrying a Digest challenge
+  is negotiated automatically (Matrix commonly rejects Basic); the challenge
+  and its nonce-count live on the session and every request signs
+  path **and query** (a Search.ashx call is almost entirely query). A
+  mid-session 401 means a stale nonce — the session is dropped and the
+  search retried once. `RETS-UA-Authorization` follows RETS 1.7.2 §3.10
+  exactly: `MD5( MD5(product:UA-password) : request-id : session-id :
+  version )` with an empty request-id, so `a1:::version` at login and
+  `a1::sessionId:version` afterwards. Reply codes 20041/20037 mean the
+  server wants that header.
+- **MD5 is implemented in `worker.js`**, not taken from
+  `crypto.subtle.digest('MD5')`. That call works on Cloudflare (non-standard
+  extension) but on no other runtime including Node, so the auth paths would
+  have been untestable. Verified against all RFC 1321 vectors, the RFC 2617
+  worked example, and 700 random inputs cross-checked against Node crypto.
+- **RETS field names are NOT RESO names** — this is the one that would
+  otherwise waste a day. `StandardNames` defaults to **0** (the server's own
+  SystemNames), and `/mls/probe` reads METADATA-RESOURCE / METADATA-CLASS /
+  METADATA-TABLE and emits a **`suggestedFieldMap`** ready to paste into
+  `MLS_FIELD_MAP`, plus `unmatchedFields` for what it could not bind.
+  Matching is exact against StandardName then SystemName — never fuzzy,
+  because a fuzzy match would silently bind the wrong column to a price.
+  `?class=X` inspects a different class (the lease one, say).
 - **Licence compliance is a design constraint, not a footnote.** NTREIS
   Rule 15.03(b) bars a licensee from supplying confidential MLS information
   as supporting documentation to a third party, and Rule 8.08 Note 2 makes

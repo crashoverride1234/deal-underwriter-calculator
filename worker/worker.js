@@ -1309,23 +1309,153 @@ async function resoSearch(env, opts, f) {
 // Unverified against a live server (no credentials at build time); /mls/probe
 // exercises the whole handshake and reports exactly where it stops.
 
-async function md5Hex(str) {
-  // Cloudflare Workers expose MD5 through crypto.subtle.digest as a
-  // non-standard extension. RETS UA-Authorization has no alternative digest,
-  // so a runtime without it simply cannot speak that dialect — say so plainly
-  // instead of sending a wrong header and getting an opaque 401.
-  const buf = await crypto.subtle.digest('MD5', new TextEncoder().encode(str));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+// RFC 1321 MD5, implemented here rather than through
+// crypto.subtle.digest('MD5'). That call works on Cloudflare — MD5 is a
+// non-standard extension they add — but on no other runtime, including the
+// Node one these tests run under, so the digest paths would have been
+// untestable. RETS offers no alternative digest to substitute: both HTTP
+// Digest auth and RETS-UA-Authorization specify MD5 outright. A few dozen
+// lines buys a single code path that is verifiable against RFC test vectors.
+const MD5_K = new Int32Array(64);
+for (let i = 0; i < 64; i++) MD5_K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+const MD5_S = [
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+  5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+];
+
+function md5Hex(input) {
+  const msg = new TextEncoder().encode(String(input));
+  const bitLen = msg.length * 8;
+  const padded = new Uint8Array((((msg.length + 8) >> 6) + 1) << 6);
+  padded.set(msg);
+  padded[msg.length] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 8, bitLen >>> 0, true);
+  dv.setUint32(padded.length - 4, Math.floor(bitLen / 4294967296), true);
+
+  let a0 = 0x67452301 | 0, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476 | 0;
+  const M = new Int32Array(16);
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) M[i] = dv.getInt32(off + i * 4, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) & 15; }
+      else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) & 15; }
+      else { F = C ^ (B | ~D); g = (7 * i) & 15; }
+      F = (F + A + MD5_K[i] + M[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + ((F << MD5_S[i]) | (F >>> (32 - MD5_S[i])))) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const out = new Uint8Array(16);
+  const odv = new DataView(out.buffer);
+  odv.setInt32(0, a0, true); odv.setInt32(4, b0, true);
+  odv.setInt32(8, c0, true); odv.setInt32(12, d0, true);
+  return [...out].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// The RETS spec shows the capability block as one KEY=VALUE per line, but
+// real servers don't all agree. NTREIS's Matrix server (ntrdd.mlsmatrix.com,
+// captured live 2026-08-26) puts every pair on ONE line separated by spaces:
+//   <RETS-RESPONSE> MemberName= User=REDACTED_NID,... Login=https://... </RETS-RESPONSE>
+// A line-based parser reads that as a single key whose value is the entire
+// rest of the block, finds no Search URL, and every later request dies with a
+// misleading "no Search capability" error. So: parse per line when the block
+// really is multi-line (that form allows spaces inside a value, e.g. a
+// MemberName), and fall back to token-splitting when it isn't.
+// ---- HTTP Digest auth (RFC 2617 / RFC 7616) ----
+// Matrix RETS servers commonly answer Basic with a 401 + a Digest challenge.
+// Without this the login simply cannot succeed, and there is no alternative
+// digest to substitute: MD5 is what the scheme specifies.
+
+function parseDigestChallenge(header) {
+  if (!header || !/^\s*digest\s/i.test(header)) return null;
+  const out = {};
+  // Values may be quoted (realm="x") or bare (qop=auth, stale=true)
+  const re = /([a-zA-Z][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|([^,\s]+))/g;
+  let m;
+  while ((m = re.exec(header)) !== null) {
+    out[m[1].toLowerCase()] = m[2] !== undefined ? m[2] : m[3];
+  }
+  return out.nonce ? out : null;
+}
+
+function randomHex(bytes) {
+  const a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return [...a].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Build the Authorization value for a Digest challenge.
+ * `uri` must be the request's path AND query exactly as sent — a digest over
+ * the path alone fails on any Search.ashx call, which is all of them.
+ */
+async function digestAuthHeader(challenge, opts) {
+  const { username, password, method, uri } = opts;
+  const realm = challenge.realm || '';
+  const nonce = challenge.nonce;
+  const algorithm = (challenge.algorithm || 'MD5').toUpperCase();
+  // A server may offer several qop values; 'auth' is the only one that
+  // applies here ('auth-int' would need the entity body hashed too)
+  const qop = (challenge.qop || '').split(',').map(s => s.trim()).includes('auth') ? 'auth' : null;
+  const cnonce = randomHex(8);
+  const nc = String(opts.nc || 1).padStart(8, '0');
+
+  let ha1 = md5Hex(`${username}:${realm}:${password}`);
+  if (algorithm === 'MD5-SESS') ha1 = md5Hex(`${ha1}:${nonce}:${cnonce}`);
+  const ha2 = md5Hex(`${method}:${uri}`);
+  const response = qop
+    ? md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+    : md5Hex(`${ha1}:${nonce}:${ha2}`);
+
+  const parts = [
+    `username="${username}"`,
+    `realm="${realm}"`,
+    `nonce="${nonce}"`,
+    `uri="${uri}"`,
+    `response="${response}"`
+  ];
+  if (challenge.opaque) parts.push(`opaque="${challenge.opaque}"`);
+  if (challenge.algorithm) parts.push(`algorithm=${challenge.algorithm}`);
+  if (qop) parts.push(`qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
+  return 'Digest ' + parts.join(', ');
+}
+
+// Path + query of a URL, which is what the digest is computed over.
+function digestUri(url) {
+  const u = new URL(url);
+  return u.pathname + u.search;
 }
 
 function retsCapabilities(xml) {
   const caps = {};
   const block = /<RETS-RESPONSE>([\s\S]*?)<\/RETS-RESPONSE>/i.exec(xml);
   const body = block ? block[1] : xml;
-  for (const line of body.split(/\r?\n/)) {
-    const m = /^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/.exec(line);
-    if (m) caps[m[1]] = m[2];
+  const lines = body.split(/\r?\n/).filter(l => l.indexOf('=') !== -1);
+
+  if (lines.length > 1) {
+    for (const line of lines) {
+      const m = /^\s*([A-Za-z][A-Za-z0-9_-]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (m) caps[m[1]] = m[2];
+    }
+    return caps;
   }
+
+  // Single-line form: one KEY=VALUE per whitespace-delimited token. The
+  // lookahead is what stops an EMPTY value (NTREIS sends "MemberName=" and
+  // "Broker=") from consuming the pair that follows it — without it,
+  // MemberName swallows User and Broker swallows MetadataVersion.
+  // A value containing spaces is unrepresentable in this form anyway, and
+  // none of the capability URLs have any.
+  const re = /([A-Za-z][A-Za-z0-9_-]*)[ \t]*=[ \t]*(?![A-Za-z][A-Za-z0-9_-]*[ \t]*=)(\S*)/g;
+  let m;
+  while ((m = re.exec(body)) !== null) caps[m[1]] = m[2];
   return caps;
 }
 
@@ -1348,7 +1478,23 @@ function retsCookie(res) {
     .join('; ');
 }
 
-let retsSessionCache = null; // { caps, cookie, sessionId, base, expiresAt }
+// Combine two Cookie header strings, later values winning on name collision.
+// Order matters here: the load balancer re-issues AWSALB on most responses
+// and the fresher one is the one that keeps requests on the same backend.
+function mergeCookies(older, newer) {
+  const jar = new Map();
+  for (const src of [older, newer]) {
+    for (const pair of String(src || '').split(';')) {
+      const t = pair.trim();
+      if (!t) continue;
+      const eq = t.indexOf('=');
+      if (eq > 0) jar.set(t.slice(0, eq), t.slice(eq + 1));
+    }
+  }
+  return [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+let retsSessionCache = null; // { caps, cookie, sessionId, digest, base, expiresAt }
 
 // Single-flight guard. RETS servers commonly permit ONE session per login,
 // and a second Login silently invalidates the first (ReplyCode 20022,
@@ -1365,38 +1511,94 @@ async function retsLogin(env) {
   finally { retsLoginInFlight = null; }
 }
 
-async function retsLoginOnce(env) {
-  const loginUrl = env.MLS_RETS_LOGIN_URL.trim();
+/**
+ * Headers for one RETS request. Every RETS call needs the same four things,
+ * and two of them (the Authorization scheme and the UA digest's session-id
+ * slot) depend on session state — which is exactly why building them by hand
+ * at three call sites is how they drift apart.
+ */
+async function retsHeaders(env, method, url, session) {
   const version = (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim();
   const ua = (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim();
+  const digest = session && session.digest;
+
+  let authorization;
+  if (digest) {
+    // Each request needs a fresh nonce-count against the same server nonce
+    digest.nc = (digest.nc || 0) + 1;
+    authorization = await digestAuthHeader(digest, {
+      username: env.MLS_RETS_USERNAME,
+      password: env.MLS_RETS_PASSWORD,
+      method,
+      uri: digestUri(url),
+      nc: digest.nc
+    });
+  } else {
+    authorization = 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`);
+  }
 
   const headers = {
     'RETS-Version': version,
     'User-Agent': ua,
     'Accept': '*/*',
-    'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
+    'Authorization': authorization
   };
-  // RETS-UA-Authorization (only when the MLS issued a User-Agent password):
-  //   a1     = MD5(userAgent + ":" + uaPassword)
-  //   header = "Digest " + MD5(a1 + ":" + requestId + ":" + sessionId + ":" + version)
-  // At login there is no session id yet, so that slot is empty by spec.
-  if (env.MLS_RETS_UA_PASSWORD) {
-    const a1 = await md5Hex(`${ua}:${env.MLS_RETS_UA_PASSWORD}`);
-    headers['RETS-UA-Authorization'] = 'Digest ' + await md5Hex(`${a1}:::${version}`);
-  }
+  if (session && session.cookie) headers['Cookie'] = session.cookie;
 
+  // RETS-UA-Authorization, only when the MLS issued a User-Agent password.
+  // RETS 1.7.2 section 3.10:
+  //   a1       = MD5( product : UserAgent-Password )
+  //   response = MD5( a1 : RETS-Request-ID : session-id : version-info )
+  // We send no RETS-Request-ID header, so that slot is empty — hence the
+  // doubled colon. session-id is empty until the server sets the cookie,
+  // which is why this is recomputed per request rather than once at login.
+  if (env.MLS_RETS_UA_PASSWORD) {
+    const a1 = md5Hex(`${ua}:${env.MLS_RETS_UA_PASSWORD}`);
+    const sid = (session && session.sessionId) || '';
+    headers['RETS-UA-Authorization'] = 'Digest ' + md5Hex(`${a1}::${sid}:${version}`);
+  }
+  return headers;
+}
+
+async function retsLoginOnce(env) {
+  const loginUrl = env.MLS_RETS_LOGIN_URL.trim();
   // redirect:'manual' — Workers replays Authorization and Cookie headers
   // across a redirect, including to a different host. An MLS login credential
   // must never be handed to whatever a 302 happens to point at.
-  const res = await fetch(loginUrl, { headers, redirect: 'manual', signal: mlsSignal() });
+  const opts = { redirect: 'manual', signal: mlsSignal() };
+
+  let digest = null;
+  let cookie = '';
+  let res = await fetch(loginUrl, { headers: await retsHeaders(env, 'GET', loginUrl, null), ...opts });
+
+  // Matrix rejects Basic and answers with a Digest challenge (verified live
+  // against ntrdd.mlsmatrix.com: realm="MATRIX", algorithm=MD5, qop="auth").
+  // Negotiate it rather than reporting a dead end.
+  if (res.status === 401) {
+    const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
+    if (!challenge) {
+      throw new Error('RETS login 401 and the server offered no Digest challenge — '
+        + 'the username/password is being rejected outright.');
+    }
+    digest = challenge;
+    // NTREIS sits behind an AWS load balancer that plants stickiness cookies
+    // (AWSALB/AWSALBCORS) on the CHALLENGE. Dropping them lets the
+    // authenticated retry land on a different backend from the one that
+    // issued the nonce.
+    cookie = retsCookie(res);
+    res = await fetch(loginUrl, {
+      headers: await retsHeaders(env, 'GET', loginUrl, { digest, cookie }), ...opts
+    });
+    if (res.status === 401) {
+      throw new Error('RETS login 401 after a Digest handshake — username/password rejected, '
+        + 'or the MLS requires a registered User-Agent (MLS_RETS_UA) and UA password.');
+    }
+  }
+
   const xml = await res.text();
   if (res.status >= 300 && res.status < 400) {
     throw new Error(`RETS login redirected (HTTP ${res.status}) — set MLS_RETS_LOGIN_URL to the final URL; `
       + 'credentials are deliberately not replayed across a redirect.');
-  }
-  if (res.status === 401) {
-    throw new Error('RETS login 401 — Basic auth rejected. This server likely requires HTTP Digest auth, '
-      + 'or the User-Agent/UA-password pair is wrong.');
   }
   if (!res.ok) throw new Error(`RETS login HTTP ${res.status}: ${xml.slice(0, 200)}`);
   const code = retsReplyCode(xml);
@@ -1404,14 +1606,22 @@ async function retsLoginOnce(env) {
     throw new Error('RETS login ReplyCode 20022 (additional login not permitted) — another session is '
       + 'already open on this account. Wait for it to time out, or call /mls/probe?logout=1 to close it.');
   }
+  if (code === 20041 || code === 20037) {
+    throw new Error(`RETS login ReplyCode ${code} — this server requires RETS-UA-Authorization. `
+      + 'Set MLS_RETS_UA to the User-Agent string the MLS registered for you, and MLS_RETS_UA_PASSWORD '
+      + 'to the User-Agent password they issued.');
+  }
   if (code !== null && code !== 0) {
     throw new Error(`RETS login ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
   }
   const caps = retsCapabilities(xml);
-  const cookie = retsCookie(res);
+  // Merge the login response's cookies over any carried from the challenge:
+  // the RETS session id arrives here, the load-balancer stickiness arrived
+  // there, and later requests need both.
+  cookie = mergeCookies(cookie, retsCookie(res));
   const sessionId = (/RETS-Session-ID\s*=\s*([^;\s]+)/i.exec(cookie) || [, ''])[1] || '';
   retsSessionCache = {
-    caps, cookie, sessionId,
+    caps, cookie, sessionId, digest,
     base: new URL(loginUrl).origin,
     // RETS sessions time out server-side; re-login well inside any sane window
     expiresAt: Date.now() + 10 * 60 * 1000
@@ -1424,6 +1634,118 @@ function retsAbsolute(session, capUrl) {
   return /^https?:\/\//i.test(capUrl) ? capUrl : session.base + (capUrl.startsWith('/') ? '' : '/') + capUrl;
 }
 
+// GetMetadata: how a classic RETS server tells you what it actually has.
+// Essential rather than optional here — a RETS server does NOT use RESO Data
+// Dictionary names, so without this the default field map is guesswork.
+// COMPACT metadata is the same DELIMITER/COLUMNS/DATA table as a search
+// result, so parseCompactDecoded reads it unchanged.
+async function retsGetMetadata(env, type, id) {
+  const session = await retsLogin(env);
+  const url = retsAbsolute(session, session.caps.GetMetadata);
+  if (!url) throw new Error('RETS login returned no GetMetadata capability URL');
+  const q = new URLSearchParams({ Type: type, ID: id, Format: 'COMPACT' });
+  const full = `${url}?${q}`;
+  const res = await fetch(full, {
+    headers: await retsHeaders(env, 'GET', full, session),
+    redirect: 'manual', signal: mlsSignal()
+  });
+  const xml = await res.text();
+  if (!res.ok) throw new Error(`GetMetadata HTTP ${res.status}: ${xml.slice(0, 200)}`);
+  const code = retsReplyCode(xml);
+  if (code !== null && code !== 0) {
+    throw new Error(`GetMetadata ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
+  }
+  return parseCompactDecoded(xml);
+}
+
+// Candidate names per logical field, best first. Covers RESO Data Dictionary
+// 2.0, the older RETS standard names, and the common Matrix system-name
+// spellings — because the same concept is called ClosePrice, SellingPrice or
+// L_SoldPrice depending on which of the three you are talking to.
+const MLS_FIELD_CANDIDATES = {
+  mlsNumber: ['ListingId', 'ListingID', 'MLSNumber', 'MLS_Number', 'L_DisplayId'],
+  address: ['UnparsedAddress', 'FullStreetAddress', 'StreetAddress', 'PropertyAddress', 'Address'],
+  city: ['City', 'PostalCity', 'L_City'],
+  state: ['StateOrProvince', 'State', 'StateProvince'],
+  postal: ['PostalCode', 'ZipCode', 'Zip', 'L_Zip'],
+  county: ['CountyOrParish', 'County', 'CountyName'],
+  lat: ['Latitude', 'GeoLatitude', 'L_Latitude'],
+  lon: ['Longitude', 'GeoLongitude', 'L_Longitude'],
+  sqft: ['LivingArea', 'SqFtTotal', 'LivingAreaSquareFeet', 'TotalSqFt', 'SquareFootage'],
+  beds: ['BedroomsTotal', 'Beds', 'BedroomsCount', 'TotalBedrooms'],
+  bathsDecimal: ['BathroomsTotalDecimal', 'BathsTotal', 'TotalBaths', 'BathsFullCalc'],
+  bathsFull: ['BathroomsFull', 'BathsFull', 'FullBaths'],
+  bathsHalf: ['BathroomsHalf', 'BathsHalf', 'HalfBaths'],
+  lotSqft: ['LotSizeSquareFeet', 'LotSqFt', 'LotSizeArea'],
+  lotAcres: ['LotSizeAcres', 'Acres', 'LotSizeAcreage'],
+  year: ['YearBuilt', 'YearBuiltActual', 'L_YearBuilt'],
+  garage: ['GarageSpaces', 'GarageCapacity', 'ParkingGarageSpaces'],
+  stories: ['StoriesTotal', 'Stories', 'NumberOfStories'],
+  levels: ['Levels', 'StoriesType'],
+  pool: ['PoolPrivateYN', 'PoolYN', 'Pool', 'HasPool'],
+  subdivision: ['SubdivisionName', 'Subdivision', 'LegalSubdivision'],
+  propType: ['PropertyType', 'PropertyClass'],
+  propSubType: ['PropertySubType', 'PropertySubtype', 'SubType'],
+  listPrice: ['ListPrice', 'CurrentPrice', 'L_AskingPrice'],
+  originalListPrice: ['OriginalListPrice', 'OriginalPrice'],
+  closePrice: ['ClosePrice', 'SellingPrice', 'SoldPrice', 'SalePrice', 'L_SoldPrice'],
+  closeDate: ['CloseDate', 'SellingDate', 'SoldDate', 'SaleDate', 'ClosedDate'],
+  listDate: ['OnMarketDate', 'ListingDate', 'ListDate'],
+  contractDate: ['ListingContractDate', 'ContractDate'],
+  dom: ['DaysOnMarket', 'DOM', 'MarketTime'],
+  cdom: ['CumulativeDaysOnMarket', 'CDOM'],
+  status: ['StandardStatus', 'Status', 'ListingStatus'],
+  mlsStatus: ['MlsStatus', 'MLSStatus'],
+  concessions: ['ConcessionsAmount', 'SellerConcessionsAmount', 'ConcessionAmount'],
+  concessionsYN: ['Concessions', 'SellerConcessionsYN'],
+  concessionsComments: ['ConcessionsComments', 'ConcessionComments'],
+  remarks: ['PublicRemarks', 'Remarks', 'MarketingRemarks', 'PropertyDescription'],
+  condition: ['PropertyCondition', 'Condition'],
+  taxAnnual: ['TaxAnnualAmount', 'Taxes', 'TaxAmount', 'AnnualTaxes'],
+  taxAssessed: ['TaxAssessedValue', 'AssessedValue'],
+  parcel: ['ParcelNumber', 'APN', 'TaxParcelID', 'ParcelID'],
+  hoaFee: ['AssociationFee', 'HOAFee', 'AssocFee'],
+  hoaFreq: ['AssociationFeeFrequency', 'HOAFrequency', 'AssocFeeFreq'],
+  hoaYN: ['AssociationYN', 'HOAYN', 'HasHOA'],
+  roof: ['Roof', 'RoofType', 'Roofing'],
+  foundation: ['FoundationDetails', 'Foundation', 'FoundationType'],
+  heating: ['Heating', 'HeatingType', 'HeatingCooling'],
+  cooling: ['Cooling', 'CoolingType', 'AirConditioning'],
+  exterior: ['ConstructionMaterials', 'ExteriorFinish', 'Construction'],
+  zoning: ['Zoning', 'ZoningCode'],
+  modified: ['ModificationTimestamp', 'LastChangeTimestamp', 'ModifiedDate']
+};
+
+/**
+ * Read a RETS METADATA-TABLE and propose the MLS_FIELD_MAP that would make
+ * this app work against it. Matching is exact (case-insensitive) against the
+ * server's own StandardName first, then SystemName — a fuzzy match here would
+ * silently bind the wrong column to a price, so anything unmatched is
+ * reported as unmatched and left for a human.
+ */
+function suggestFieldMapFromMetadata(rows) {
+  const byStandard = new Map();
+  const bySystem = new Map();
+  for (const r of rows) {
+    const sys = r.SystemName || r.systemname;
+    const std = r.StandardName || r.standardname;
+    if (sys) bySystem.set(String(sys).toLowerCase(), sys);
+    if (std) byStandard.set(String(std).toLowerCase(), sys || std);
+  }
+  const map = {};
+  const unmatched = [];
+  for (const [key, candidates] of Object.entries(MLS_FIELD_CANDIDATES)) {
+    let hit = null;
+    for (const c of candidates) {
+      const k = c.toLowerCase();
+      if (byStandard.has(k)) { hit = byStandard.get(k); break; }
+      if (bySystem.has(k)) { hit = bySystem.get(k); break; }
+    }
+    if (hit) map[key] = hit; else unmatched.push(key);
+  }
+  return { map, unmatched };
+}
+
 // Escape hatch for a stuck one-session-per-login server (see ReplyCode 20022).
 // Not called on the normal path: sessions are cached and reused, and logging
 // out after every search would throw away the cache for no benefit.
@@ -1434,13 +1756,7 @@ async function retsLogout(env) {
   retsSessionCache = null;
   if (!url) return 'server published no Logout capability; local session dropped';
   const res = await fetch(url, {
-    headers: {
-      'RETS-Version': (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim(),
-      'User-Agent': (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim(),
-      'Accept': '*/*',
-      'Cookie': session.cookie || '',
-      'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
-    },
+    headers: await retsHeaders(env, 'GET', url, session),
     redirect: 'manual',
     signal: mlsSignal()
   });
@@ -1496,28 +1812,32 @@ async function retsSearch(env, opts, f) {
     Class: (env.MLS_RETS_CLASS || 'RES').trim(),
     QueryType: 'DMQL2',
     Format: 'COMPACT-DECODED',
-    StandardNames: (env.MLS_RETS_STANDARD_NAMES || '1').trim(),
+    // 0 = the server's own SystemNames, which is what /mls/probe reads out of
+    // METADATA-TABLE and what its suggested MLS_FIELD_MAP binds to. Flipping
+    // this to 1 without also rewriting the field map returns columns under
+    // their StandardNames and every mapped field reads null.
+    StandardNames: (env.MLS_RETS_STANDARD_NAMES || '0').trim(),
     Count: '1',
     Limit: String(Math.min(500, Math.max(50, (opts.limit || 20) * 10))),
     Query: retsDmql(env, opts, f)
   });
-  const headers = {
-    'RETS-Version': (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim(),
-    'User-Agent': (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim(),
-    'Accept': '*/*',
-    'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
-  };
-  if (session.cookie) headers['Cookie'] = session.cookie;
-  if (env.MLS_RETS_UA_PASSWORD) {
-    const ua = headers['User-Agent'];
-    const a1 = await md5Hex(`${ua}:${env.MLS_RETS_UA_PASSWORD}`);
-    headers['RETS-UA-Authorization'] = 'Digest ' + await md5Hex(`${a1}::${session.sessionId}:${headers['RETS-Version']}`);
-  }
-  const res = await fetch(`${searchUrl}?${q}`, { headers, redirect: 'manual', signal: mlsSignal() });
+  const full = `${searchUrl}?${q}`;
+  const res = await fetch(full, {
+    headers: await retsHeaders(env, 'GET', full, session),
+    redirect: 'manual', signal: mlsSignal()
+  });
   const xml = await res.text();
+  // A mid-session 401 means the server's nonce went stale or the session
+  // timed out. One clean re-login beats surfacing an auth error the user
+  // can do nothing about.
+  if (res.status === 401 && !opts._retried) {
+    retsSessionCache = null;
+    return await retsSearch(env, { ...opts, _retried: true }, f);
+  }
   if (!res.ok) throw new Error(`RETS search HTTP ${res.status}: ${xml.slice(0, 200)}`);
   const code = retsReplyCode(xml);
-  if (code === 20201 || code === 20208) return []; // "no records found" is not an error
+  // "No records found" is an answer, not a failure
+  if (code === 20201 || code === 20208) return [];
   if (code !== null && code !== 0) {
     throw new Error(`RETS search ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
   }
@@ -1982,6 +2302,54 @@ async function handleMlsProbe(params, env, cors) {
     }
   } catch (e) {
     out.auth.error = e.message;
+    return json(out, 200, cors);
+  }
+
+  // ---- Classic RETS: metadata discovery ----
+  // A RETS server does not speak RESO Data Dictionary, so enumerate what it
+  // really has and propose the MLS_FIELD_MAP that binds this app to it. This
+  // runs BEFORE the sample search, because on RETS that search cannot work
+  // until the class and field names are right.
+  if (transport === 'rets') {
+    try {
+      const resources = await retsGetMetadata(env, 'METADATA-RESOURCE', '0');
+      out.resources = resources.map(r => ({
+        id: r.ResourceID, standardName: r.StandardName, keyField: r.KeyField,
+        className: r.ClassCount ? undefined : undefined
+      })).filter(r => r.id);
+      out.steps.push('resources: ' + out.resources.map(r => r.id).join(', '));
+    } catch (e) {
+      out.steps.push('METADATA-RESOURCE failed: ' + e.message);
+    }
+
+    const resource = (env.MLS_RETS_RESOURCE || 'Property').trim();
+    try {
+      const classes = await retsGetMetadata(env, 'METADATA-CLASS', resource);
+      out.classes = classes.map(c => ({
+        className: c.ClassName, standardName: c.StandardName,
+        description: c.Description || c.VisibleName
+      })).filter(c => c.className);
+      out.steps.push(`classes on ${resource}: ` + out.classes.map(c => c.className).join(', '));
+    } catch (e) {
+      out.steps.push('METADATA-CLASS failed: ' + e.message);
+    }
+
+    // Field list for one class. Defaults to the configured search class; pass
+    // ?class=XXX to inspect another (the residential-lease one, say).
+    const cls = (params.get('class') || env.MLS_RETS_CLASS || 'RES').trim();
+    try {
+      const table = await retsGetMetadata(env, 'METADATA-TABLE', `${resource}:${cls}`);
+      out.steps.push(`table ${resource}:${cls} → ${table.length} fields`);
+      const suggestion = suggestFieldMapFromMetadata(table);
+      out.suggestedFieldMap = suggestion.map;
+      out.unmatchedFields = suggestion.unmatched;
+      out.fieldsSeen = table
+        .map(r => r.SystemName + (r.StandardName ? ` (${r.StandardName})` : ''))
+        .filter(Boolean).sort();
+      if (params.get('sample') === '1') out.tableSample = table.slice(0, 5);
+    } catch (e) {
+      out.steps.push(`METADATA-TABLE ${resource}:${cls} failed: ` + e.message);
+    }
     return json(out, 200, cors);
   }
 
@@ -2495,7 +2863,9 @@ export {
   mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft,
   mlsMonthlyHoa, mlsPool, mlsFormattedAddress,
   mlsToRecord, mlsToCandidate,
-  parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql,
+  parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql, retsAbsolute,
+  parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie,
+  suggestFieldMapFromMetadata, MLS_FIELD_CANDIDATES,
   odataStr, odataDay, mlsOrFilter,
   mergeRecords, milesBetween, streetMatch
 };

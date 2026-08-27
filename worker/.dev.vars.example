@@ -5,46 +5,84 @@
 #
 # The whole MLS rung is inert until a complete credential set exists, so an
 # unconfigured worker behaves exactly as it did before this file appeared.
+#
+# NTREIS serves CLASSIC RETS (CoreLogic Matrix), so that block is the live
+# one below and the RESO block is commented out. Swap them if you move to a
+# RESO Web API feed (Trestle, Bridge, MLS Grid, Spark).
 
-# ---- Which transport (omit to infer from whichever credentials are set) ----
-# MLS_TRANSPORT=reso        # reso | rets
+# ============================================================
+# Classic RETS 1.7.2 / 1.8  —  NTREIS (CoreLogic Matrix)
+# ============================================================
+# Login URL confirmed from a real NTREIS login response, 2026-08-26.
+# That response also proved the server returns ABSOLUTE capability URLs and
+# packs them space-separated onto one line — both handled.
+MLS_TRANSPORT=rets
+MLS_RETS_LOGIN_URL=https://ntrdd.mlsmatrix.com/rets/Login.ashx
+MLS_RETS_USERNAME=your-rets-username
+MLS_RETS_PASSWORD=your-rets-password
 
-# ---- RESO Web API (Trestle / Bridge / MLS Grid / Spark) ----
-MLS_API_BASE=https://api.cotality.com/trestle/odata
-MLS_TOKEN_URL=https://api.cotality.com/trestle/oidc/connect/token
-MLS_CLIENT_ID=your-client-id
-MLS_CLIENT_SECRET=your-client-secret
-MLS_SCOPE=api
-# MLS_TOKEN_AUTH=body       # body (default) | basic
-# MLS_STATIC_TOKEN=         # pre-issued bearer instead of OAuth
-# MLS_RESOURCE=Property
-# MLS_SELECT=               # payload tuning; leave EMPTY until /mls/probe
-#                           # proves the field list — naming a field the feed
-#                           # doesn't publish rejects the whole query
+# Only if NTREIS registered a User-Agent (and a UA password) for you.
+# Leave both unset if they didn't — an empty UA password means the
+# RETS-UA-Authorization header is omitted entirely, which is correct.
+# MLS_RETS_UA=
+# MLS_RETS_UA_PASSWORD=
 
-# ---- Classic RETS 1.7.2 / 1.8 (e.g. matrixrets.ntreis.net) ----
-# MLS_RETS_LOGIN_URL=https://matrixrets.ntreis.net/rets/login.ashx
-# MLS_RETS_USERNAME=
-# MLS_RETS_PASSWORD=
-# MLS_RETS_UA=              # the User-Agent the MLS registered for you
-# MLS_RETS_UA_PASSWORD=     # only if the MLS issued one
 # MLS_RETS_VERSION=RETS/1.7.2
-# MLS_RETS_CLASS=RES
-# MLS_RETS_STANDARD_NAMES=1
-# MLS_RETS_QUERY_EXTRA=     # extra DMQL2 clause, e.g. (County=|Tarrant)
+# MLS_RETS_RESOURCE=Property
+# MLS_RETS_CLASS=RES          # confirm against /mls/probe's "classes" output
+#                             # before trusting it — Matrix installs vary
+#                             # (RES / RESI / A / 1)
 
-# ---- Shaping (plain vars, not secrets) ----
+# 0 = the server's own SystemNames, which is what /mls/probe reads out of
+# METADATA-TABLE and what its suggested MLS_FIELD_MAP binds to. Do NOT flip
+# this to 1 without rewriting the map: the columns would come back under
+# their StandardNames and every mapped field would read null.
+# MLS_RETS_STANDARD_NAMES=0
+
+# Extra DMQL2 clause ANDed onto every search, e.g. (County=|Tarrant)
+# MLS_RETS_QUERY_EXTRA=
+
+# ============================================================
+# RESO Web API (Trestle / Bridge / MLS Grid / Spark)
+# ============================================================
+# MLS_API_BASE=https://api.cotality.com/trestle/odata
+# MLS_TOKEN_URL=https://api.cotality.com/trestle/oidc/connect/token
+# MLS_CLIENT_ID=your-client-id
+# MLS_CLIENT_SECRET=your-client-secret
+# MLS_SCOPE=api
+# MLS_TOKEN_AUTH=body         # body (default) | basic
+# MLS_STATIC_TOKEN=           # pre-issued bearer instead of OAuth
+# MLS_RESOURCE=Property
+# MLS_SELECT=                 # payload tuning; leave EMPTY until /mls/probe
+#                             # proves the field list — naming a field the
+#                             # feed doesn't publish rejects the whole query
+# MLS_GEO_FIELD=X_Location    # enables geo.distance() instead of a lat/lon
+#                             # box; set ONLY after the probe shows the column
+# MLS_QUERY_EXTRA=PrettyEnums=true   # Trestle: spell enum values out
+# MLS_ORIGINATING_SYSTEM=NTREIS      # REQUIRED on an aggregator: Trestle
+#                                    # serves 90+ MLSs behind one credential
+
+# ============================================================
+# Shaping (transport-independent; plain vars, not secrets)
+# ============================================================
 MLS_SYSTEM_NAME=NTREIS
-MLS_ORIGINATING_SYSTEM=NTREIS   # REQUIRED on an aggregator: Trestle serves
-                                # 90+ MLSs behind one credential
+
+# Written from /mls/probe's `suggestedFieldMap` output. On classic RETS this
+# is not optional — a RETS server does not use RESO Data Dictionary names.
+# MLS_FIELD_MAP={"closePrice":"L_SoldPrice","beds":"LM_Int1_1"}
+
+# Status values as THIS server spells them. Read them off the probe's
+# metadata rather than assuming — Matrix lookups are often single letters
+# (A/P/S/C) rather than words.
+# MLS_STATUS_CLOSED=Closed
+# MLS_STATUS_ACTIVE=Active
+# MLS_STATUS_PENDING=Pending,ActiveUnderContract
+
+# Property-type / class filtering (RESO transport only; on RETS the class
+# does this job)
 # MLS_PROPERTY_TYPES=Residential
 # MLS_SUBTYPES=Single Family Residence
 # MLS_LEASE_TYPES=Residential Lease
-# MLS_GEO_FIELD=X_Location      # enables geo.distance() instead of a lat/lon
-                                # box — set ONLY after /mls/probe shows the
-                                # column exists
-# MLS_QUERY_EXTRA=PrettyEnums=true   # Trestle: spell enum values out
-# MLS_STATUS_PENDING=Pending,ActiveUnderContract
-# MLS_FIELD_MAP={"sqft":"LivingArea"}  # per-field overrides, written from
-                                       # /mls/probe's fieldsSeen output
+
+# The licence's own required credit line, rendered under every comp list.
 MLS_ATTRIBUTION=Information deemed reliable but not guaranteed. Data provided by NTREIS.

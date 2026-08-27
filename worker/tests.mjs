@@ -376,6 +376,53 @@ test('rets: capability URLs are read out of the login response', () => {
     eq(W.retsReplyCode(RETS_LOGIN_XML), 0);
 });
 
+// Verbatim from NTREIS's Matrix server, captured live 2026-08-26. Every
+// key=value sits on ONE line separated by spaces, not one per line as the
+// RETS spec's examples show — a line-based parser reads the whole block as a
+// single key, finds no Search URL, and every later request dies with a
+// misleading "no Search capability" error.
+const NTREIS_LOGIN_XML = '<RETS ReplyCode="0" ReplyText="Operation Success.">\n'
+    + '<RETS-RESPONSE> MemberName= User=REDACTED_NID,NULL,NULL,REDACTED_NID Broker= '
+    + 'MetadataVersion=1.00.05364 MetadataTimestamp=2026-08-26T14:21:52Z '
+    + 'MinMetadataTimestamp=2026-08-26T14:21:52Z '
+    + 'Login=https://ntrdd.mlsmatrix.com/rets/Login.ashx '
+    + 'Logout=https://ntrdd.mlsmatrix.com/rets/Logout.ashx '
+    + 'Search=https://ntrdd.mlsmatrix.com/rets/Search.ashx '
+    + 'GetMetadata=https://ntrdd.mlsmatrix.com/rets/GetMetadata.ashx '
+    + 'GetObject=https://ntrdd.mlsmatrix.com/rets/GetObject.ashx '
+    + 'Update=https://ntrdd.mlsmatrix.com/rets/Update.ashx '
+    + 'PostObject=https://ntrdd.mlsmatrix.com/rets/PostObject.ashx </RETS-RESPONSE>\n</RETS>';
+
+test('rets: NTREIS Matrix puts every capability on ONE line — all of them are still read', () => {
+    const caps = W.retsCapabilities(NTREIS_LOGIN_XML);
+    eq(caps.Search, 'https://ntrdd.mlsmatrix.com/rets/Search.ashx');
+    eq(caps.GetMetadata, 'https://ntrdd.mlsmatrix.com/rets/GetMetadata.ashx');
+    eq(caps.Logout, 'https://ntrdd.mlsmatrix.com/rets/Logout.ashx');
+    eq(caps.GetObject, 'https://ntrdd.mlsmatrix.com/rets/GetObject.ashx');
+    eq(W.retsReplyCode(NTREIS_LOGIN_XML), 0);
+});
+
+test('rets: an EMPTY capability value does not swallow the pair after it', () => {
+    const caps = W.retsCapabilities(NTREIS_LOGIN_XML);
+    eq(caps.MemberName, '', 'MemberName= is empty');
+    eq(caps.User, 'REDACTED_NID,NULL,NULL,REDACTED_NID', 'and User survives it');
+    eq(caps.Broker, '', 'Broker= is empty');
+    eq(caps.MetadataVersion, '1.00.05364', 'and MetadataVersion survives it');
+});
+
+test('rets: the multi-line form still allows spaces inside a value', () => {
+    const caps = W.retsCapabilities('<RETS-RESPONSE>\nMemberName=Jane Q Realtor\nSearch=/rets/Search\n</RETS-RESPONSE>');
+    eq(caps.MemberName, 'Jane Q Realtor', 'a spaced value is not truncated');
+    eq(caps.Search, '/rets/Search');
+});
+
+test('rets: absolute capability URLs are used as-is, relative ones resolve against the login host', () => {
+    const session = { base: 'https://ntrdd.mlsmatrix.com', caps: W.retsCapabilities(NTREIS_LOGIN_XML) };
+    eq(W.retsAbsolute(session, session.caps.Search), 'https://ntrdd.mlsmatrix.com/rets/Search.ashx');
+    eq(W.retsAbsolute(session, '/rets/Search'), 'https://ntrdd.mlsmatrix.com/rets/Search');
+    eq(W.retsAbsolute(session, null), null);
+});
+
 test('rets: a non-zero ReplyCode is surfaced, not swallowed', () => {
     eq(W.retsReplyCode('<RETS ReplyCode="20036" ReplyText="Miscellaneous error"/>'), 20036);
     eq(W.retsReplyCode('no xml here'), null);
@@ -430,6 +477,260 @@ test('rets: DMQL2 combines status and a close-date floor', () => {
 test('rets: DMQL2 is never emitted empty (an empty query is a protocol error)', () => {
     const q = W.retsDmql({}, {}, W.mlsFields({}));
     assert(q.length > 0 && q.includes('='), 'fallback query: ' + q);
+});
+
+// ---- MD5 and HTTP Digest auth ----
+// Implemented in-worker rather than via crypto.subtle.digest('MD5') — that
+// call exists only on Cloudflare, so the digest paths would otherwise be
+// untestable anywhere. Verified against the published RFC vectors.
+
+test('md5: every RFC 1321 test vector matches', () => {
+    eq(W.md5Hex(''), 'd41d8cd98f00b204e9800998ecf8427e');
+    eq(W.md5Hex('a'), '0cc175b9c0f1b6a831c399e269772661');
+    eq(W.md5Hex('abc'), '900150983cd24fb0d6963f7d28e17f72');
+    eq(W.md5Hex('message digest'), 'f96b697d7cb7938d525a2f31aaf161d0');
+    eq(W.md5Hex('abcdefghijklmnopqrstuvwxyz'), 'c3fcd3d76192e4007dfb496cca67e13b');
+    eq(W.md5Hex('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'),
+        'd174ab98d277d9f5a5611c2c9f419d9f');
+    eq(W.md5Hex('12345678901234567890123456789012345678901234567890123456789012345678901234567890'),
+        '57edf4a22be3c955ac49da2e2107b67a');
+});
+
+test('md5: block-boundary lengths pad correctly (55, 56, 64 bytes)', () => {
+    // 56 is the length at which the padding spills into a second block —
+    // the classic off-by-one in a hand-rolled MD5
+    eq(W.md5Hex('a'.repeat(55)), 'ef1772b6dff9a122358552954ad0df65');
+    eq(W.md5Hex('a'.repeat(56)), '3b0c8ac703f828b04c6c197006d17218');
+    eq(W.md5Hex('a'.repeat(64)), '014842d480b571495a4a0363793f7367');
+});
+
+test('md5: multi-byte UTF-8 hashes its bytes, not its code units', () => {
+    // Cross-checked against Node's own crypto.createHash('md5'). A password
+    // or realm with an accent in it must not silently hash differently here
+    // than it does on the server.
+    eq(W.md5Hex('é'), '66ddcd97cfdeabb2f6fb8a999b4bc76f');           // 2 bytes
+    eq(W.md5Hex('naïve café'), '8feed1b062e175e77b3769d990f9e527');
+    eq(W.md5Hex('日本語'), '00110af8b4393ef3f72c50be5b332bec');        // 3 bytes each
+});
+
+test('digest: the RFC 2617 worked example reproduces exactly', () => {
+    const c = W.parseDigestChallenge(
+        'Digest realm="testrealm@host.com", qop="auth,auth-int", '
+        + 'nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", opaque="5ccc069c403ebaf9f0171e9517f40e41"');
+    eq(c.realm, 'testrealm@host.com');
+    eq(c.nonce, 'dcd98b7102dd2f0e8b11d0f600bfb0c093');
+    const ha1 = W.md5Hex('Mufasa:testrealm@host.com:Circle Of Life');
+    const ha2 = W.md5Hex('GET:/dir/index.html');
+    eq(ha1, '939e7578ed9e3c518a452acee763bce9', 'HA1');
+    eq(ha2, '39aff3a2bab6126f332b942af96d3366', 'HA2');
+    eq(W.md5Hex(ha1 + ':' + c.nonce + ':00000001:0a4f113b:auth:' + ha2),
+        '6629fae49393a05397450978507c4ef1', 'response');
+});
+
+test('digest: the header carries every field a qop=auth challenge requires', async () => {
+    const c = W.parseDigestChallenge(
+        'Digest realm="r", qop="auth", nonce="n1", opaque="op", algorithm=MD5');
+    const h = await W.digestAuthHeader(c, {
+        username: 'u', password: 'p', method: 'GET', uri: '/rets/Search.ashx?x=1', nc: 3
+    });
+    assert(h.startsWith('Digest '), 'scheme');
+    for (const f of ['username="u"', 'realm="r"', 'nonce="n1"', 'uri="/rets/Search.ashx?x=1"',
+        'opaque="op"', 'algorithm=MD5', 'qop=auth', 'nc=00000003']) {
+        assert(h.includes(f), 'missing ' + f + ' in: ' + h);
+    }
+    assert(/cnonce="[0-9a-f]{16}"/.test(h), 'a client nonce is generated');
+    assert(/response="[0-9a-f]{32}"/.test(h), 'response digest present');
+});
+
+test('digest: without qop the response omits nc/cnonce (RFC 2069 form)', async () => {
+    const c = W.parseDigestChallenge('Digest realm="r", nonce="n1"');
+    const h = await W.digestAuthHeader(c, { username: 'u', password: 'p', method: 'GET', uri: '/x' });
+    assert(!h.includes('qop='), 'no qop');
+    assert(!h.includes('nc='), 'no nonce count');
+    assert(!h.includes('cnonce='), 'no client nonce');
+    eq(/response="([0-9a-f]{32})"/.exec(h)[1],
+        W.md5Hex(W.md5Hex('u:r:p') + ':n1:' + W.md5Hex('GET:/x')), 'legacy response form');
+});
+
+test('digest: auth-int is never selected — only auth is implemented', async () => {
+    const c = W.parseDigestChallenge('Digest realm="r", qop="auth-int", nonce="n1"');
+    const h = await W.digestAuthHeader(c, { username: 'u', password: 'p', method: 'GET', uri: '/x' });
+    assert(!h.includes('qop='), 'auth-int alone falls back to the qop-less form');
+});
+
+test('digest: the URI signed is path AND query — a Search.ashx call is all query', () => {
+    eq(W.digestUri('https://ntrdd.mlsmatrix.com/rets/Search.ashx?SearchType=Property&Class=RES'),
+        '/rets/Search.ashx?SearchType=Property&Class=RES');
+    eq(W.digestUri('https://ntrdd.mlsmatrix.com/rets/Login.ashx'), '/rets/Login.ashx');
+});
+
+test('digest: a non-Digest or malformed challenge yields null, not a broken header', () => {
+    eq(W.parseDigestChallenge('Basic realm="x"'), null);
+    eq(W.parseDigestChallenge(''), null);
+    eq(W.parseDigestChallenge(null), null);
+    eq(W.parseDigestChallenge('Digest realm="x"'), null, 'no nonce = unusable challenge');
+});
+
+test('rets: the UA-Authorization digest matches the RETS 1.7.2 section 3.10 formula', () => {
+    // MD5( MD5(product:UA-password) : request-id : session-id : version )
+    // with an empty request-id, which is the doubled colon
+    const a1 = W.md5Hex('MyApp/1.0:uapass');
+    eq(W.md5Hex(a1 + '::sess123:RETS/1.7.2'),
+        W.md5Hex(W.md5Hex('MyApp/1.0:uapass') + '::' + 'sess123' + ':' + 'RETS/1.7.2'));
+    // and at login, before any session cookie exists, the session slot is empty too
+    assert(W.md5Hex(a1 + ':::RETS/1.7.2') !== W.md5Hex(a1 + '::sess123:RETS/1.7.2'),
+        'the empty-session form differs from the with-session form');
+});
+
+// ---- Cookie handling ----
+// Workers has no cookie jar, so the RETS session is carried by hand. NTREIS
+// sits behind an AWS load balancer that plants stickiness cookies on the 401
+// CHALLENGE, before the session cookie exists — losing either one sends the
+// authenticated request to a different backend from the one holding the nonce.
+
+test('cookies: the challenge jar and the login jar are merged, freshest winning', () => {
+    const fromChallenge = 'AWSALB=oldvalue; AWSALBCORS=oldvalue';
+    const fromLogin = 'RETS-Session-ID=abc123; AWSALB=newvalue';
+    const merged = W.mergeCookies(fromChallenge, fromLogin);
+    assert(merged.includes('RETS-Session-ID=abc123'), 'session id kept: ' + merged);
+    assert(merged.includes('AWSALB=newvalue'), 'fresher stickiness wins: ' + merged);
+    assert(!merged.includes('AWSALB=oldvalue'), 'and the stale one is gone: ' + merged);
+    assert(merged.includes('AWSALBCORS=oldvalue'),
+        'a cookie only the challenge set still survives: ' + merged);
+});
+
+test('cookies: merging with nothing is a no-op, not a crash', () => {
+    eq(W.mergeCookies('', 'A=1'), 'A=1');
+    eq(W.mergeCookies('A=1', ''), 'A=1');
+    eq(W.mergeCookies(null, undefined), '');
+});
+
+test('cookies: Set-Cookie attributes are stripped, only name=value is replayed', () => {
+    // A real NTREIS 401 sets: AWSALB=...; Expires=...; Path=/; SameSite=None; Secure
+    const res = {
+        headers: {
+            getSetCookie: () => [
+                'AWSALB=7x/qeAsa+7pLQl5h; Expires=Thu, 03 Sep 2026 19:57:08 GMT; Path=/',
+                'AWSALBCORS=7x/qeAsa+7pLQl5h; Path=/; SameSite=None; Secure'
+            ],
+            get: () => null
+        }
+    };
+    const jar = W.retsCookie(res);
+    assert(jar.includes('AWSALB=7x/qeAsa+7pLQl5h'), 'value preserved verbatim: ' + jar);
+    assert(!/Expires|Path|SameSite|Secure/.test(jar), 'attributes stripped: ' + jar);
+});
+
+test('cookies: a runtime without getSetCookie still reads the combined header', () => {
+    const res = {
+        headers: {
+            get: (n) => n === 'set-cookie'
+                ? 'RETS-Session-ID=s1; Path=/,AWSALB=v2; Path=/'
+                : null
+        }
+    };
+    const jar = W.retsCookie(res);
+    assert(jar.includes('RETS-Session-ID=s1'), jar);
+    assert(jar.includes('AWSALB=v2'), jar);
+});
+
+test('digest: the live NTREIS challenge parses (captured 2026-08-27)', () => {
+    const c = W.parseDigestChallenge(
+        'Digest realm="MATRIX", nonce="MjAyNi0wOC0yNyAyMDo1NzowOC40NTc", '
+        + 'opaque="0000000000000000", stale=false, algorithm=MD5, qop="auth"');
+    eq(c.realm, 'MATRIX');
+    eq(c.nonce, 'MjAyNi0wOC0yNyAyMDo1NzowOC40NTc');
+    eq(c.opaque, '0000000000000000');
+    eq(c.algorithm, 'MD5');
+    eq(c.qop, 'auth');
+    eq(c.stale, 'false', 'a bare unquoted value parses too');
+});
+
+// ---- RETS metadata → suggested field map ----
+// A classic RETS server does NOT speak RESO Data Dictionary. The probe reads
+// METADATA-TABLE and proposes the MLS_FIELD_MAP that binds this app to
+// whatever the server actually calls things.
+
+// Shaped like a Matrix METADATA-TABLE COMPACT response: system names on the
+// left, the older RETS standard names in the StandardName column.
+const MATRIX_TABLE = [
+    { SystemName: 'L_DisplayId', StandardName: 'ListingID', LongName: 'MLS Number' },
+    { SystemName: 'L_Address', StandardName: 'FullStreetAddress', LongName: 'Address' },
+    { SystemName: 'L_City', StandardName: 'City', LongName: 'City' },
+    { SystemName: 'L_State', StandardName: 'StateOrProvince', LongName: 'State' },
+    { SystemName: 'L_Zip', StandardName: 'PostalCode', LongName: 'Zip Code' },
+    { SystemName: 'LMD_MP_Latitude', StandardName: 'Latitude', LongName: 'Latitude' },
+    { SystemName: 'LMD_MP_Longitude', StandardName: 'Longitude', LongName: 'Longitude' },
+    { SystemName: 'LM_Int4_3', StandardName: 'LivingArea', LongName: 'SqFt Total' },
+    { SystemName: 'LM_Int1_1', StandardName: 'Beds', LongName: 'Bedrooms' },
+    { SystemName: 'LM_Int1_2', StandardName: 'BathsFull', LongName: 'Full Baths' },
+    { SystemName: 'LM_Int1_3', StandardName: 'BathsHalf', LongName: 'Half Baths' },
+    { SystemName: 'L_AskingPrice', StandardName: 'ListPrice', LongName: 'List Price' },
+    { SystemName: 'L_SoldPrice', StandardName: 'SellingPrice', LongName: 'Sold Price' },
+    { SystemName: 'L_ClosingDate', StandardName: 'SellingDate', LongName: 'Close Date' },
+    { SystemName: 'L_Status', StandardName: 'Status', LongName: 'Status' },
+    { SystemName: 'L_Remarks', StandardName: 'PublicRemarks', LongName: 'Public Remarks' },
+    { SystemName: 'LM_Int2_1', StandardName: 'YearBuilt', LongName: 'Year Built' },
+    { SystemName: 'L_UpdateDate', StandardName: 'ModificationTimestamp', LongName: 'Last Change' },
+    { SystemName: 'LM_Char10_9', StandardName: '', LongName: 'Some Local Field' }
+];
+
+test('rets metadata: the suggested map binds RETS-era names this app never guesses', () => {
+    const { map } = W.suggestFieldMapFromMetadata(MATRIX_TABLE);
+    // The whole point: RESO calls it ClosePrice, this server calls it SellingPrice
+    eq(map.closePrice, 'L_SoldPrice', 'sold price found via the SellingPrice standard name');
+    eq(map.closeDate, 'L_ClosingDate');
+    eq(map.beds, 'LM_Int1_1', 'RETS "Beds", not RESO "BedroomsTotal"');
+    eq(map.status, 'L_Status', 'RETS "Status", not RESO "StandardStatus"');
+    eq(map.address, 'L_Address', 'RETS "FullStreetAddress", not RESO "UnparsedAddress"');
+    eq(map.sqft, 'LM_Int4_3');
+    eq(map.remarks, 'L_Remarks');
+});
+
+test('rets metadata: it maps to the SYSTEM name, since that is what a search returns', () => {
+    const { map } = W.suggestFieldMapFromMetadata(MATRIX_TABLE);
+    // Matched via StandardName but bound to SystemName — a StandardNames=0
+    // search returns L_SoldPrice columns, not SellingPrice ones
+    eq(map.listPrice, 'L_AskingPrice');
+    eq(map.lat, 'LMD_MP_Latitude');
+});
+
+test('rets metadata: what it cannot find is REPORTED, never fuzzy-matched', () => {
+    const { map, unmatched } = W.suggestFieldMapFromMetadata(MATRIX_TABLE);
+    assert(unmatched.includes('concessions'), 'this server has no concessions field');
+    assert(unmatched.includes('dom'), 'and no days-on-market');
+    assert(!('concessions' in map), 'an unmatched key must not appear in the map at all');
+    // 'LM_Char10_9' has no standard name and matches no candidate — binding it
+    // to anything would be worse than leaving the gap visible
+    assert(!Object.values(map).includes('LM_Char10_9'), 'no wild guesses');
+});
+
+test('rets metadata: a RESO-conformant table maps straight through', () => {
+    const reso = [
+        { SystemName: 'ClosePrice', StandardName: 'ClosePrice' },
+        { SystemName: 'BedroomsTotal', StandardName: 'BedroomsTotal' },
+        { SystemName: 'StandardStatus', StandardName: 'StandardStatus' }
+    ];
+    const { map } = W.suggestFieldMapFromMetadata(reso);
+    eq(map.closePrice, 'ClosePrice');
+    eq(map.beds, 'BedroomsTotal');
+    eq(map.status, 'StandardStatus');
+});
+
+test('rets metadata: every logical field the normalizers read has a candidate list', () => {
+    // A field with no candidates could never be auto-mapped, and the gap
+    // would only show up as a silently null column in production
+    const NEEDED = ['address', 'lat', 'lon', 'sqft', 'beds', 'bathsFull', 'bathsHalf', 'year',
+        'closePrice', 'closeDate', 'listPrice', 'status', 'remarks', 'lotAcres', 'lotSqft',
+        'garage', 'pool', 'subdivision', 'propType', 'postal', 'city', 'county'];
+    const missing = NEEDED.filter(k => !W.MLS_FIELD_CANDIDATES[k]);
+    assert(missing.length === 0, 'no candidate list for: ' + missing.join(', '));
+});
+
+test('rets metadata: an empty or garbage table suggests nothing rather than guessing', () => {
+    const { map, unmatched } = W.suggestFieldMapFromMetadata([]);
+    eq(Object.keys(map).length, 0);
+    assert(unmatched.length > 20, 'everything is reported unmatched');
 });
 
 // ---- Shape contract with the rest of the worker ----
