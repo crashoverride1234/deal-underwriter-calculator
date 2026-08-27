@@ -1492,3 +1492,55 @@ input[type="range"]::-webkit-slider-thumb:active {
         background: transparent !important;
     }
 }
+
+/* ---- Data provenance: recorded MLS closing vs list-at-sale proxy ---- */
+/* The whole point of the MLS rung is that some numbers are facts and some
+   are estimates. These two classes are the only visual difference, so they
+   have to read at a glance without shouting. */
+.truth-verified {
+    color: var(--accent-success);
+    font-weight: 600;
+}
+
+.truth-proxy {
+    color: var(--accent-warning);
+    font-weight: 600;
+}
+
+/* Price provenance line under a comp card's address */
+.comp-price-truth {
+    margin-top: 0.3rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+.candidate-badge {
+    font-size: 0.66rem;
+    letter-spacing: 0.02em;
+    margin-left: 0.35rem;
+}
+
+/* Required MLS compilation attribution — present but never competing with
+   the data it sits under */
+.mls-attribution {
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-color, rgba(148, 163, 184, 0.2));
+    font-size: 0.65rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.settings-note {
+    margin-top: 0.75rem;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.settings-subnote {
+    margin-top: 0.35rem;
+    font-size: 0.68rem;
+    opacity: 0.85;
+}

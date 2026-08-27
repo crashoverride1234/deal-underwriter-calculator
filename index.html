@@ -336,12 +336,18 @@
                             <label for="worker-url">Data Proxy URL (leave blank for built-in)</label>
                             <input type="text" id="worker-url" placeholder="Built-in proxy active" autocomplete="off" spellcheck="false">
                         </div>
+                        <div class="settings-note" id="mls-status">MLS feed: checking…</div>
+                        <div class="settings-note settings-subnote">
+                            MLS credentials are held as secrets on the data proxy and never in this browser —
+                            a data licence forbids shipping them to a client. The keys below are the
+                            <strong>fallbacks</strong> used when the feed is unreachable or unlicensed.
+                        </div>
                         <div class="form-group" style="margin-top: 0.75rem;">
-                            <label for="rentcast-api-key">RentCast API Key</label>
+                            <label for="rentcast-api-key">RentCast API Key (fallback)</label>
                             <input type="password" id="rentcast-api-key" placeholder="Free: 50 lookups/mo" autocomplete="off">
                         </div>
                         <div class="form-group" style="margin-top: 0.75rem;">
-                            <label for="melissa-api-key">Melissa API Key (optional fallback)</label>
+                            <label for="melissa-api-key">Melissa API Key (fallback)</label>
                             <input type="password" id="melissa-api-key" placeholder="Free: ~1,000 credits/mo" autocomplete="off">
                         </div>
                     </details>

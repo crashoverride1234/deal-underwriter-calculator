@@ -282,10 +282,18 @@
                 const bedsOk = has(subject.beds) && has(c.beds);
                 const bathsOk = has(subject.baths) && has(c.baths);
 
-                // Time first: percentage adjustments below apply to the
+                // URAR grid order: the "Sale or Financing Concessions" line
+                // comes off the contract price BEFORE "Date of Sale/Time", so
+                // everything below reads a CASH-EQUIVALENT basis. Only an MLS
+                // feed knows concessions; scraped sources leave it 0, which
+                // makes cashEquivalent === salePrice and changes nothing.
+                const concessions = Math.min(num(c.concessions), salePrice);
+                const cashEquivalent = salePrice - concessions;
+
+                // Time next: percentage adjustments below apply to the
                 // time-adjusted (current market) basis, per appraiser practice
-                const timeAdj = salePrice * (apprPct / 100) * (num(c.monthsAgo) / 12);
-                const basis = salePrice + timeAdj;
+                const timeAdj = cashEquivalent * (apprPct / 100) * (num(c.monthsAgo) / 12);
+                const basis = cashEquivalent + timeAdj;
 
                 // GLA netted of room footprints: the area a bedroom/bath
                 // occupies is paid once, inside the flat room adjustment
@@ -314,6 +322,7 @@
                             : (!isSingleStory(subject.stories) && isSingleStory(c.stories) ? -storyAdj : 0))
                         : 0,
                     condition: basis * num(condPct[compCondition]) / 100,
+                    concessions: -concessions,
                     time: timeAdj
                 };
                 // Qualitative grid: % of the time-adjusted basis, signed by rating
@@ -338,12 +347,17 @@
                 return {
                     label: c.label || '',
                     salePrice,
+                    concessions,
+                    cashEquivalent,
                     adjustments,
                     overlaps,
                     netAdjustment,
                     grossAdjPct,
                     adjustedValue: salePrice + netAdjustment,
-                    pricePerSqft: num(c.sqft) > 0 ? salePrice / num(c.sqft) : 0,
+                    // $/sqft off the cash-equivalent price: a $15k concession
+                    // baked into the contract price overstates what the
+                    // market actually paid per foot
+                    pricePerSqft: num(c.sqft) > 0 ? cashEquivalent / num(c.sqft) : 0,
                     // Perfect comp = weight 1, fading linearly; floor keeps every comp counted
                     weight: Math.max(0.1, 1 - grossAdjPct / 50),
                     flagged: grossAdjPct > 25 // appraisal convention: >25% gross = weak comp
@@ -524,17 +538,24 @@
             return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
         };
         const buckets = [
-            { key: '0-3', label: '0–3 mo', max: 3, prices: [] },
-            { key: '4-6', label: '4–6 mo', max: 6, prices: [] },
-            { key: '7-12', label: '7–12 mo', max: 12, prices: [] }
+            { key: '0-3', label: '0–3 mo', max: 3, prices: [], doms: [] },
+            { key: '4-6', label: '4–6 mo', max: 6, prices: [], doms: [] },
+            { key: '7-12', label: '7–12 mo', max: 12, prices: [], doms: [] }
         ];
         (solds || []).forEach(s => {
             if (!s || !s.soldDate || !(num(s.price) > 0)) return;
             const months = (now - new Date(s.soldDate).getTime()) / (86400000 * 30.44);
             if (!Number.isFinite(months) || months < 0 || months > 12) return;
-            (buckets.find(b => months < b.max) || buckets[2]).prices.push(num(s.price));
+            const bucket = buckets.find(b => months < b.max) || buckets[2];
+            bucket.prices.push(num(s.price));
+            // Days on market only exists on a real MLS row; scraped solds
+            // leave it undefined and the DOM read stays null
+            if (num(s.dom) > 0) bucket.doms.push(num(s.dom));
         });
-        const out = buckets.map(b => ({ key: b.key, label: b.label, count: b.prices.length, medianPrice: median(b.prices) }));
+        const out = buckets.map(b => ({
+            key: b.key, label: b.label, count: b.prices.length,
+            medianPrice: median(b.prices), medianDom: median(b.doms)
+        }));
         const newest = out.find(b => b.medianPrice != null);
         const oldest = [...out].reverse().find(b => b.medianPrice != null);
         let direction = null;
@@ -543,7 +564,10 @@
             changePct = ((newest.medianPrice - oldest.medianPrice) / oldest.medianPrice) * 100;
             direction = changePct > 3 ? 'rising' : changePct < -3 ? 'falling' : 'flat';
         }
-        return { buckets: out, direction, changePct };
+        // Trailing-year DOM across every bucket — the holding-period sanity
+        // check a flip pro-forma needs, and null unless the feed carries it
+        const allDoms = buckets.reduce((a, b) => a.concat(b.doms), []);
+        return { buckets: out, direction, changePct, medianDom: median(allDoms) };
     }
 
     // ---- Rent from comps ----
@@ -553,22 +577,28 @@
     function rentFromComps(subject, comps) {
         const usable = (comps || []).filter(c => c && num(c.rent) > 0);
         if (!usable.length) return null;
+        // A CLOSED lease is a transacted rent; an active listing is an ask.
+        // When the feed carries closed leases the asks are dropped outright
+        // rather than averaged in — mixing them biases the read upward.
+        const closed = usable.filter(c => c.status === 'closed');
+        const pool = closed.length ? closed : usable;
+        const basis = closed.length ? 'closed' : 'listed';
         const median = (arr) => {
             const s = [...arr].sort((a, b) => a - b);
             const m = Math.floor(s.length / 2);
             return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
         };
         const sqft = num(subject && subject.sqft);
-        const withSqft = usable.filter(c => num(c.sqft) > 0);
+        const withSqft = pool.filter(c => num(c.sqft) > 0);
         let ppsfMedian = null;
         let estimate;
         if (sqft > 0 && withSqft.length) {
             ppsfMedian = median(withSqft.map(c => num(c.rent) / num(c.sqft)));
             estimate = ppsfMedian * sqft;
         } else {
-            estimate = median(usable.map(c => num(c.rent)));
+            estimate = median(pool.map(c => num(c.rent)));
         }
-        return { estimate: Math.round(estimate / 25) * 25, ppsfMedian, used: usable.length };
+        return { estimate: Math.round(estimate / 25) * 25, ppsfMedian, used: pool.length, basis };
     }
 
     // ---- Rehab reality helpers ----
@@ -706,15 +736,31 @@
     const DATED_RX = /\bas[\s-]?is\b|fixer[\s-]?upper|\bhandyman\b|investor special|needs?\s+(?:some\s+)?(?:work|updating|updates|repairs?|renovation|rehab|tlc)|\btlc\b|sweat equity|bring your (?:vision|toolbox|contractor|ideas)|original condition|renovation[\s-]ready|great bones|(?:full|tons|lots) of potential|cash[\s-]?only|sold for lot value/;
     const PARTIAL_RX = /(?:remodel|renovat|updat|restor)\w*|new (?:roof|hvac|a\/?c|floor\w*|windows|kitchen|carpet|paint|appliances|water heater|plumbing|electrical)/;
 
-    function classifyCondition(text) {
+    // A structured MLS PropertyCondition beats mining marketing prose — it's
+    // the listing agent's own coded answer. Matched on substrings because the
+    // enumeration differs per MLS ("Updated/Remodeled", "Fixer", "Resale"...).
+    const FIELD_RENOVATED_RX = /new construction|updated|remodel|renovat|rebuilt/;
+    const FIELD_DATED_RX = /fixer|tear[\s-]?down|needs? (?:work|repair)|unlivable|shell|to be (?:built|restored)/;
+    const FIELD_AVERAGE_RX = /average|resale|pre[\s-]?owned|good condition|well maintained/;
+
+    function classifyCondition(text, structured) {
+        if (structured) {
+            const f = String(structured).toLowerCase();
+            // Order mirrors the remarks path: full-scope beats distress beats
+            // "average", so a "Updated/Remodeled, Resale" multi-value reads
+            // renovated rather than average
+            if (FIELD_RENOVATED_RX.test(f)) return { condition: 'renovated', evidence: String(structured), from: 'field' };
+            if (FIELD_DATED_RX.test(f)) return { condition: 'dated', evidence: String(structured), from: 'field' };
+            if (FIELD_AVERAGE_RX.test(f)) return { condition: 'average', evidence: String(structured), from: 'field' };
+        }
         if (!text) return null;
         const t = String(text).toLowerCase();
         const reno = t.match(RENOVATED_RX);
-        if (reno) return { condition: 'renovated', evidence: reno[0] };
+        if (reno) return { condition: 'renovated', evidence: reno[0], from: 'remarks' };
         const dated = t.match(DATED_RX);
-        if (dated) return { condition: 'dated', evidence: dated[0] };
+        if (dated) return { condition: 'dated', evidence: dated[0], from: 'remarks' };
         const partial = t.match(PARTIAL_RX);
-        if (partial) return { condition: 'average', evidence: partial[0] };
+        if (partial) return { condition: 'average', evidence: partial[0], from: 'remarks' };
         return null;
     }
 

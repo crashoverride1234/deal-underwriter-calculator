@@ -6,14 +6,22 @@
  * server-side as Worker secrets so they never ship in client code.
  *
  * Routes (all GET):
- *   /health                        → { ok, providers } — connectivity check
+ *   /health                        → { ok, providers, mls } — connectivity
+ *   /mls/probe[?latitude=&longitude=][&sample=1]
+ *                                  → MLS feed diagnostic: which transport
+ *                                    authenticated, how far the handshake
+ *                                    got, the field names the server really
+ *                                    publishes, and the normalized record
+ *                                    they map to. Field NAMES only unless
+ *                                    sample=1 (listing content is licensed)
  *   /lookup?address=...[&mpr_id=][&latitude=&longitude=]
- *                                  → unified ladder: TAD parcels (keyless,
- *                                    Tarrant County only, enriched with the
- *                                    keyless realtor.com rung for the tax
- *                                    bill) → RentCast (secret) → Melissa
- *                                    (secret) → realtor.com (keyless);
- *                                    first hit wins, source labeled
+ *                                  → unified ladder: MLS feed (licensed,
+ *                                    PRIMARY — overlays every rung below it)
+ *                                    → TAD parcels (keyless, Tarrant County
+ *                                    only, enriched with the keyless
+ *                                    realtor.com rung for the tax bill) →
+ *                                    RentCast (secret) → Melissa (secret) →
+ *                                    realtor.com (keyless); source labeled
  *   /hail?latitude=&longitude=[&radius=]
  *                                  → NWS local storm reports (IEM CSV,
  *                                    keyless): hail counts/magnitudes near
@@ -21,20 +29,28 @@
  *                                    upstream CSV is cached per isolate-day
  *   /comps?address=... | latitude=&longitude=
  *          [&sqft=&beds=&baths=&radius=&months=&limit=]
- *                                  → comp candidates near the subject:
- *                                    realtor.com sold search (keyless) merged
- *                                    with RentCast AVM comparables (secret,
- *                                    correlation-ranked), deduped by address
+ *                                  → comp candidates near the subject: MLS
+ *                                    CLOSED sales first (real prices); below
+ *                                    3 of those, realtor.com sold search
+ *                                    (keyless) merges with RentCast AVM
+ *                                    comparables (secret, correlation-ranked)
+ *                                    as list-price proxies. Deduped by
+ *                                    address; response carries priceTruth
  *   /market?latitude=&longitude= | address=... [&radius=]
  *                                  → live market scan: recent solds (12mo),
- *                                    actives and pendings near the point
- *                                    (realtor.com keyless) for absorption
- *                                    auto-fill, trend buckets, competition
+ *                                    actives and pendings near the point —
+ *                                    MLS when licensed (true close prices +
+ *                                    real DOM + a separate Active Under
+ *                                    Contract bucket), realtor.com keyless
+ *                                    otherwise. Feeds absorption auto-fill,
+ *                                    trend buckets, competition
  *   /rent?latitude=&longitude=[&zip=&sqft=&beds=&baths=]
- *                                  → rent ladder: RentCast rent AVM (secret)
- *                                    + HUD SAFMR by zip (HUD_API_KEY secret,
- *                                    DFW metro) + realtor.com active rentals
- *                                    (keyless)
+ *                                  → rent ladder: MLS CLOSED leases first
+ *                                    (transacted rents, free) → RentCast rent
+ *                                    AVM (secret, billable — skipped when the
+ *                                    feed already answered) + HUD SAFMR by
+ *                                    zip (HUD_API_KEY secret, DFW metro) +
+ *                                    realtor.com active rentals (keyless)
  *   /vision?latitude=&longitude=[&photo=<https url, allowlisted hosts>]
  *                                  → Workers AI vision verdicts: satellite
  *                                    (pool / road adjacency / rail /
@@ -50,6 +66,17 @@
  * Optional configuration:
  *   Secrets:  RENTCAST_API_KEY, MELISSA_API_KEY, HUD_API_KEY (routes skip
  *             the provider when unset)
+ *   MLS feed (all optional; the whole rung is inert until they exist —
+ *   see the "MLS feed" section below for the full list and defaults):
+ *     RESO Web API — MLS_API_BASE, MLS_TOKEN_URL, MLS_CLIENT_ID,
+ *                    MLS_CLIENT_SECRET, MLS_SCOPE, MLS_TOKEN_AUTH,
+ *                    MLS_STATIC_TOKEN
+ *     classic RETS — MLS_RETS_LOGIN_URL, MLS_RETS_USERNAME,
+ *                    MLS_RETS_PASSWORD, MLS_RETS_UA, MLS_RETS_UA_PASSWORD,
+ *                    MLS_RETS_VERSION, MLS_RETS_CLASS
+ *     shaping      — MLS_SYSTEM_NAME, MLS_ORIGINATING_SYSTEM,
+ *                    MLS_PROPERTY_TYPES, MLS_SUBTYPES, MLS_LEASE_TYPES,
+ *                    MLS_FIELD_MAP (JSON), MLS_ATTRIBUTION, MLS_TRANSPORT
  *   Vars:     ALLOWED_ORIGINS — comma-separated origin allowlist override
  *
  * Responses: 200 normalized record · 404 no record · 501 provider not
@@ -434,9 +461,10 @@ async function melissaRecord(ff, env) {
   return hasData(rec) ? rec : null;
 }
 
-// Unified provider ladder: RentCast (primary) → Melissa (secondary) →
-// realtor.com (tertiary, keyless). Providers without a configured secret
-// are skipped; the first record wins and carries its source label.
+// Unified provider ladder: MLS feed (primary, licensed) → RentCast →
+// Melissa → realtor.com (keyless). Providers without a configured secret are
+// skipped. MLS facts overlay whichever rung answers, because a listing knows
+// the house but rarely knows the tax roll or the owner of record.
 async function handleLookup(params, env, cors) {
   const address = params.get('address');
   if (!address) return json({ error: 'address is required' }, 400, cors);
@@ -475,6 +503,34 @@ async function handleLookup(params, env, cors) {
     } catch (e) { providerErrors.push('realtor enrich: ' + e.message); }
   }
 
+  // ---- MLS rung (primary) ----
+  // A licensed feed is the only source that knows what the house actually
+  // SOLD for — every rung below it is a proxy. It rarely carries the tax roll
+  // or an owner record though, so it does NOT end the ladder on its own: it
+  // overlays whatever fills those gaps, the mirror image of how TAD fills
+  // from underneath.
+  let mlsRec = null;
+  if (mlsConfigured(env)) {
+    try { mlsRec = await mlsRecord(env, address, lat0, lon0); }
+    catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }
+  }
+  if (mlsRec) {
+    const merged = tad ? mergeRecords(mlsRec, tad) : mlsRec;
+    // Same invariant the TAD rung obeys: a record with no tax bill must never
+    // end the ladder — the client caches per address with no TTL, so a
+    // degraded record would starve tax reassessment and the protest packet
+    // for that address permanently. With a tax bill in hand there is nothing
+    // left to hunt, and skipping the rest saves a billable RentCast call.
+    if (merged.annualTaxes) return json(merged, 200, cors);
+  }
+  // MLS facts win, the answering provider fills, TAD fills last.
+  const respond = (rec) => {
+    let out = rec;
+    if (mlsRec) out = out ? mergeRecords(mlsRec, out) : mlsRec;
+    if (tad && out && out !== tad) out = mergeRecords(out, tad);
+    return json(out || tad, 200, cors);
+  };
+
   if (env.RENTCAST_API_KEY) {
     try {
       let rec = await rentcastRecord(new URLSearchParams({ address }), env);
@@ -484,14 +540,14 @@ async function handleLookup(params, env, cors) {
           radius: '0.05', limit: '1'
         }), env);
       }
-      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
+      if (rec) return respond(rec);
     } catch (e) { providerErrors.push('RentCast: ' + e.message); }
   }
 
   if (env.MELISSA_API_KEY) {
     try {
       const rec = await melissaRecord(address, env);
-      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
+      if (rec) return respond(rec);
     } catch (e) { providerErrors.push('Melissa: ' + e.message); }
   }
 
@@ -500,11 +556,11 @@ async function handleLookup(params, env, cors) {
     if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
     if (mprId && /^\d+$/.test(mprId)) {
       const rec = await realtorRecord(mprId);
-      if (rec) return json(tad ? mergeRecords(rec, tad) : rec, 200, cors);
+      if (rec) return respond(rec);
     }
   } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
 
-  if (tad) return json(tad, 200, cors); // parcel truth beats a 404
+  if (mlsRec || tad) return respond(null); // listing/parcel truth beats a 404
   return json({ error: 'no record', providerErrors }, 404, cors);
 }
 
@@ -568,6 +624,26 @@ async function handleMarket(params, env, cors) {
   const nearby = { coordinates: [lon, lat], radius: `${radius}mi` };
   const providerErrors = [];
 
+  // ---- MLS rung: the real hot sheet ----
+  // Closed / active / pending straight from the source, with true close
+  // prices and real days-on-market. The scrape below can only approximate
+  // this, and can't see "Active Under Contract" at all.
+  if (mlsConfigured(env)) {
+    try {
+      const scan = await mlsMarket(env, lat, lon, radius, params.get('zip') || '');
+      if (scan.solds.length || scan.actives.length || scan.pendings.length) {
+        return json({
+          subject: { latitude: lat, longitude: lon, radiusMi: radius },
+          totals: { sold12mo: scan.solds.length, forSale: scan.actives.length + scan.pendings.length },
+          solds: scan.solds, actives: scan.actives, pendings: scan.pendings,
+          source: mlsSystemName(env), priceTruth: 'closed',
+          attribution: env.MLS_ATTRIBUTION || null,
+          providerErrors: providerErrors.concat((scan.errors || []).map(e => mlsSystemName(env) + ' ' + e))
+        }, 200, cors);
+      }
+    } catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }
+  }
+
   const [soldRes, saleRes] = await Promise.all([
     realtorSearch({
       query: { status: ['sold'], type: ['single_family'], sold_date: { min: minDate }, nearby },
@@ -604,7 +680,9 @@ async function handleMarket(params, env, cors) {
   return json({
     subject: { latitude: lat, longitude: lon, radiusMi: radius },
     totals: { sold12mo: soldRes ? soldRes.total : null, forSale: saleRes ? saleRes.total : null },
-    solds, actives, pendings, providerErrors
+    solds, actives, pendings,
+    source: 'realtor.com', priceTruth: 'proxy',
+    providerErrors
   }, 200, cors);
 }
 
@@ -628,11 +706,31 @@ async function handleRent(params, env, cors) {
   }
   const zip = (params.get('zip') || '').trim();
   const providerErrors = [];
-  const out = { rentcast: null, hud: null, rentals: [], providerErrors };
+  const out = { rentcast: null, hud: null, rentals: [], mls: null, providerErrors };
+
+  // ---- MLS rung: closed leases are transacted rents, and cost nothing ----
+  // A RentCast rent-AVM call bills a credit, so the real thing is fetched
+  // first and the model is only paid for when the lease market is too thin
+  // to read. Engine rentFromComps() prefers status:'closed' rows outright.
+  let mlsClosedLeases = 0;
+  if (mlsConfigured(env)) {
+    try {
+      const leases = await mlsLeases(env, lat, lon, 1, zip);
+      for (const err of leases.errors || []) providerErrors.push(mlsSystemName(env) + ' ' + err);
+      mlsClosedLeases = leases.filter(l => l.status === 'closed').length;
+      out.mls = {
+        name: mlsSystemName(env), leases: leases.length, closed: mlsClosedLeases,
+        attribution: env.MLS_ATTRIBUTION || null
+      };
+      out.rentals = Array.from(leases);
+    } catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }
+  }
+  const MLS_LEASES_ENOUGH = 3;
+  const thinLeaseMarket = mlsClosedLeases < MLS_LEASES_ENOUGH;
 
   const jobs = [];
 
-  if (env.RENTCAST_API_KEY) {
+  if (thinLeaseMarket && env.RENTCAST_API_KEY) {
     const q = new URLSearchParams({
       latitude: String(lat), longitude: String(lon), propertyType: 'Single Family', compCount: '8'
     });
@@ -684,18 +782,22 @@ async function handleRent(params, env, cors) {
     })());
   }
 
-  jobs.push(realtorSearch({
+  // Scraped ASKING rents are the weakest rung — skipped entirely once the
+  // feed has produced enough closed leases, and concatenated (never
+  // assigned) so they can't clobber them when it hasn't.
+  if (thinLeaseMarket) jobs.push(realtorSearch({
     query: { status: ['for_rent'], type: ['single_family'], nearby: { coordinates: [lon, lat], radius: '1mi' } },
     limit: 20, sort: [{ field: 'list_date', direction: 'desc' }]
   }).then(r => {
-    out.rentals = r.results.map(x => {
+    out.rentals = out.rentals.concat(r.results.map(x => {
       const d = x.description || {};
       const addr = (x.location && x.location.address) || {};
       return {
         address: addr.line || null, rent: numOrNull(x.list_price),
-        sqft: numOrNull(d.sqft), beds: numOrNull(d.beds), baths: numOrNull(d.baths)
+        sqft: numOrNull(d.sqft), beds: numOrNull(d.beds), baths: numOrNull(d.baths),
+        status: 'active'
       };
-    }).filter(x => x.rent > 0);
+    }).filter(x => x.rent > 0));
   }).catch(e => providerErrors.push('realtor rentals: ' + e.message)));
 
   await Promise.all(jobs);
@@ -819,6 +921,1104 @@ function mergeRecords(primary, filler) {
   return out;
 }
 
+// ============================================================================
+// ---- MLS feed (RESO Web API / classic RETS) — the PRIMARY data source ----
+// ============================================================================
+// Everything else in this file is a proxy for MLS data the app couldn't get:
+// realtor.com list prices standing in for Texas's non-disclosure sold prices,
+// an AVM standing in for closed leases, scraped counts standing in for real
+// absorption. With a licensed feed configured, those become the FALLBACK and
+// this rung answers with the actual transaction record.
+//
+// Two transports, because "a RETS feed" means either one in practice:
+//   reso — RESO Web API (OData v4 + OAuth2 bearer). What Trestle/CoreLogic,
+//          Bridge, MLS Grid and Spark all serve today.
+//   rets — classic RETS 1.7.2/1.8 (Login handshake + DMQL2 + COMPACT-DECODED).
+//
+// Credentials live ONLY here, as Worker secrets. An MLS data license forbids
+// shipping them to a browser, so unlike RentCast/Melissa there is deliberately
+// no client-side paste path for these.
+//
+// Every rung is a no-op until the secrets exist: mlsConfigured() gates all of
+// it, so an unconfigured worker behaves exactly as it did before.
+
+// Field names default to the RESO Data Dictionary. MLS_FIELD_MAP (JSON) can
+// override any single entry for a feed with local names — that is the one
+// knob needed to adapt to a non-standard server, and /mls/probe reports the
+// server's actual field list so the override can be written from evidence.
+const MLS_DEFAULT_FIELDS = {
+  key: 'ListingKey',
+  mlsNumber: 'ListingId',
+  address: 'UnparsedAddress',
+  streetNumber: 'StreetNumberNumeric',
+  streetName: 'StreetName',
+  city: 'City',
+  state: 'StateOrProvince',
+  postal: 'PostalCode',
+  county: 'CountyOrParish',
+  lat: 'Latitude',
+  lon: 'Longitude',
+  // LivingArea, not BuildingAreaTotal: BuildingAreaTotal can include garage
+  // and unfinished space, which would silently inflate every $/sqft read
+  sqft: 'LivingArea',
+  sqftAlt: 'AboveGradeFinishedArea',
+  beds: 'BedroomsTotal',
+  bathsDecimal: 'BathroomsTotalDecimal',
+  bathsFull: 'BathroomsFull',
+  bathsHalf: 'BathroomsHalf',
+  // BathroomsTotalInteger is a SIMPLE SUM (2 full + 1 half = 3, not 2.5) —
+  // last resort only, never ahead of the decimal or the component fields
+  bathsTotal: 'BathroomsTotalInteger',
+  lotSqft: 'LotSizeSquareFeet',
+  lotAcres: 'LotSizeAcres',
+  year: 'YearBuilt',
+  garage: 'GarageSpaces',
+  stories: 'StoriesTotal',
+  levels: 'Levels',
+  pool: 'PoolPrivateYN',
+  poolFeatures: 'PoolFeatures',
+  subdivision: 'SubdivisionName',
+  propType: 'PropertyType',
+  propSubType: 'PropertySubType',
+  listPrice: 'ListPrice',
+  originalListPrice: 'OriginalListPrice',
+  closePrice: 'ClosePrice',
+  closeDate: 'CloseDate',
+  listDate: 'OnMarketDate',
+  contractDate: 'ListingContractDate',
+  dom: 'DaysOnMarket',
+  cdom: 'CumulativeDaysOnMarket',
+  status: 'StandardStatus',
+  mlsStatus: 'MlsStatus',
+  concessions: 'ConcessionsAmount',
+  concessionsYN: 'Concessions',
+  concessionsComments: 'ConcessionsComments',
+  remarks: 'PublicRemarks',
+  condition: 'PropertyCondition',
+  taxAnnual: 'TaxAnnualAmount',
+  taxAssessed: 'TaxAssessedValue',
+  parcel: 'ParcelNumber',
+  hoaFee: 'AssociationFee',
+  hoaFreq: 'AssociationFeeFrequency',
+  hoaYN: 'AssociationYN',
+  roof: 'Roof',
+  foundation: 'FoundationDetails',
+  heating: 'Heating',
+  cooling: 'Cooling',
+  exterior: 'ConstructionMaterials',
+  zoning: 'Zoning',
+  modified: 'ModificationTimestamp',
+  originatingSystem: 'OriginatingSystemName'
+};
+
+// RESO StandardStatus values, grouped the way underwriting cares: what sold,
+// what a new listing competes against, and what is already spoken for.
+//
+// SPELLING TRAP: the Data Dictionary writes 'Active Under Contract' with
+// spaces, but an OData enum MEMBER name has none, and servers differ on which
+// form a $filter accepts (Trestle serves the compact form unless you ask for
+// PrettyEnums=true). Both spellings ship by default and each status group is
+// queried independently, so a server that rejects one literal loses that
+// bucket rather than the whole scan. MLS_STATUS_* overrides per feed.
+const MLS_STATUS = {
+  closed: ['Closed'],
+  active: ['Active'],
+  pending: ['Pending', 'ActiveUnderContract']
+};
+
+function mlsStatuses(env, group) {
+  const raw = (env['MLS_STATUS_' + group.toUpperCase()] || '').trim();
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : MLS_STATUS[group];
+}
+
+// Compact enum members read badly in a UI ('ActiveUnderContract'). Split on
+// case boundaries for display only — never for filtering.
+function mlsPrettyStatus(v) {
+  const s = mlsFlat(v);
+  if (!s || /\s/.test(s)) return s;
+  return s.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+}
+
+function mlsFields(env) {
+  let override = {};
+  if (env.MLS_FIELD_MAP) {
+    try { override = JSON.parse(env.MLS_FIELD_MAP); }
+    catch (e) { /* a malformed override must never break the whole feed */ }
+  }
+  return { ...MLS_DEFAULT_FIELDS, ...override };
+}
+
+function mlsTransport(env) {
+  const explicit = (env.MLS_TRANSPORT || '').trim().toLowerCase();
+  if (explicit === 'reso' || explicit === 'rets') return explicit;
+  if (env.MLS_API_BASE || env.MLS_STATIC_TOKEN) return 'reso';
+  if (env.MLS_RETS_LOGIN_URL) return 'rets';
+  return null;
+}
+
+function mlsConfigured(env) {
+  const t = mlsTransport(env);
+  if (t === 'reso') {
+    return Boolean(env.MLS_API_BASE && (env.MLS_STATIC_TOKEN || (env.MLS_CLIENT_ID && env.MLS_CLIENT_SECRET)));
+  }
+  if (t === 'rets') {
+    return Boolean(env.MLS_RETS_LOGIN_URL && env.MLS_RETS_USERNAME && env.MLS_RETS_PASSWORD);
+  }
+  return false;
+}
+
+function mlsSystemName(env) {
+  return (env.MLS_SYSTEM_NAME || '').trim() || 'MLS';
+}
+
+// Subrequest budget guard: a hung feed must degrade to the keyless fallback,
+// never hold the whole response open until the platform kills it.
+const MLS_TIMEOUT_MS = 8000;
+
+function mlsSignal(ms) {
+  try { return AbortSignal.timeout(ms || MLS_TIMEOUT_MS); }
+  catch (e) { return undefined; } // older runtime: no timeout, still functional
+}
+
+// ---- RESO Web API transport (OData v4) ----
+
+// Per-isolate token cache. Isolates are short-lived and there is no shared
+// state, so at worst this re-authenticates once per cold start.
+let mlsTokenCache = null; // { token, expiresAt, clientId }
+
+async function mlsBearer(env) {
+  if (env.MLS_STATIC_TOKEN) return env.MLS_STATIC_TOKEN.trim();
+  const now = Date.now();
+  // Keyed by client id so rotating the credential can never be served a
+  // stale token out of a still-warm isolate. Refreshed five minutes early:
+  // a token that expires mid-flight costs a whole request round trip.
+  if (mlsTokenCache && mlsTokenCache.clientId === env.MLS_CLIENT_ID
+      && mlsTokenCache.expiresAt > now + 300000) {
+    return mlsTokenCache.token;
+  }
+  if (!env.MLS_TOKEN_URL) throw new Error('MLS_TOKEN_URL not configured');
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    scope: (env.MLS_SCOPE || 'api').trim()
+  });
+  const headers = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Accept': 'application/json'
+  };
+  // Both styles are in the wild: Trestle documents credentials in the body,
+  // other IdPs want HTTP Basic. MLS_TOKEN_AUTH picks.
+  if ((env.MLS_TOKEN_AUTH || 'body').trim().toLowerCase() === 'basic') {
+    headers['Authorization'] = 'Basic ' + btoa(`${env.MLS_CLIENT_ID}:${env.MLS_CLIENT_SECRET}`);
+  } else {
+    body.set('client_id', env.MLS_CLIENT_ID);
+    body.set('client_secret', env.MLS_CLIENT_SECRET);
+  }
+
+  const res = await fetch(env.MLS_TOKEN_URL.trim(), {
+    method: 'POST', headers, body, signal: mlsSignal()
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    // The IdP's error body names the actual problem (bad scope, wrong grant,
+    // revoked client) — surfacing it is the difference between a 10-second
+    // fix and a support ticket. Never echo the credentials themselves.
+    throw new Error(`token HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error('token response was not JSON: ' + text.slice(0, 120)); }
+  if (!data.access_token) throw new Error('token response carried no access_token');
+  mlsTokenCache = {
+    token: data.access_token,
+    clientId: env.MLS_CLIENT_ID,
+    expiresAt: Date.now() + (Number(data.expires_in) > 0 ? Number(data.expires_in) : 3600) * 1000
+  };
+  return mlsTokenCache.token;
+}
+
+// GET an OData resource. Retries once on 401 (expired token beats the cache)
+// and once on 400 with $orderby stripped (a feed that doesn't publish the
+// sort field rejects the whole query rather than ignoring the clause).
+async function resoGet(env, resource, params, attempt) {
+  const base = (env.MLS_API_BASE || '').trim().replace(/\/+$/, '');
+  const token = await mlsBearer(env);
+  const url = `${base}/${resource}?${params}`;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json',
+      'User-Agent': (env.MLS_USER_AGENT || 'AntigravityUnderwriter/1.0').trim()
+    },
+    signal: mlsSignal()
+  });
+  if (res.ok) return await res.json();
+
+  const body = await res.text();
+  if (res.status === 401 && !attempt) {
+    mlsTokenCache = null;
+    return await resoGet(env, resource, params, 1);
+  }
+  if (res.status === 400 && !attempt && /\$orderby=/.test(params)) {
+    const stripped = params.replace(/&?\$orderby=[^&]*/g, '');
+    return await resoGet(env, resource, stripped, 1);
+  }
+  throw new Error(`RESO HTTP ${res.status}: ${body.slice(0, 200)}`);
+}
+
+// ---- Geography: RESO Web API has no portable radius operator ----
+// geo.distance() is optional in OData and most MLS feeds don't implement it,
+// so the query asks for a lat/lon BOUNDING BOX (universally filterable) and
+// the true great-circle distance is applied here with milesBetween(). The box
+// is the circle's circumscribing square, so it over-fetches by ~27% and the
+// distance filter trims the corners — never the reverse.
+function mlsBbox(lat, lon, radiusMi) {
+  const dLat = radiusMi / 69;
+  const cos = Math.cos(lat * Math.PI / 180);
+  const dLon = radiusMi / (69 * (Math.abs(cos) > 0.01 ? Math.abs(cos) : 0.01));
+  return {
+    latMin: lat - dLat, latMax: lat + dLat,
+    lonMin: lon - dLon, lonMax: lon + dLon
+  };
+}
+
+const odataStr = (s) => `'${String(s).replace(/'/g, "''")}'`;
+const odataDay = (ms) => new Date(ms).toISOString().slice(0, 10); // Edm.Date
+
+// numOrNull() rejects anything <= 0, which is right for prices and areas and
+// WRONG for a western longitude. Coordinates get their own reader: finite and
+// non-zero, since 0/0 is the null-island sentinel a feed emits for "unknown".
+const mlsCoord = (v) => {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) && n !== 0 ? n : null;
+};
+
+function mlsOrFilter(field, values) {
+  const list = (values || []).filter(Boolean);
+  if (!list.length) return null;
+  return '(' + list.map(v => `${field} eq ${odataStr(v)}`).join(' or ') + ')';
+}
+
+/**
+ * One search against the feed, transport-agnostic at the call site.
+ * opts: { statuses[], propertyTypes[], subTypes[], lat, lon, radiusMi,
+ *         sinceDays, dateField, limit, orderby, extraFilter }
+ * Returns raw provider rows (already distance-trimmed when coordinates were
+ * supplied) with a `_distanceMi` annotation.
+ */
+async function mlsSearch(env, opts) {
+  const f = mlsFields(env);
+  const rows = mlsTransport(env) === 'rets'
+    ? await retsSearch(env, opts, f)
+    : await resoSearch(env, opts, f);
+
+  // Distance trim + annotate. A row with no coordinates is KEPT (the bbox
+  // already bounded it if it had any) but never claims a distance it can't
+  // prove — the client's ranking treats null distance as middling, not near.
+  const { lat, lon } = opts;
+  const haveSubject = Number.isFinite(lat) && Number.isFinite(lon);
+  const radius = opts.radiusMi;
+  const out = [];
+  for (const r of rows) {
+    const rLat = mlsCoord(r[f.lat]);
+    const rLon = mlsCoord(r[f.lon]);
+    if (haveSubject && rLat != null && rLon != null) {
+      const d = milesBetween(lat, lon, rLat, rLon);
+      if (radius && d > radius) continue;
+      r._distanceMi = Math.round(d * 100) / 100;
+    } else {
+      r._distanceMi = null;
+    }
+    out.push(r);
+  }
+  if (opts.orderby === 'closeDateDesc') {
+    out.sort((a, b) => String(b[f.closeDate] || '').localeCompare(String(a[f.closeDate] || '')));
+  }
+  return opts.limit ? out.slice(0, opts.limit) : out;
+}
+
+async function resoSearch(env, opts, f) {
+  const clauses = [];
+  const status = mlsOrFilter(f.status, opts.statuses);
+  if (status) clauses.push(status);
+  const ptype = mlsOrFilter(f.propType, opts.propertyTypes);
+  if (ptype) clauses.push(ptype);
+  const sub = mlsOrFilter(f.propSubType, opts.subTypes);
+  if (sub) clauses.push(sub);
+  // Multi-MLS aggregators (Trestle serves dozens) must be pinned to the one
+  // system the license covers, or the results mix markets.
+  if (env.MLS_ORIGINATING_SYSTEM) {
+    clauses.push(`${f.originatingSystem} eq ${odataStr(env.MLS_ORIGINATING_SYSTEM.trim())}`);
+  }
+  if (opts.sinceDays > 0) {
+    const field = opts.dateField || f.closeDate;
+    clauses.push(`${field} ge ${odataDay(Date.now() - opts.sinceDays * 86400000)}`);
+  }
+  const haveGeo = Number.isFinite(opts.lat) && Number.isFinite(opts.lon) && opts.radiusMi > 0;
+  if (haveGeo && !opts.postalOnly) {
+    // A GeographyPoint column (Trestle publishes X_Location) supports a true
+    // radius; without one, a lat/lon box on plain decimals works everywhere.
+    // MLS_GEO_FIELD opts into the former once /mls/probe confirms the column.
+    const geoField = (env.MLS_GEO_FIELD || '').trim();
+    if (geoField) {
+      const meters = Math.round(opts.radiusMi * 1609.344);
+      clauses.push(`geo.distance(${geoField}, geography'POINT(${opts.lon} ${opts.lat})') le ${meters}`);
+    } else {
+      const b = mlsBbox(opts.lat, opts.lon, opts.radiusMi);
+      clauses.push(`${f.lat} ge ${b.latMin.toFixed(6)}`, `${f.lat} le ${b.latMax.toFixed(6)}`);
+      clauses.push(`${f.lon} ge ${b.lonMin.toFixed(6)}`, `${f.lon} le ${b.lonMax.toFixed(6)}`);
+    }
+  }
+  // Coordinates are not index-accelerated on Trestle; PostalCode is. This is
+  // the narrowed retry a gateway timeout falls back to (see below).
+  if (opts.postalOnly && opts.zip) clauses.push(`${f.postal} eq ${odataStr(opts.zip)}`);
+  if (opts.extraFilter) clauses.push(opts.extraFilter);
+
+  const params = new URLSearchParams();
+  if (clauses.length) params.set('$filter', clauses.join(' and '));
+  // Deliberately NO $select by default: naming a field the feed doesn't
+  // publish rejects the entire query, and this app cannot know a given MLS's
+  // field set in advance. MLS_SELECT exists for payload tuning once known.
+  if (env.MLS_SELECT) params.set('$select', env.MLS_SELECT.trim());
+  // Over-fetch: the bbox is wider than the circle, so ask for headroom and
+  // let the distance trim cut it back to `limit`. Trestle caps $top at 1000
+  // and defaults to 10 — never rely on the default.
+  params.set('$top', String(Math.min(200, Math.max(opts.limit || 20, (opts.limit || 20) * 3))));
+  if (opts.orderby === 'closeDateDesc') params.set('$orderby', `${f.closeDate} desc`);
+  if (opts.orderby === 'listDateDesc') params.set('$orderby', `${f.modified} desc`);
+  // Feed-specific query switches (Trestle: PrettyEnums=true) without needing
+  // a code change per MLS
+  for (const [k, v] of new URLSearchParams(env.MLS_QUERY_EXTRA || '')) params.set(k, v);
+
+  const resource = (env.MLS_RESOURCE || 'Property').trim();
+  try {
+    const data = await resoGet(env, resource, params.toString());
+    return Array.isArray(data && data.value) ? data.value : [];
+  } catch (e) {
+    // 504 = "your query took too long". Coordinates are not index-accelerated,
+    // so the fix is to drop the box and lean on PostalCode, which is. Better a
+    // zip-shaped comp set than none — and the distance trim still applies.
+    if (/HTTP 50[34]/.test(e.message) && haveGeo && opts.zip && !opts.postalOnly) {
+      return await resoSearch(env, { ...opts, postalOnly: true }, f);
+    }
+    throw e;
+  }
+}
+
+// ---- Classic RETS 1.x transport ----
+// Unverified against a live server (no credentials at build time); /mls/probe
+// exercises the whole handshake and reports exactly where it stops.
+
+async function md5Hex(str) {
+  // Cloudflare Workers expose MD5 through crypto.subtle.digest as a
+  // non-standard extension. RETS UA-Authorization has no alternative digest,
+  // so a runtime without it simply cannot speak that dialect — say so plainly
+  // instead of sending a wrong header and getting an opaque 401.
+  const buf = await crypto.subtle.digest('MD5', new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function retsCapabilities(xml) {
+  const caps = {};
+  const block = /<RETS-RESPONSE>([\s\S]*?)<\/RETS-RESPONSE>/i.exec(xml);
+  const body = block ? block[1] : xml;
+  for (const line of body.split(/\r?\n/)) {
+    const m = /^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/.exec(line);
+    if (m) caps[m[1]] = m[2];
+  }
+  return caps;
+}
+
+function retsReplyCode(xml) {
+  const m = /ReplyCode\s*=\s*"(\d+)"/i.exec(xml || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Worker fetch does NOT persist cookies between calls, so the RETS session
+// cookie is captured at login and replayed by hand on every later request.
+function retsCookie(res) {
+  let raw = '';
+  try {
+    if (typeof res.headers.getSetCookie === 'function') raw = res.headers.getSetCookie().join('; ');
+  } catch (e) { /* older runtime */ }
+  if (!raw) raw = res.headers.get('set-cookie') || '';
+  return raw.split(/,(?=[^;]+=)/)
+    .map(c => c.split(';')[0].trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+let retsSessionCache = null; // { caps, cookie, sessionId, base, expiresAt }
+
+// Single-flight guard. RETS servers commonly permit ONE session per login,
+// and a second Login silently invalidates the first (ReplyCode 20022,
+// "Additional login not permitted"). The market scan fires three searches
+// concurrently — without this they would race three logins and knock each
+// other out, producing an intermittent failure that looks like a bad password.
+let retsLoginInFlight = null;
+
+async function retsLogin(env) {
+  if (retsSessionCache && retsSessionCache.expiresAt > Date.now()) return retsSessionCache;
+  if (retsLoginInFlight) return await retsLoginInFlight;
+  retsLoginInFlight = retsLoginOnce(env);
+  try { return await retsLoginInFlight; }
+  finally { retsLoginInFlight = null; }
+}
+
+async function retsLoginOnce(env) {
+  const loginUrl = env.MLS_RETS_LOGIN_URL.trim();
+  const version = (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim();
+  const ua = (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim();
+
+  const headers = {
+    'RETS-Version': version,
+    'User-Agent': ua,
+    'Accept': '*/*',
+    'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
+  };
+  // RETS-UA-Authorization (only when the MLS issued a User-Agent password):
+  //   a1     = MD5(userAgent + ":" + uaPassword)
+  //   header = "Digest " + MD5(a1 + ":" + requestId + ":" + sessionId + ":" + version)
+  // At login there is no session id yet, so that slot is empty by spec.
+  if (env.MLS_RETS_UA_PASSWORD) {
+    const a1 = await md5Hex(`${ua}:${env.MLS_RETS_UA_PASSWORD}`);
+    headers['RETS-UA-Authorization'] = 'Digest ' + await md5Hex(`${a1}:::${version}`);
+  }
+
+  // redirect:'manual' — Workers replays Authorization and Cookie headers
+  // across a redirect, including to a different host. An MLS login credential
+  // must never be handed to whatever a 302 happens to point at.
+  const res = await fetch(loginUrl, { headers, redirect: 'manual', signal: mlsSignal() });
+  const xml = await res.text();
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`RETS login redirected (HTTP ${res.status}) — set MLS_RETS_LOGIN_URL to the final URL; `
+      + 'credentials are deliberately not replayed across a redirect.');
+  }
+  if (res.status === 401) {
+    throw new Error('RETS login 401 — Basic auth rejected. This server likely requires HTTP Digest auth, '
+      + 'or the User-Agent/UA-password pair is wrong.');
+  }
+  if (!res.ok) throw new Error(`RETS login HTTP ${res.status}: ${xml.slice(0, 200)}`);
+  const code = retsReplyCode(xml);
+  if (code === 20022) {
+    throw new Error('RETS login ReplyCode 20022 (additional login not permitted) — another session is '
+      + 'already open on this account. Wait for it to time out, or call /mls/probe?logout=1 to close it.');
+  }
+  if (code !== null && code !== 0) {
+    throw new Error(`RETS login ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
+  }
+  const caps = retsCapabilities(xml);
+  const cookie = retsCookie(res);
+  const sessionId = (/RETS-Session-ID\s*=\s*([^;\s]+)/i.exec(cookie) || [, ''])[1] || '';
+  retsSessionCache = {
+    caps, cookie, sessionId,
+    base: new URL(loginUrl).origin,
+    // RETS sessions time out server-side; re-login well inside any sane window
+    expiresAt: Date.now() + 10 * 60 * 1000
+  };
+  return retsSessionCache;
+}
+
+function retsAbsolute(session, capUrl) {
+  if (!capUrl) return null;
+  return /^https?:\/\//i.test(capUrl) ? capUrl : session.base + (capUrl.startsWith('/') ? '' : '/') + capUrl;
+}
+
+// Escape hatch for a stuck one-session-per-login server (see ReplyCode 20022).
+// Not called on the normal path: sessions are cached and reused, and logging
+// out after every search would throw away the cache for no benefit.
+async function retsLogout(env) {
+  const session = retsSessionCache;
+  if (!session) return 'no cached session';
+  const url = retsAbsolute(session, session.caps.Logout);
+  retsSessionCache = null;
+  if (!url) return 'server published no Logout capability; local session dropped';
+  const res = await fetch(url, {
+    headers: {
+      'RETS-Version': (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim(),
+      'User-Agent': (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim(),
+      'Accept': '*/*',
+      'Cookie': session.cookie || '',
+      'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
+    },
+    redirect: 'manual',
+    signal: mlsSignal()
+  });
+  return `logout HTTP ${res.status}`;
+}
+
+// COMPACT-DECODED is a tab-delimited table wrapped in XML. Workers have no
+// DOMParser, so the three tags that matter are pulled with regex — which is
+// safe here precisely because the payload is NOT nested markup.
+function parseCompactDecoded(xml) {
+  const delimHex = (/<DELIMITER[^>]*value\s*=\s*"?(\w+)"?/i.exec(xml) || [, '09'])[1];
+  const delim = String.fromCharCode(parseInt(delimHex, 16));
+  const colsRaw = (/<COLUMNS>([\s\S]*?)<\/COLUMNS>/i.exec(xml) || [, ''])[1];
+  const columns = colsRaw.split(delim).map(s => s.trim());
+  const rows = [];
+  const re = /<DATA>([\s\S]*?)<\/DATA>/gi;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const cells = m[1].split(delim);
+    const row = {};
+    columns.forEach((name, i) => {
+      if (!name) return;
+      const v = (cells[i] || '').trim();
+      if (v !== '') row[name] = v;
+    });
+    if (Object.keys(row).length) rows.push(row);
+  }
+  return rows;
+}
+
+// DMQL2 has no geography. Date and status are expressible; the spatial cut is
+// done here from the returned Latitude/Longitude columns (see mlsSearch).
+function retsDmql(env, opts, f) {
+  const parts = [];
+  if (opts.statuses && opts.statuses.length) {
+    parts.push(`(${f.status}=|${opts.statuses.join(',')})`);
+  }
+  if (opts.sinceDays > 0) {
+    const field = opts.dateField || f.closeDate;
+    parts.push(`(${field}=${odataDay(Date.now() - opts.sinceDays * 86400000)}+)`);
+  }
+  if (env.MLS_RETS_QUERY_EXTRA) parts.push(env.MLS_RETS_QUERY_EXTRA.trim());
+  // A DMQL2 query cannot be empty; a wide-open date range is the safe filler
+  return parts.length ? parts.join(',') : `(${f.modified}=1980-01-01+)`;
+}
+
+async function retsSearch(env, opts, f) {
+  const session = await retsLogin(env);
+  const searchUrl = retsAbsolute(session, session.caps.Search);
+  if (!searchUrl) throw new Error('RETS login returned no Search capability URL');
+  const q = new URLSearchParams({
+    SearchType: (env.MLS_RETS_RESOURCE || 'Property').trim(),
+    Class: (env.MLS_RETS_CLASS || 'RES').trim(),
+    QueryType: 'DMQL2',
+    Format: 'COMPACT-DECODED',
+    StandardNames: (env.MLS_RETS_STANDARD_NAMES || '1').trim(),
+    Count: '1',
+    Limit: String(Math.min(500, Math.max(50, (opts.limit || 20) * 10))),
+    Query: retsDmql(env, opts, f)
+  });
+  const headers = {
+    'RETS-Version': (env.MLS_RETS_VERSION || 'RETS/1.7.2').trim(),
+    'User-Agent': (env.MLS_RETS_UA || 'AntigravityUnderwriter/1.0').trim(),
+    'Accept': '*/*',
+    'Authorization': 'Basic ' + btoa(`${env.MLS_RETS_USERNAME}:${env.MLS_RETS_PASSWORD}`)
+  };
+  if (session.cookie) headers['Cookie'] = session.cookie;
+  if (env.MLS_RETS_UA_PASSWORD) {
+    const ua = headers['User-Agent'];
+    const a1 = await md5Hex(`${ua}:${env.MLS_RETS_UA_PASSWORD}`);
+    headers['RETS-UA-Authorization'] = 'Digest ' + await md5Hex(`${a1}::${session.sessionId}:${headers['RETS-Version']}`);
+  }
+  const res = await fetch(`${searchUrl}?${q}`, { headers, redirect: 'manual', signal: mlsSignal() });
+  const xml = await res.text();
+  if (!res.ok) throw new Error(`RETS search HTTP ${res.status}: ${xml.slice(0, 200)}`);
+  const code = retsReplyCode(xml);
+  if (code === 20201 || code === 20208) return []; // "no records found" is not an error
+  if (code !== null && code !== 0) {
+    throw new Error(`RETS search ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
+  }
+  return parseCompactDecoded(xml);
+}
+
+// ---- Normalizers ----
+
+// RESO's Levels lookup, verbatim, plus the obvious informal spellings. The
+// engine only cares whether the comp is single-storey (stairs vs no stairs),
+// so anything multi-level maps to a number > 1 and the exact value barely
+// matters — but an unknown value must map to null, never a default of 1.
+const MLS_LEVEL_WORDS = {
+  'one': 1, 'single': 1, 'one story': 1, 'one level': 1,
+  'one and one half': 1.5, 'one and a half': 1.5, 'one and one-half': 1.5,
+  'two': 2, 'two story': 2, 'bi-level': 2, 'bi level': 2,
+  'tri-level': 3, 'tri level': 3, 'three': 3, 'three or more': 3,
+  'quad-level': 4, 'quad level': 4, 'four': 4
+};
+
+function mlsFlat(v) {
+  // RESO multi-value fields arrive as arrays; RETS sends comma-joined text
+  if (Array.isArray(v)) return v.filter(Boolean).join(', ') || null;
+  const s = v === null || v === undefined ? '' : String(v).trim();
+  return s === '' ? null : s;
+}
+
+function mlsBool(v) {
+  if (v === true || v === false) return v;
+  const s = String(v === null || v === undefined ? '' : v).trim().toLowerCase();
+  if (s === 'true' || s === 'y' || s === 'yes' || s === '1') return true;
+  if (s === 'false' || s === 'n' || s === 'no' || s === '0') return false;
+  return null;
+}
+
+// Levels FIRST, StoriesTotal second: StoriesTotal describes the whole
+// BUILDING, so for a condo or townhome unit it reports the tower's floor
+// count instead of the unit's — which would fire the story premium against
+// the wrong thing. Levels describes the dwelling being sold.
+function mlsStories(row, f) {
+  const levels = mlsFlat(row[f.levels]);
+  if (levels) {
+    const key = levels.toLowerCase().split(/[,;]/)[0].trim();
+    if (MLS_LEVEL_WORDS[key]) return MLS_LEVEL_WORDS[key];
+  }
+  return numOrNull(row[f.stories]);
+}
+
+// The adjustment grid wants a DECIMAL bath count (2.5). RESO publishes three
+// candidates and only two of them mean that:
+//   BathroomsTotalDecimal — exactly what we want
+//   BathroomsFull/Half    — compute it
+//   BathroomsTotalInteger — a SIMPLE SUM: 2 full + 1 half = 3, NOT 2.5.
+// Reading the integer first would systematically over-count half baths across
+// every comp in the grid, so it is the last resort and only when nothing
+// better exists at all.
+function mlsBaths(row, f) {
+  const dec = numOrNull(row[f.bathsDecimal]);
+  if (dec) return dec;
+  const full = numOrNull(row[f.bathsFull]);
+  const half = numOrNull(row[f.bathsHalf]);
+  if (full !== null || half !== null) return (full || 0) + 0.5 * (half || 0) || null;
+  return numOrNull(row[f.bathsTotal]);
+}
+
+function mlsLotSqft(row, f) {
+  const sq = numOrNull(row[f.lotSqft]);
+  if (sq) return sq;
+  const acres = numOrNull(row[f.lotAcres]);
+  return acres ? Math.round(acres * 43560) : null;
+}
+
+// The record's hoaFee is MONTHLY (the client adds it straight to a monthly
+// carry), but RESO publishes the fee at whatever cadence the HOA bills.
+const MLS_FEE_PER_YEAR = {
+  monthly: 12, 'semi-monthly': 24, 'bi-monthly': 6, quarterly: 4,
+  'semi-annually': 2, 'semi-annual': 2, annually: 1, annual: 1, yearly: 1,
+  weekly: 52, 'bi-weekly': 26, 'one time': 0, 'not applicable': 0
+};
+
+function mlsMonthlyHoa(row, f) {
+  const fee = numOrNull(row[f.hoaFee]);
+  if (!fee) return null;
+  const freq = (mlsFlat(row[f.hoaFreq]) || '').toLowerCase();
+  const perYear = MLS_FEE_PER_YEAR[freq];
+  if (perYear === 0) return null;            // one-time capital fee is not carry
+  if (!perYear) return Math.round(fee / 12); // unlabeled: RESO's own default is annual
+  return Math.round(fee * perYear / 12);
+}
+
+// ConcessionsAmount rides the back-office payload and is only ~40% populated
+// even where it is licensed, so a null means "not reported", NEVER "$0". The
+// Concessions picklist (Yes / No / Call Listing Agent) is the separate signal
+// for whether concessions existed at all — a 'Yes' with no amount is exactly
+// the case an underwriter has to go chase, and it must not read as a clean sale.
+function mlsConcessionsReported(row, f) {
+  const flag = (mlsFlat(row[f.concessionsYN]) || '').toLowerCase();
+  if (flag.startsWith('y')) return 'yes';
+  if (flag.startsWith('n')) return 'no';
+  if (flag.startsWith('call')) return 'ask';
+  return null;
+}
+
+// DaysOnMarket is "as defined by the MLS business rules" and is often absent.
+// CloseDate − OnMarketDate is arithmetic, so it fills the gap without
+// pretending to be the MLS's own number.
+function mlsDom(row, f) {
+  const published = numOrNull(row[f.dom]);
+  if (published) return published;
+  const on = Date.parse(mlsFlat(row[f.listDate]) || mlsFlat(row[f.contractDate]) || '');
+  const close = Date.parse(mlsFlat(row[f.closeDate]) || '');
+  if (!Number.isFinite(on) || !Number.isFinite(close) || close < on) return null;
+  return Math.round((close - on) / 86400000) || null;
+}
+
+function mlsPool(row, f) {
+  const yn = mlsBool(row[f.pool]);
+  if (yn !== null) return yn;
+  const features = mlsFlat(row[f.poolFeatures]);
+  if (!features) return null;
+  return !/^none$/i.test(features);
+}
+
+function mlsFormattedAddress(row, f) {
+  const line = mlsFlat(row[f.address]);
+  const city = mlsFlat(row[f.city]);
+  const state = mlsFlat(row[f.state]);
+  const zip = mlsFlat(row[f.postal]);
+  if (!line) return null;
+  // UnparsedAddress sometimes already carries city/state; don't double it
+  if (city && new RegExp(`,\\s*${city.replace(/[.*+?^${}()|[\]\\]/g, '\\// ---- Hail history (NWS local storm reports via IEM) ----')}`, 'i').test(line)) return line;
+  return [line, city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+}
+
+// One MLS row → the record shape every provider in this worker emits.
+function mlsToRecord(row, env) {
+  const f = mlsFields(env);
+  const closePrice = numOrNull(row[f.closePrice]);
+  const closeDate = mlsFlat(row[f.closeDate]);
+  return {
+    sqft: numOrNull(row[f.sqft]) || numOrNull(row[f.sqftAlt]),
+    beds: numOrNull(row[f.beds]),
+    baths: mlsBaths(row, f),
+    lot: mlsLotSqft(row, f),
+    year: numOrNull(row[f.year]),
+    garage: numOrNull(row[f.garage]),
+    pool: mlsPool(row, f),
+    stories: mlsStories(row, f),
+    subdivision: mlsFlat(row[f.subdivision]),
+    hoa: mlsBool(row[f.hoaYN]) === true ? true : (numOrNull(row[f.hoaFee]) ? true : null),
+    propType: mlsFlat(row[f.propSubType]) || mlsFlat(row[f.propType]),
+    county: mlsFlat(row[f.county]),
+    zoning: mlsFlat(row[f.zoning]),
+    apn: mlsFlat(row[f.parcel]),
+    legal: null,
+    garageType: null,
+    foundation: mlsFlat(row[f.foundation]),
+    roof: mlsFlat(row[f.roof]),
+    exterior: mlsFlat(row[f.exterior]),
+    heating: mlsFlat(row[f.heating]),
+    cooling: mlsFlat(row[f.cooling]),
+    // An MLS carries the tax figures the listing agent entered, not the
+    // appraisal district's roll — it fills a gap, it doesn't beat TAD
+    assessedValue: numOrNull(row[f.taxAssessed]),
+    assessedLand: null,
+    assessedImprov: null,
+    annualTaxes: numOrNull(row[f.taxAnnual]),
+    // THE payload: a real closed price, not a list-price proxy
+    lastSaleDate: closeDate,
+    lastSalePrice: closePrice,
+    listPrice: numOrNull(row[f.listPrice]),
+    listingStatus: mlsPrettyStatus(row[f.status]) || mlsFlat(row[f.mlsStatus]),
+    hoaFee: mlsMonthlyHoa(row, f),
+    ownerNames: null,
+    ownerType: null,
+    ownerOccupied: null,
+    ownerMailing: null,
+    lat: mlsCoord(row[f.lat]),
+    lon: mlsCoord(row[f.lon]),
+    formattedAddress: mlsFormattedAddress(row, f),
+    source: mlsSystemName(env),
+    extra: {
+      mlsNumber: mlsFlat(row[f.mlsNumber]),
+      status: mlsPrettyStatus(row[f.status]),
+      closeDate,
+      closePrice,
+      listPrice: numOrNull(row[f.listPrice]),
+      originalListPrice: numOrNull(row[f.originalListPrice]),
+      concessions: numOrNull(row[f.concessions]),
+      concessionsReported: mlsConcessionsReported(row, f),
+      concessionsComments: mlsFlat(row[f.concessionsComments]),
+      dom: mlsDom(row, f),
+      cdom: numOrNull(row[f.cdom]),
+      propertyCondition: mlsFlat(row[f.condition]),
+      priceTruth: closePrice ? 'closed' : 'list',
+      lat: mlsCoord(row[f.lat]),
+      lon: mlsCoord(row[f.lon])
+    }
+  };
+}
+
+// One MLS row → the /comps candidate shape, plus the fields only a real feed
+// can supply: a verified close price, concessions, DOM and listing status.
+function mlsToCandidate(row, env) {
+  const f = mlsFields(env);
+  const closePrice = numOrNull(row[f.closePrice]);
+  const listPrice = numOrNull(row[f.listPrice]);
+  return {
+    address: mlsFlat(row[f.address]) || [mlsFlat(row[f.streetNumber]), mlsFlat(row[f.streetName])].filter(Boolean).join(' ') || null,
+    city: mlsFlat(row[f.city]),
+    state: mlsFlat(row[f.state]),
+    zip: mlsFlat(row[f.postal]),
+    lat: mlsCoord(row[f.lat]),
+    lon: mlsCoord(row[f.lon]),
+    price: closePrice || listPrice,
+    // 'closed' means the number is what changed hands. The client drops the
+    // "verify against MLS" hedge only for these.
+    priceType: closePrice ? 'closed' : 'list',
+    soldDate: mlsFlat(row[f.closeDate]),
+    sqft: numOrNull(row[f.sqft]) || numOrNull(row[f.sqftAlt]),
+    beds: numOrNull(row[f.beds]),
+    baths: mlsBaths(row, f),
+    lotSqft: mlsLotSqft(row, f),
+    yearBuilt: numOrNull(row[f.year]),
+    garage: numOrNull(row[f.garage]),
+    stories: mlsStories(row, f),
+    propType: mlsFlat(row[f.propSubType]) || mlsFlat(row[f.propType]),
+    remarks: mlsFlat(row[f.remarks]),
+    distanceMi: row._distanceMi != null ? row._distanceMi : null,
+    correlation: null,
+    source: mlsSystemName(env),
+    // ---- MLS-only additions ----
+    mlsNumber: mlsFlat(row[f.mlsNumber]),
+    listPrice,
+    originalListPrice: numOrNull(row[f.originalListPrice]),
+    concessions: numOrNull(row[f.concessions]),
+    concessionsReported: mlsConcessionsReported(row, f),
+    concessionsComments: mlsFlat(row[f.concessionsComments]),
+    dom: mlsDom(row, f),
+    cdom: numOrNull(row[f.cdom]),
+    listingStatus: mlsPrettyStatus(row[f.status]) || mlsFlat(row[f.mlsStatus]),
+    propertyCondition: mlsFlat(row[f.condition])
+  };
+}
+
+const MLS_RESIDENTIAL = () => ['Residential'];
+
+function mlsPropertyTypes(env) {
+  const raw = (env.MLS_PROPERTY_TYPES || '').trim();
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : MLS_RESIDENTIAL();
+}
+
+function mlsSubTypes(env) {
+  const raw = (env.MLS_SUBTYPES || '').trim();
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+}
+
+function mlsLeaseTypes(env) {
+  const raw = (env.MLS_LEASE_TYPES || '').trim();
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : ['Residential Lease'];
+}
+
+/**
+ * Subject-property record from the feed. Address-first (an exact listing beats
+ * a nearby one), falling back to the nearest listing within ~250 ft when the
+ * address string doesn't match the MLS's own formatting.
+ * Returns null on a miss so the caller falls through the ladder.
+ */
+async function mlsRecord(env, address, lat, lon) {
+  const f = mlsFields(env);
+  const anyStatus = [].concat(mlsStatuses(env, 'closed'), mlsStatuses(env, 'active'), mlsStatuses(env, 'pending'));
+
+  if (address) {
+    const houseNum = (/\b(\d+)\b/.exec(address) || [, ''])[1];
+    const street = address.replace(/^\s*\d+\s+/, '').split(',')[0].trim();
+    if (houseNum && street) {
+      // contains() rather than eq: UnparsedAddress formatting (unit numbers,
+      // directional prefixes, "Rd" vs "Road") rarely matches a typed string
+      const filter = `contains(${f.address},${odataStr(street.split(/\s+/)[0])}) and startswith(${f.address},${odataStr(houseNum)})`;
+      try {
+        const rows = await mlsSearch(env, {
+          statuses: anyStatus, propertyTypes: mlsPropertyTypes(env),
+          extraFilter: mlsTransport(env) === 'rets' ? null : filter,
+          limit: 25, orderby: 'closeDateDesc'
+        });
+        const hit = rows.find(r => streetMatch(address, mlsFlat(r[f.address])));
+        if (hit) return mlsToRecord(hit, env);
+      } catch (e) {
+        // contains/startswith are optional OData functions; a feed that
+        // rejects them still answers the coordinate query below
+        if (!/HTTP 400/.test(e.message)) throw e;
+      }
+    }
+  }
+
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    const rows = await mlsSearch(env, {
+      statuses: anyStatus, propertyTypes: mlsPropertyTypes(env),
+      lat, lon, radiusMi: 0.05, limit: 10, orderby: 'closeDateDesc'
+    });
+    // Same wrong-house guard the TAD rung uses: a geocode landing on the
+    // neighbour's roof must not fill this property's data
+    const hit = address
+      ? rows.find(r => streetMatch(address, mlsFlat(r[f.address])))
+      : rows[0];
+    if (hit) return mlsToRecord(hit, env);
+  }
+  return null;
+}
+
+/** Closed sales near a point → /comps candidates, freshest first. */
+async function mlsComps(env, lat, lon, radiusMi, months, limit, zip) {
+  const rows = await mlsSearch(env, {
+    statuses: mlsStatuses(env, 'closed'),
+    propertyTypes: mlsPropertyTypes(env),
+    subTypes: mlsSubTypes(env),
+    lat, lon, radiusMi, zip,
+    sinceDays: Math.round(months * 30.44),
+    limit, orderby: 'closeDateDesc'
+  });
+  return rows.map(r => mlsToCandidate(r, env)).filter(c => c.address);
+}
+
+/**
+ * Live market scan straight from the source: closed / active / pending.
+ * Three queries instead of realtor.com's two, because an MLS separates
+ * "Active Under Contract" from "Pending" and both are off the market.
+ */
+async function mlsMarket(env, lat, lon, radiusMi, zip) {
+  const f = mlsFields(env);
+  const types = mlsPropertyTypes(env);
+  const subTypes = mlsSubTypes(env);
+  const mapRow = (r) => ({
+    address: mlsFlat(r[f.address]),
+    price: numOrNull(r[f.closePrice]) || numOrNull(r[f.listPrice]),
+    listPrice: numOrNull(r[f.listPrice]),
+    soldDate: mlsFlat(r[f.closeDate]),
+    listDate: mlsFlat(r[f.listDate]) || mlsFlat(r[f.contractDate]),
+    sqft: numOrNull(r[f.sqft]) || numOrNull(r[f.sqftAlt]),
+    beds: numOrNull(r[f.beds]),
+    // DOM is the field the scraped path could never supply — it is what
+    // turns "months of inventory" into a holding-period estimate
+    dom: mlsDom(r, f),
+    concessions: numOrNull(r[f.concessions])
+  });
+  // Each status group is its own query and its own failure. The pending
+  // bucket is the fragile one — its enum literal spelling differs per server
+  // — and losing it must cost the pending count, not the whole scan.
+  const errors = [];
+  const group = (name, extra) => mlsSearch(env, {
+    statuses: mlsStatuses(env, name), propertyTypes: types, subTypes,
+    lat, lon, radiusMi, zip, limit: 200, ...extra
+  }).catch(e => { errors.push(name + ': ' + e.message); return []; });
+
+  const [closed, active, pending] = await Promise.all([
+    group('closed', { sinceDays: 366, orderby: 'closeDateDesc' }),
+    group('active'),
+    group('pending')
+  ]);
+  // Every group failing is a real outage, not a quiet empty market — say so
+  // and let the caller fall back to the keyless scan.
+  if (errors.length === 3) throw new Error(errors.join(' · '));
+  return {
+    solds: closed.map(mapRow),
+    actives: active.map(mapRow),
+    pendings: pending.map(mapRow),
+    errors
+  };
+}
+
+/**
+ * Closed residential LEASES near the point — transacted rents, which is what
+ * a rent estimate actually wants. Active rentals ride along as a thinner
+ * signal so a quiet lease market still produces something.
+ */
+async function mlsLeases(env, lat, lon, radiusMi, zip) {
+  const f = mlsFields(env);
+  const leaseTypes = mlsLeaseTypes(env);
+  const mapRow = (r, status) => ({
+    address: mlsFlat(r[f.address]),
+    rent: numOrNull(r[f.closePrice]) || numOrNull(r[f.listPrice]),
+    sqft: numOrNull(r[f.sqft]) || numOrNull(r[f.sqftAlt]),
+    beds: numOrNull(r[f.beds]),
+    baths: mlsBaths(r, f),
+    status,
+    closeDate: mlsFlat(r[f.closeDate]),
+    distanceMi: r._distanceMi
+  });
+  // Closed leases are the prize; a failure on the active side must not cost
+  // them (and vice versa). Errors are collected rather than swallowed — a
+  // silently empty lease market and a broken credential look identical to
+  // the user otherwise.
+  const errors = [];
+  const [closed, active] = await Promise.all([
+    mlsSearch(env, { statuses: mlsStatuses(env, 'closed'), propertyTypes: leaseTypes, lat, lon, radiusMi, zip, sinceDays: 366, limit: 40, orderby: 'closeDateDesc' })
+      .catch(e => { errors.push('closed leases: ' + e.message); return []; }),
+    mlsSearch(env, { statuses: mlsStatuses(env, 'active'), propertyTypes: leaseTypes, lat, lon, radiusMi, zip, limit: 25 })
+      .catch(e => { errors.push('active rentals: ' + e.message); return []; })
+  ]);
+  const rows = [].concat(
+    closed.map(r => mapRow(r, 'closed')),
+    active.map(r => mapRow(r, 'active'))
+  ).filter(x => x.rent > 0);
+  rows.errors = errors;
+  return rows;
+}
+
+// ---- /mls/probe: the one-round-trip field-mapping diagnostic ----
+// Reports which transport authenticated, how far the handshake got, and what
+// the server actually publishes — so a field-name override can be written
+// from evidence instead of guesswork. Field NAMES only unless ?sample=1,
+// because listing content is licensed data and this is a debug route.
+async function handleMlsProbe(params, env, cors) {
+  const transport = mlsTransport(env);
+  const out = {
+    configured: mlsConfigured(env),
+    transport,
+    systemName: mlsSystemName(env),
+    env: {
+      MLS_API_BASE: Boolean(env.MLS_API_BASE),
+      MLS_TOKEN_URL: Boolean(env.MLS_TOKEN_URL),
+      MLS_CLIENT_ID: Boolean(env.MLS_CLIENT_ID),
+      MLS_CLIENT_SECRET: Boolean(env.MLS_CLIENT_SECRET),
+      MLS_STATIC_TOKEN: Boolean(env.MLS_STATIC_TOKEN),
+      MLS_RETS_LOGIN_URL: Boolean(env.MLS_RETS_LOGIN_URL),
+      MLS_RETS_USERNAME: Boolean(env.MLS_RETS_USERNAME),
+      MLS_RETS_UA_PASSWORD: Boolean(env.MLS_RETS_UA_PASSWORD),
+      MLS_ORIGINATING_SYSTEM: env.MLS_ORIGINATING_SYSTEM || null,
+      MLS_PROPERTY_TYPES: mlsPropertyTypes(env),
+      MLS_LEASE_TYPES: mlsLeaseTypes(env),
+      MLS_FIELD_MAP_OVERRIDES: Object.keys((() => {
+        try { return JSON.parse(env.MLS_FIELD_MAP || '{}'); } catch (e) { return { INVALID_JSON: 1 }; }
+      })())
+    },
+    auth: { ok: false, error: null },
+    fieldsSeen: null,
+    missingExpectedFields: null,
+    sample: null,
+    steps: []
+  };
+  if (!out.configured) {
+    out.auth.error = 'no MLS secrets configured — set MLS_API_BASE + MLS_CLIENT_ID/MLS_CLIENT_SECRET (RESO) '
+      + 'or MLS_RETS_LOGIN_URL + MLS_RETS_USERNAME/MLS_RETS_PASSWORD (classic RETS)';
+    return json(out, 200, cors);
+  }
+
+  if (transport === 'rets' && params.get('logout') === '1') {
+    try { out.steps.push('logout: ' + await retsLogout(env)); }
+    catch (e) { out.steps.push('logout failed: ' + e.message); }
+    return json(out, 200, cors);
+  }
+
+  try {
+    if (transport === 'reso') {
+      await mlsBearer(env);
+      out.steps.push('token acquired');
+      out.auth.ok = true;
+    } else {
+      const s = await retsLogin(env);
+      out.steps.push('login ok; capabilities: ' + Object.keys(s.caps).join(', '));
+      out.auth.ok = true;
+    }
+  } catch (e) {
+    out.auth.error = e.message;
+    return json(out, 200, cors);
+  }
+
+  // One row, no filters beyond the licensed system, to enumerate real fields
+  try {
+    const lat = parseFloat(params.get('latitude'));
+    const lon = parseFloat(params.get('longitude'));
+    const rows = await mlsSearch(env, {
+      statuses: mlsStatuses(env, 'closed'),
+      propertyTypes: mlsPropertyTypes(env),
+      subTypes: mlsSubTypes(env),
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lon: Number.isFinite(lon) ? lon : undefined,
+      radiusMi: Number.isFinite(lat) ? 2 : undefined,
+      zip: params.get('zip') || undefined,
+      sinceDays: 366, limit: 1, orderby: 'closeDateDesc'
+    });
+    out.steps.push(`search returned ${rows.length} row(s)`);
+    if (rows.length) {
+      const row = rows[0];
+      out.fieldsSeen = Object.keys(row).filter(k => k !== '_distanceMi').sort();
+      const f = mlsFields(env);
+      const wanted = ['address', 'lat', 'lon', 'sqft', 'beds', 'bathsTotal', 'year', 'closePrice',
+        'closeDate', 'listPrice', 'status', 'remarks', 'dom', 'concessions', 'condition',
+        'subdivision', 'lotSqft', 'garage', 'pool', 'propSubType'];
+      out.missingExpectedFields = wanted
+        .filter(k => row[f[k]] === undefined)
+        .map(k => `${k} → ${f[k]}`);
+      out.normalized = { record: mlsToRecord(row, env), candidate: mlsToCandidate(row, env) };
+      if (params.get('sample') === '1') out.sample = row;
+    }
+  } catch (e) {
+    out.steps.push('search failed: ' + e.message);
+  }
+  return json(out, 200, cors);
+}
+
 // ---- Hail history (NWS local storm reports via IEM) ----
 // lsr.py only speaks CSV now (geojson removed upstream); the 5-year WFO-FWD
 // pull is ~1 MB, so it's parsed once and cached per isolate-day and clients
@@ -901,10 +2101,11 @@ async function handleHail(params, env, cors) {
   }, 200, cors);
 }
 
-// Comp candidates near a point: realtor.com sold listings (keyless) merged
-// with RentCast AVM comparables (correlation-ranked). Dedupe favors the
-// first-seen entry (realtor solds carry true sale dates) and grafts
-// RentCast's correlation onto duplicates.
+// Comp candidates near a point. MLS closed sales first — those are the only
+// prices that are facts. When the feed can't fill the set, realtor.com sold
+// listings (keyless) merge with RentCast AVM comparables (correlation-ranked)
+// as list-price PROXIES, and the response says which kind the caller got.
+// Dedupe favors the first-seen entry and grafts RentCast's correlation on.
 async function handleComps(params, env, cors) {
   let lat = parseFloat(params.get('latitude'));
   let lon = parseFloat(params.get('longitude'));
@@ -922,7 +2123,25 @@ async function handleComps(params, env, cors) {
   const providerErrors = [];
   const candidates = [];
 
-  try {
+  // ---- MLS rung: actual closed sales ----
+  let mlsCount = 0;
+  if (mlsConfigured(env)) {
+    try {
+      const found = await mlsComps(env, lat, lon, radius, months, limit, params.get('zip') || '');
+      mlsCount = found.length;
+      candidates.push(...found);
+    } catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }
+  }
+
+  // A verified close price and a list-at-sale proxy are different KINDS of
+  // number. Once the feed has produced a workable set, the proxies are left
+  // out entirely rather than ranked alongside — mixing them would launder
+  // guesses into the same list as facts. Below the threshold every source
+  // runs and each candidate carries its own priceType.
+  const MLS_ENOUGH = 3;
+  const useProxies = mlsCount < MLS_ENOUGH;
+
+  if (useProxies) try {
     const minDate = new Date(Date.now() - months * 30.44 * 86400000).toISOString().slice(0, 10);
     const res = await fetch('https://www.realtor.com/frontdoor/graphql', {
       method: 'POST',
@@ -990,7 +2209,7 @@ async function handleComps(params, env, cors) {
     }
   } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
 
-  if (env.RENTCAST_API_KEY) {
+  if (useProxies && env.RENTCAST_API_KEY) {
     try {
       const q = new URLSearchParams({
         latitude: String(lat), longitude: String(lon),
@@ -1047,9 +2266,22 @@ async function handleComps(params, env, cors) {
       if (existing.source.indexOf(c.source) === -1) existing.source += ' + ' + c.source;
     }
   }
+  const list = [...byKey.values()];
+  const priced = list.filter(c => c.price != null);
   return json({
     subject: { latitude: lat, longitude: lon },
-    candidates: [...byKey.values()],
+    candidates: list,
+    // The client's "verify against MLS" hedge is honest for a proxy and
+    // condescending for a closed sale — it keys off this.
+    priceTruth: !priced.length ? 'none'
+      : priced.every(c => c.priceType === 'closed') ? 'closed'
+      : priced.some(c => c.priceType === 'closed') ? 'mixed' : 'proxy',
+    mls: {
+      configured: mlsConfigured(env),
+      name: mlsSystemName(env),
+      used: mlsCount,
+      attribution: env.MLS_ATTRIBUTION || null
+    },
     providerErrors
   }, 200, cors);
 }
@@ -1209,12 +2441,20 @@ export default {
           return json({
             ok: true,
             providers: {
+              mls: mlsConfigured(env),
               realtor: true,
               rentcast: Boolean(env.RENTCAST_API_KEY),
               melissa: Boolean(env.MELISSA_API_KEY),
               vision: Boolean(env.AI)
-            }
+            },
+            mls: mlsConfigured(env) ? {
+              name: mlsSystemName(env),
+              transport: mlsTransport(env),
+              attribution: env.MLS_ATTRIBUTION || null
+            } : null
           }, 200, cors);
+        case '/mls/probe':
+          return await handleMlsProbe(url.searchParams, env, cors);
         case '/lookup':
           return await handleLookup(url.searchParams, env, cors);
         case '/comps':
@@ -1240,4 +2480,22 @@ export default {
       return json({ error: 'worker error: ' + (err && err.message ? err.message : 'unknown') }, 502, cors);
     }
   }
+};
+
+// ---- Named exports: MLS unit-test surface (worker/tests.mjs) ----
+// Cloudflare only consumes the default export above; these are inert at the
+// edge. They exist because the MLS rung cannot be exercised against a live
+// feed without licensed credentials, so the pure parts — field mapping,
+// unit conversion, COMPACT-DECODED parsing, the geo box — are verified
+// against synthetic RESO and RETS payloads instead.
+export {
+  MLS_DEFAULT_FIELDS, MLS_STATUS,
+  mlsFields, mlsTransport, mlsConfigured, mlsSystemName, mlsStatuses, mlsPrettyStatus,
+  mlsConcessionsReported, mlsDom,
+  mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft,
+  mlsMonthlyHoa, mlsPool, mlsFormattedAddress,
+  mlsToRecord, mlsToCandidate,
+  parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql,
+  odataStr, odataDay, mlsOrFilter,
+  mergeRecords, milesBetween, streetMatch
 };

@@ -397,6 +397,19 @@ function updateProtestNote() {
     protestNote.classList.remove('hidden');
 }
 
+// Which comps on the grid carry a price that came out of the MLS feed.
+// Only the app's own provenance is knowable here — a price the user copied
+// out of Matrix by hand looks identical to one they got off a sign, which is
+// why the packet says so rather than claiming the filter is complete.
+function mlsSourcedCompLabels() {
+    const set = new Set();
+    appraisalComps.forEach(c => {
+        if (c.priceType === 'closed' && c.priceSource) set.add(normalizeAddr(c.label));
+    });
+    set.delete('');
+    return set;
+}
+
 // Printable evidence packet: built into a hidden div and printed via the
 // app's existing window.print() pattern (a body class flips the print CSS
 // to show ONLY the packet — no popups, so no popup blockers). All user
@@ -428,14 +441,24 @@ function printProtestPacket(p, evidence, basis) {
     const assessedNow = Engine.num(subjectAssessedValueInput.value);
     const gridComps = (lastAppraisal && lastAppraisal.arv > 0 && lastAppraisal.arv < assessedNow
         && lastAppraisal.comps) || [];
-    if (gridComps.length) {
+    // MLS sale prices are CONFIDENTIAL under the NTREIS rules (Texas
+    // non-disclosure), and a licensee may not hand them to an unauthorized
+    // party as supporting documentation — an ARB panel is exactly that.
+    // The derived value conclusion IS permitted, so the packet keeps the
+    // conclusion and withholds the licensed line items rather than
+    // withholding the whole case.
+    const restricted = mlsSourcedCompLabels();
+    const printable = gridComps.filter(c => !restricted.has(normalizeAddr(c.label)));
+    const withheld = gridComps.length - printable.length;
+
+    if (printable.length) {
         el('h2', 'Comparable sales (adjusted to renovated standard)');
         const table = el('table');
         const thead = el('thead', null, table);
         const hrow = el('tr', null, thead);
         ['Comparable', 'Sale price', 'Net adj.', 'Adjusted value', 'Weight'].forEach(h => el('th', h, hrow));
         const tbody = el('tbody', null, table);
-        gridComps.forEach((c, i) => {
+        printable.forEach((c, i) => {
             const row = el('tr', null, tbody);
             el('td', c.label || `Comp ${i + 1}`, row);
             el('td', formatCurrency(c.salePrice), row);
@@ -443,12 +466,24 @@ function printProtestPacket(p, evidence, basis) {
             el('td', formatCurrency(c.adjustedValue), row);
             el('td', '×' + c.weight.toFixed(2), row);
         });
+    }
+    if (gridComps.length) {
         el('div', `Indicated value from the grid: ${formatCurrency(lastAppraisal.arv)} `
             + `(range ${formatCurrency(lastAppraisal.low)}–${formatCurrency(lastAppraisal.high)}).`);
     }
+    if (withheld > 0) {
+        el('h2', 'Withheld comparables');
+        el('div', `${withheld} of the ${gridComps.length} comparables behind the value above came from the MLS feed. `
+            + 'Their sale prices are confidential MLS data and are deliberately not itemized here: a licensee may use them '
+            + 'to derive an opinion of value and state that conclusion, but may not supply MLS sale prices to a third '
+            + 'party as supporting documentation. To put those sales in front of the panel, ask the appraisal district '
+            + 'to obtain them from NTREIS directly, or re-source them from records you may disclose.').className = 'muted';
+    }
 
     el('h2', 'Notes');
-    el('div', 'Texas is a non-disclosure state: prices above are list-at-sale proxies unless verified against MLS. '
+    el('div', (withheld === gridComps.length && gridComps.length
+        ? 'The value above is the licensee\'s own opinion derived from comparable sales. '
+        : 'Texas is a non-disclosure state: itemized prices above are list-at-sale proxies unless verified against MLS. ')
         + 'Verify each comparable in NTREIS Matrix before the hearing. Protest deadline is May 15 or 30 days after '
         + 'the appraisal notice, whichever is later.').className = 'muted';
 
@@ -990,6 +1025,10 @@ function compTemplate() {
         label: '', salePrice: 300000, sqft: 1500, beds: 3, baths: 2,
         lotSqft: 7000, garageSpaces: 2, yearBuilt: 1980, pool: 'no', stories: '1',
         condition: 'renovated', monthsAgo: 0, ratings: defaultRatings(),
+        // Seller concessions ARE engine math (URAR grid line 1 — netted off
+        // the price before the time adjustment). Only an MLS feed publishes
+        // the number; a proxy source leaves it blank and nothing changes.
+        concessions: '', mlsNumber: '', priceType: '',
         // Informational detail fields (auto-filled from the comp's address,
         // not used by the engine math)
         subdivision: '', propType: '', county: '', zoning: '', apn: '',
@@ -1149,6 +1188,46 @@ const CONDITION_OPTIONS = [
     { value: 'dated', text: 'Dated' }
 ];
 
+// Price provenance for one comp card: whether the number in the Sale Price
+// field is a recorded closing or a list-at-sale proxy, plus the concession
+// the grid nets out. Hidden entirely for hand-typed comps — the user knows
+// where their own number came from.
+function renderCompPriceTruth(el, comp) {
+    if (!el) return;
+    el.textContent = '';
+    const parts = [];
+    if (comp.priceType === 'closed') {
+        const span = document.createElement('span');
+        span.className = 'truth-verified';
+        span.textContent = `✓ ${comp.priceSource || 'MLS'} closed price`;
+        span.title = 'A recorded closing, not an asking price';
+        parts.push(span);
+    } else if (comp.priceType === 'list') {
+        const span = document.createElement('span');
+        span.className = 'truth-proxy';
+        span.textContent = '≈ list-at-sale proxy — verify against MLS';
+        span.title = 'Texas is a non-disclosure state: this is the price the home was listed at when it went off market, not the recorded sale';
+        parts.push(span);
+    }
+    const conc = Engine.num(comp.concessions);
+    if (conc > 0) {
+        const span = document.createElement('span');
+        span.textContent = `− ${formatCurrency(conc)} concessions netted out`;
+        span.title = comp.concessionsComments || 'Netted off the price before the time adjustment (URAR grid line 1)';
+        parts.push(span);
+    }
+    if (comp.mlsNumber) {
+        const span = document.createElement('span');
+        span.textContent = 'MLS #' + comp.mlsNumber;
+        parts.push(span);
+    }
+    parts.forEach((p, i) => {
+        if (i) el.append(' · ');
+        el.appendChild(p);
+    });
+    el.classList.toggle('hidden', parts.length === 0);
+}
+
 // Rebuild comp editor cards (only on add/remove/restore; typing updates state in place)
 function renderComps() {
     compsContainer.innerHTML = '';
@@ -1167,6 +1246,7 @@ function renderComps() {
                     <div class="address-suggestions hidden" role="listbox"></div>
                 </div>
                 <div class="comp-subdivision hidden" data-subdiv></div>
+                <div class="comp-price-truth hidden" data-price-truth></div>
             </div>
             <div class="input-row">
                 <div class="form-group">
@@ -1315,6 +1395,19 @@ function renderComps() {
                             <input type="number" data-field="lastSalePrice" min="0" step="1000">
                         </div>
                     </div>
+                    <div class="input-row">
+                        <div class="form-group">
+                            <label title="Netted off the sale price before the time adjustment, the way the URAR grid does it">Seller Concessions</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" data-field="concessions" min="0" step="500">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>MLS #</label>
+                            <input type="text" data-field="mlsNumber">
+                        </div>
+                    </div>
                     <div class="form-group">
                         <label>HOA Fee (monthly)</label>
                         <input type="number" data-field="hoaFee" min="0" step="10">
@@ -1393,6 +1486,10 @@ function renderComps() {
             const schoolSel = card.querySelector('[data-rating="schools"]');
             if (schoolSel) schoolSel.title = comp.schoolsEvidence;
         }
+        // Where this price came from, and what the grid quietly did to it.
+        // A closed MLS price and a list-at-sale proxy are different kinds of
+        // number and the card has to say which one is sitting in the field.
+        renderCompPriceTruth(card.querySelector('[data-price-truth]'), comp);
         card.querySelector('.comp-remove').addEventListener('click', () => {
             appraisalComps.splice(idx, 1);
             renderComps();
@@ -1494,6 +1591,11 @@ let suggestRunId = 0;
 // permanent loss of a hand-tuned appraisal.
 let preResetComps = null;
 
+// Set-level provenance from the last /comps response: { priceTruth, mls }.
+// priceTruth is 'closed' | 'mixed' | 'proxy' | 'none' and decides whether the
+// panel hedges about Texas non-disclosure or states the prices as fact.
+let compsMeta = { priceTruth: null, mls: null };
+
 // Proximity-first ranking (0–100): location and sale recency carry 70 of
 // 100 points — the closest, freshest solds lead. Material similarity earns
 // the last 30, and hard dissimilarity GATES multiply the total down so a
@@ -1570,6 +1672,9 @@ async function suggestComps() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (runId !== suggestRunId) return; // superseded by a newer search
+        // priceTruth / mls describe the SET, not one comp: whether every
+        // price came back a recorded closing, some did, or none did
+        compsMeta = { priceTruth: data.priceTruth || null, mls: data.mls || null };
         const ranked = (data.candidates || [])
             .map(c => ({ ...c, score: candidateScore(c) }))
             .sort((a, b) => b.score - a.score);
@@ -1688,11 +1793,21 @@ function applyCandidateData(c) {
         const months = Math.round((Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44));
         if (months >= 0 && months <= 24) comp.monthsAgo = months;
     }
-    // Condition read from listing remarks when the language is clear;
-    // otherwise the card default (renovated) stands but is FLAGGED so the
-    // assumption is never silent. Remarks survive closing; photos don't —
-    // MLS stays the ground truth either way.
-    const read = Engine.classifyCondition(c.remarks);
+    if (c.price > 0) comp.lastSalePrice = c.price;
+    // Provenance travels with the number so the card can say whether this is
+    // a recorded closing or a list-at-sale proxy
+    if (c.priceType) comp.priceType = c.priceType;
+    if (c.source) comp.priceSource = c.source;
+    if (c.mlsNumber) comp.mlsNumber = c.mlsNumber;
+    // Concessions are engine math, not a note: the grid nets them off the
+    // price before the time adjustment
+    if (c.concessions > 0) comp.concessions = c.concessions;
+    if (c.concessionsComments) comp.concessionsComments = c.concessionsComments;
+    // Condition: the listing agent's coded PropertyCondition when the feed
+    // carries one, else read from the remarks when the language is clear.
+    // Otherwise the card default (renovated) stands but is FLAGGED so the
+    // assumption is never silent. Remarks survive closing; photos don't.
+    const read = Engine.classifyCondition(c.remarks, c.propertyCondition);
     if (read) {
         comp.condition = read.condition;
         comp.conditionEvidence = read.evidence;
@@ -1707,12 +1822,26 @@ function renderCandidates(list) {
     compCandidatesPanel.innerHTML = '';
     const head = document.createElement('div');
     head.className = 'candidates-head';
-    head.innerHTML = '<span>Suggested comps — the top matches were auto-filled into the comp cards below; '
-        + 'swap in any other candidate or add your own. '
-        + 'Prices are list-at-sale (TX non-disclosure); verify against MLS before relying on them.</span>'
-        + '<span style="display: flex; gap: 0.35rem; flex-shrink: 0;">'
+    // The old blanket "prices are list-at-sale, verify against MLS" line was
+    // honest when every price was a scrape. With a licensed feed the same
+    // sentence is just wrong, so it tracks what actually came back.
+    const truth = compsMeta.priceTruth;
+    const mlsName = (compsMeta.mls && compsMeta.mls.name) || 'MLS';
+    const priceLine = truth === 'closed'
+        ? `Prices are recorded ${mlsName} closings.`
+        : truth === 'mixed'
+            ? `Mixed sources — rows marked “${mlsName} closed” are recorded sales; the rest are list-at-sale proxies to verify.`
+            : truth === 'none'
+                ? ''
+                : 'Prices are list-at-sale (TX non-disclosure); verify against MLS before relying on them.';
+    const headText = document.createElement('span');
+    headText.textContent = 'Suggested comps — the top matches were auto-filled into the comp cards below; '
+        + 'swap in any other candidate or add your own. ' + priceLine;
+    head.appendChild(headText);
+    head.insertAdjacentHTML('beforeend',
+        '<span style="display: flex; gap: 0.35rem; flex-shrink: 0;">'
         + '<button class="comp-remove" data-act="refresh" title="Search again">&#x21bb;</button>'
-        + '<button class="comp-remove" data-act="close" title="Close">&times;</button></span>';
+        + '<button class="comp-remove" data-act="close" title="Close">&times;</button></span>');
     head.querySelector('[data-act="refresh"]').addEventListener('click', suggestComps);
     head.querySelector('[data-act="close"]').addEventListener('click', () => compCandidatesPanel.classList.add('hidden'));
     compCandidatesPanel.appendChild(head);
@@ -1728,17 +1857,22 @@ function renderCandidates(list) {
     list.forEach(c => {
         const row = document.createElement('div');
         row.className = 'candidate-row';
-        const read = Engine.classifyCondition(c.remarks);
+        const read = Engine.classifyCondition(c.remarks, c.propertyCondition);
         const conditionNote = read
-            ? `remarks → ${read.condition} (“${read.evidence}”)`
+            ? `${read.from === 'field' ? 'MLS condition' : 'remarks'} → ${read.condition} (“${read.evidence}”)`
             : (c.remarks ? 'remarks: no condition signal' : 'no remarks');
+        const priceNote = !c.price ? 'no price'
+            : formatCurrency(c.price) + (c.priceType === 'closed' ? ' closed' : ' list');
         const specs = [
-            c.price ? formatCurrency(c.price) : 'no price',
+            priceNote,
             c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null,
+            c.concessions > 0 ? `−${formatCurrency(c.concessions)} concessions` : null,
             c.sqft ? `${c.sqft.toLocaleString()} sqft` : null,
             (c.beds != null && c.baths != null) ? `${c.beds} bd / ${c.baths} ba` : null,
             c.yearBuilt ? `blt ${c.yearBuilt}` : null,
             c.distanceMi != null ? `${c.distanceMi} mi` : null,
+            c.dom != null ? `${c.dom} DOM` : null,
+            // Correlation is a RentCast score; it means nothing on an MLS row
             c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null,
             conditionNote
         ].filter(Boolean).join(' · ');
@@ -1750,7 +1884,17 @@ function renderCandidates(list) {
             </div>
             <span class="candidate-score" title="similarity to subject (0–100)"></span>
             <button class="btn btn-secondary candidate-add">Add</button>`;
-        row.querySelector('.candidate-addr').textContent = c.address;
+        const addrEl = row.querySelector('.candidate-addr');
+        addrEl.textContent = c.address;
+        // Only a recorded closing earns the badge — a proxy row stays bare
+        // rather than being dressed up as verified
+        if (c.priceType === 'closed') {
+            const badge = document.createElement('span');
+            badge.className = 'truth-verified candidate-badge';
+            badge.textContent = ' ✓ ' + (c.source || 'MLS');
+            badge.title = 'Recorded closing from the MLS feed';
+            addrEl.appendChild(badge);
+        }
         row.querySelector('.candidate-specs').textContent = specs;
         row.querySelector('.candidate-score').textContent = c.score;
         const btn = row.querySelector('.candidate-add');
@@ -1769,6 +1913,20 @@ function renderCandidates(list) {
         });
         compCandidatesPanel.appendChild(row);
     });
+    appendMlsAttribution(compCandidatesPanel);
+}
+
+// Every MLS data licence requires the compilation to be attributed wherever
+// its data is shown. The worker passes the exact wording through from the
+// MLS_ATTRIBUTION secret so the licence text is whatever the DLA demands,
+// not something this app invented.
+function appendMlsAttribution(container) {
+    const text = compsMeta.mls && compsMeta.mls.attribution;
+    if (!text || !compsMeta.mls.used) return;
+    const note = document.createElement('div');
+    note.className = 'mls-attribution';
+    note.textContent = text;
+    container.appendChild(note);
 }
 
 // ==================== Rent Ladder ====================
@@ -1846,9 +2004,14 @@ function renderRentLadder() {
     rentNote.innerHTML = '';
     const sqft = Engine.num(subjectSqftInput.value);
     const compsRead = Engine.rentFromComps({ sqft }, d.rentals);
-    const market = d.rentcast && d.rentcast.rent > 0
-        ? Math.round(d.rentcast.rent)
-        : (compsRead ? compsRead.estimate : 0);
+    // A closed lease is a transacted rent; an AVM is a model of one. When the
+    // feed produced real closings they lead, and the AVM (which bills a
+    // credit) isn't even fetched.
+    const market = (compsRead && compsRead.basis === 'closed')
+        ? compsRead.estimate
+        : (d.rentcast && d.rentcast.rent > 0
+            ? Math.round(d.rentcast.rent)
+            : (compsRead ? compsRead.estimate : 0));
 
     if (!market) {
         rentNote.append('No market-rent signal near the subject — no nearby rental listings'
@@ -1863,15 +2026,26 @@ function renderRentLadder() {
     fig.textContent = `${formatCurrency(market)}/mo`;
     l1.appendChild(fig);
     const sources = [];
+    if (compsRead && compsRead.basis === 'closed') {
+        sources.push(`${compsRead.used} closed lease${compsRead.used === 1 ? '' : 's'}`
+            + (d.mls ? ` on ${d.mls.name}` : '') + ` → ${formatCurrency(compsRead.estimate)}`
+            + (compsRead.ppsfMedian ? ` ($${compsRead.ppsfMedian.toFixed(2)}/sqft)` : ''));
+    }
     if (d.rentcast && d.rentcast.rent > 0) {
         sources.push(`RentCast ${formatCurrency(d.rentcast.rent)}`
             + (d.rentcast.low ? ` (${formatCurrency(d.rentcast.low)}–${formatCurrency(d.rentcast.high)})` : ''));
     }
-    if (compsRead) {
+    if (compsRead && compsRead.basis !== 'closed') {
         sources.push(`${compsRead.used} listed rental${compsRead.used === 1 ? '' : 's'} nearby → ${formatCurrency(compsRead.estimate)}`
             + (compsRead.ppsfMedian ? ` ($${compsRead.ppsfMedian.toFixed(2)}/sqft)` : ''));
     }
     if (sources.length) l1.append(' · ' + sources.join(' · '));
+    if (compsRead && compsRead.basis === 'closed') {
+        const tag = document.createElement('span');
+        tag.className = 'truth-verified';
+        tag.textContent = ' ✓ signed leases, not asking rents';
+        l1.appendChild(tag);
+    }
     rentNote.appendChild(l1);
 
     const beds = Math.round(Engine.num(subjectBedsInput.value));
@@ -1985,7 +2159,19 @@ function renderMarketScan() {
     counts.textContent = `${d.actives.length} active · ${d.pendings.length} pending · `
         + `${d.totals.sold12mo != null ? d.totals.sold12mo : d.solds.length} sold in 12 mo`;
     l1.appendChild(counts);
-    l1.append(' — meter auto-filled. ');
+    l1.append(' — meter auto-filled');
+    // A licensed hot sheet and a scrape of a portal are not the same reading;
+    // the panel says which one produced these counts
+    if (d.source) {
+        const src = document.createElement('span');
+        src.className = d.priceTruth === 'closed' ? 'truth-verified' : 'truth-proxy';
+        src.textContent = ` from ${d.source}`;
+        src.title = d.priceTruth === 'closed'
+            ? 'Recorded closings and real listing statuses straight from the MLS feed'
+            : 'Scraped portal listings — counts and prices are approximate';
+        l1.appendChild(src);
+    }
+    l1.append('. ');
     const rescan = document.createElement('button');
     rescan.className = 'btn btn-secondary';
     rescan.textContent = '⟳';
@@ -2007,6 +2193,15 @@ function renderMarketScan() {
             l2.appendChild(dir);
         }
         marketScanEl.appendChild(l2);
+        // True days-on-market only exists on a licensed feed — it is the
+        // number a flip holding period should actually be built on
+        if (trend.medianDom != null) {
+            const dom = document.createElement('div');
+            dom.textContent = `Median days on market (12 mo): ${Math.round(trend.medianDom)}`
+                + ` — a resale here takes about ${Math.max(1, Math.round(trend.medianDom / 30))} month`
+                + `${Math.round(trend.medianDom / 30) === 1 ? '' : 's'} to go under contract before closing time.`;
+            marketScanEl.appendChild(dom);
+        }
     }
 
     const arv = lastAppraisal && lastAppraisal.arv > 0 ? lastAppraisal.arv : 0;
@@ -2903,7 +3098,13 @@ function setLookupStatus(message, kind) {
 // Bump the version whenever records gain fields — older cached entries
 // would otherwise silently auto-fill without the new fields forever
 // (v2: subdivision/hoa; v3: facts/construction/financial/owner details)
-const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v3';
+const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v4';
+
+// MLS licences cap how long a licensee may hold the compilation locally and
+// require refreshing against the source. Public-record and portal data carry
+// no such clock, so only MLS-sourced records expire — twelve hours is the
+// conventional refresh interval and is well inside any DLA's window.
+const MLS_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 let lastSelectedCoords = null; // lat/lon from the picked autocomplete suggestion
 let lastSelectedMprId = null;  // realtor.com property id from the picked suggestion
 
@@ -2929,10 +3130,23 @@ function cacheKeyFor(address) {
     return address.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// A record carries MLS-licensed content when the feed answered for it. That
+// is the only case with a retention clock, so it is the only case that expires.
+function recordIsMlsSourced(rec) {
+    return Boolean(rec && rec.extra && rec.extra.mlsNumber);
+}
+
 function getCachedRecord(address) {
     try {
         const cache = JSON.parse(localStorage.getItem(PROPERTY_CACHE_KEY) || '{}');
-        return cache[cacheKeyFor(address)] || null;
+        const entry = cache[cacheKeyFor(address)];
+        if (!entry) return null;
+        if (recordIsMlsSourced(entry) && Date.now() - (entry._cachedAt || 0) > MLS_CACHE_TTL_MS) {
+            delete cache[cacheKeyFor(address)];
+            localStorage.setItem(PROPERTY_CACHE_KEY, JSON.stringify(cache));
+            return null; // stale licensed data: re-pull rather than re-serve
+        }
+        return entry;
     } catch (e) { return null; }
 }
 
@@ -2941,7 +3155,7 @@ function putCachedRecord(address, record) {
         const cache = JSON.parse(localStorage.getItem(PROPERTY_CACHE_KEY) || '{}');
         const keys = Object.keys(cache);
         if (keys.length >= 60) delete cache[keys[0]]; // keep the cache bounded
-        cache[cacheKeyFor(address)] = record;
+        cache[cacheKeyFor(address)] = { ...record, _cachedAt: Date.now() };
         localStorage.setItem(PROPERTY_CACHE_KEY, JSON.stringify(cache));
     } catch (e) { /* storage full — cache is best-effort */ }
 }
@@ -3726,6 +3940,33 @@ melissaKeyInput.addEventListener('input', () => {
     try { localStorage.setItem(MELISSA_KEY_STORAGE, melissaKeyInput.value.trim()); } catch (e) { /* private mode */ }
 });
 
+// Feed status in the settings panel. Runs once at load and after any proxy
+// URL change, so the answer to "is my MLS licence actually wired up?" is
+// visible without a network tab.
+const mlsStatusEl = document.getElementById('mls-status');
+let mlsHealth = null;
+
+async function refreshMlsStatus() {
+    if (!mlsStatusEl) return;
+    try {
+        const res = await fetch(workerBase() + '/health', { headers: { 'Accept': 'application/json' } });
+        const h = await res.json();
+        mlsHealth = (h && h.mls) || null;
+        if (mlsHealth) {
+            mlsStatusEl.textContent = `MLS feed: ✓ ${mlsHealth.name} live over ${String(mlsHealth.transport).toUpperCase()}`
+                + ' — comps, market scan and rent all read from it, with the sources below as fallback.';
+            mlsStatusEl.className = 'settings-note truth-verified';
+        } else {
+            mlsStatusEl.textContent = 'MLS feed: not configured — comps fall back to realtor.com list-at-sale proxies. '
+                + 'Add the feed credentials as secrets on the data proxy to switch to recorded sale prices.';
+            mlsStatusEl.className = 'settings-note truth-proxy';
+        }
+    } catch (e) {
+        mlsStatusEl.textContent = 'MLS feed: could not reach the data proxy to check.';
+        mlsStatusEl.className = 'settings-note';
+    }
+}
+
 let workerHealthDebounce = null;
 workerUrlInput.addEventListener('input', () => {
     try { localStorage.setItem(WORKER_URL_STORAGE, workerUrlInput.value.trim()); } catch (e) { /* private mode */ }
@@ -3738,13 +3979,18 @@ workerUrlInput.addEventListener('input', () => {
             const h = await res.json();
             if (h && h.ok) {
                 const extras = [h.providers.rentcast && 'RentCast', h.providers.melissa && 'Melissa'].filter(Boolean);
-                setLookupStatus(`✓ Worker connected — keyless realtor.com data${extras.length ? ' + server-side keys: ' + extras.join(', ') : ''}.`, 'success');
+                const mls = h.mls
+                    ? `✓ Worker connected — ${h.mls.name} feed live (${h.mls.transport.toUpperCase()}); `
+                        + `fallbacks: keyless realtor.com${extras.length ? ' + ' + extras.join(', ') : ''}.`
+                    : `✓ Worker connected — keyless realtor.com data${extras.length ? ' + server-side keys: ' + extras.join(', ') : ''}.`;
+                setLookupStatus(mls, 'success');
             } else {
                 setLookupStatus('✗ That URL responded, but not like the underwriter worker — check the deployment.', 'error');
             }
         } catch (e) {
             setLookupStatus('✗ Could not reach the worker at that URL (CORS or typo?).', 'error');
         }
+        refreshMlsStatus();
     }, 700);
 });
 
@@ -3769,6 +4015,7 @@ recalcAppraisal();
 updateAbsorption();
 updateRehabEstimator();
 renderRentNote();
+refreshMlsStatus();    // async; settings panel shows the feed's real state
 switchPage('subject'); // step 1 first
 
 // ==================== Native app (Capacitor) integration ====================

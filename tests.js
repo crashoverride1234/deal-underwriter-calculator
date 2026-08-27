@@ -461,6 +461,63 @@ test('appraise: negative appreciation adjusts old comps DOWN (declining market)'
     assertNear(a.comps[0].adjustments.time, -18000, 1e-9, '-6%/yr × 12 months on $300k');
 });
 
+// ---- Seller concessions (MLS-only field; URAR grid line 1) ----
+
+test('appraise: concessions come off the price BEFORE the time adjustment', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 1500, beds: 3, baths: 2 },
+        comps: [{ salePrice: 300000, concessions: 10000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 12 }],
+        settings: { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 6 }
+    });
+    const c = a.comps[0];
+    assertNear(c.adjustments.concessions, -10000, 1e-9, 'concession line');
+    assertNear(c.cashEquivalent, 290000, 1e-9, 'cash-equivalent price');
+    // 6%/yr × 12 months on the CASH-EQUIVALENT $290k, not the $300k contract
+    assertNear(c.adjustments.time, 17400, 1e-9, 'time runs off cash-equivalent');
+    assertNear(c.adjustedValue, 300000 - 10000 + 17400, 1e-9, 'net of both lines');
+});
+
+test('appraise: percentage adjustments read the concession-netted basis', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 1500, beds: 3, baths: 2 },
+        comps: [{ salePrice: 300000, concessions: 20000, sqft: 1500, beds: 3, baths: 2, condition: 'dated', monthsAgo: 0 }],
+        settings: { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { dated: 10 }, annualAppreciationPct: 0 }
+    });
+    // 10% of $280k, not of $300k
+    assertNear(a.comps[0].adjustments.condition, 28000, 1e-9, 'condition % off cash-equivalent');
+});
+
+test('appraise: no concessions field leaves every number exactly as before', () => {
+    const settings = { pricePerSqftAdj: 50, bedAdj: 5000, bathAdj: 7500, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 6 };
+    const subject = { sqft: 1500, beds: 3, baths: 2 };
+    const comp = { salePrice: 300000, sqft: 1500, beds: 3, baths: 2, condition: 'renovated', monthsAgo: 12 };
+    const a = Engine.appraise({ subject, comps: [comp], settings });
+    const b = Engine.appraise({ subject, comps: [{ ...comp, concessions: 0 }], settings });
+    assert(a.comps[0].adjustments.concessions === 0 && b.comps[0].adjustments.concessions === 0, 'zero line');
+    assertNear(a.comps[0].adjustedValue, 318000, 1e-9, 'unchanged from the pre-concessions engine');
+    assertNear(a.comps[0].adjustedValue, b.comps[0].adjustedValue, 1e-9, 'absent === zero');
+    assertNear(a.comps[0].pricePerSqft, 200, 1e-9, '$/sqft unchanged when nothing is conceded');
+});
+
+test('appraise: concessions can never exceed the sale price', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 1500 },
+        comps: [{ salePrice: 100000, concessions: 250000, sqft: 1500, condition: 'renovated', monthsAgo: 0 }],
+        settings: { pricePerSqftAdj: 50, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 0 }
+    });
+    assertNear(a.comps[0].cashEquivalent, 0, 1e-9, 'floored at zero, never negative');
+    assertNear(a.comps[0].adjustments.concessions, -100000, 1e-9, 'clamped to the price');
+});
+
+test('appraise: $/sqft is quoted cash-equivalent, not contract price', () => {
+    const a = Engine.appraise({
+        subject: { sqft: 2000 },
+        comps: [{ salePrice: 400000, concessions: 20000, sqft: 2000, condition: 'renovated', monthsAgo: 0 }],
+        settings: { pricePerSqftAdj: 50, conditionAdjPct: { renovated: 0 }, annualAppreciationPct: 0 }
+    });
+    assertNear(a.comps[0].pricePerSqft, 190, 1e-9, '$380k / 2000 sqft');
+});
+
 // ---- classifyCondition: listing-remarks condition read ----
 
 test('classify: full-scope renovation language reads renovated', () => {
@@ -492,6 +549,30 @@ test('classify: no signal or missing text returns null, never a guess', () => {
     assert(Engine.classifyCondition('') === null);
     assert(Engine.classifyCondition(null) === null);
     assert(Engine.classifyCondition(undefined) === null);
+});
+
+test('classify: a structured MLS PropertyCondition outranks the remarks read', () => {
+    // The agent coded "Fixer"; the marketing copy still gushes. The field wins.
+    const r = Engine.classifyCondition('Beautifully updated throughout!', 'Fixer');
+    assert(r.condition === 'dated', `expected dated, got ${r.condition}`);
+    assert(r.from === 'field', 'evidence attributed to the field');
+    assert(r.evidence === 'Fixer', 'evidence quotes the coded value');
+});
+
+test('classify: multi-value PropertyCondition takes the strongest signal', () => {
+    assert(Engine.classifyCondition(null, 'Updated/Remodeled, Resale').condition === 'renovated');
+    assert(Engine.classifyCondition(null, 'Resale').condition === 'average');
+    assert(Engine.classifyCondition(null, 'New Construction').condition === 'renovated');
+});
+
+test('classify: an unrecognized PropertyCondition falls through to remarks', () => {
+    const r = Engine.classifyCondition('Sold as-is, investor special', 'Unknown');
+    assert(r.condition === 'dated' && r.from === 'remarks', 'remarks still read');
+    assert(Engine.classifyCondition(null, 'Unknown') === null, 'no field signal, no text = null');
+});
+
+test('classify: remarks-only reads are attributed to remarks', () => {
+    assert(Engine.classifyCondition('Completely remodeled in 2024').from === 'remarks');
 });
 
 // ---- protestOpportunity: assessed vs evidence ----
@@ -575,6 +656,25 @@ test('market trend: small deltas read flat; no data reads null, not a fake verdi
     assert(one.direction === null, 'a single bucket cannot make a trend');
 });
 
+test('market trend: days-on-market medians ride along when the feed carries them', () => {
+    const asOf = '2026-08-14';
+    const t = Engine.marketTrend([
+        { soldDate: '2026-07-20', price: 320000, dom: 9 }, { soldDate: '2026-06-25', price: 324000, dom: 15 },
+        { soldDate: '2025-11-15', price: 300000, dom: 61 }
+    ], asOf);
+    assertNear(t.buckets[0].medianDom, 12, 1e-9, 'newest bucket DOM median');
+    assertNear(t.buckets[2].medianDom, 61, 1e-9, 'oldest bucket DOM median');
+    assertNear(t.medianDom, 15, 1e-9, 'trailing-year DOM median');
+});
+
+test('market trend: scraped solds with no DOM leave the DOM read null, never zero', () => {
+    const t = Engine.marketTrend([
+        { soldDate: '2026-07-20', price: 320000 }, { soldDate: '2025-11-15', price: 300000 }
+    ], '2026-08-14');
+    assert(t.medianDom === null, 'no DOM data = null');
+    assert(t.buckets.every(b => b.medianDom === null), 'no phantom zeros in the buckets');
+});
+
 // ---- rentFromComps ----
 
 test('rent from comps: median $/sqft scaled to the subject, rounded to $25', () => {
@@ -589,8 +689,28 @@ test('rent from comps: median $/sqft scaled to the subject, rounded to $25', () 
 test('rent from comps: falls back to median rent without subject sqft; null with nothing usable', () => {
     const r = Engine.rentFromComps({}, [{ rent: 1900 }, { rent: 2100 }, { rent: 2300 }]);
     assert(r.estimate === 2100, 'plain median fallback');
+    assert(r.basis === 'listed', 'no closed leases = listed basis');
     assert(Engine.rentFromComps({ sqft: 1500 }, []) === null);
     assert(Engine.rentFromComps({ sqft: 1500 }, [{ rent: 0, sqft: 1000 }]) === null);
+});
+
+test('rent from comps: closed MLS leases DISPLACE asking rents, never average with them', () => {
+    const r = Engine.rentFromComps({}, [
+        { rent: 2000, status: 'closed' }, { rent: 2100, status: 'closed' }, { rent: 2200, status: 'closed' },
+        { rent: 3400 }, { rent: 3600 }, { rent: 3800 } // wishful asks, must not count
+    ]);
+    assert(r.estimate === 2100, `closed median only, got ${r.estimate}`);
+    assert(r.used === 3, 'only the closed leases were used');
+    assert(r.basis === 'closed', 'basis labeled closed');
+});
+
+test('rent from comps: closed-lease $/sqft also scales to the subject', () => {
+    const r = Engine.rentFromComps({ sqft: 2000 }, [
+        { rent: 2000, sqft: 1600, status: 'closed' }, { rent: 2600, sqft: 2000, status: 'closed' },
+        { rent: 2200, sqft: 1800, status: 'closed' }, { rent: 9000, sqft: 1800 }
+    ]);
+    assertNear(r.ppsfMedian, 1.25, 1e-9, 'closed-only median $/sqft');
+    assert(r.estimate === 2500 && r.basis === 'closed');
 });
 
 // ---- Rehab reality: estimator, capex flags, draw interest, peak cash ----

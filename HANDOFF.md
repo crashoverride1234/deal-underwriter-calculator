@@ -43,7 +43,7 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 
 - **Every turn ends deployed and live**, not just coded. Cadence per feature:
   implement → verify end-to-end in a browser preview against LIVE APIs (real
-  DFW addresses; hand-check the math) → `node tests.js` (72/72 must pass) →
+  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (47/47) →
   bump `CACHE_NAME` in `sw.js` → commit + push to `main` → poll the live URL
   for a marker string with no-cache headers to confirm the Pages deploy → tell
   him concretely what to tap/test, with the numbers you verified.
@@ -72,9 +72,23 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 - Git line endings: files are LF in the repo, Windows warns about CRLF —
   harmless, ignore.
 
-## 5. State as of 2026-08-16
+## 5. State as of 2026-08-27
 
-**Just shipped (commit `231866a`)**: comps location map on the ARV page —
+**Just shipped (2026-08-27)**: the MLS feed rework — a licensed RESO Web API
+/ classic RETS feed is now the PRIMARY source for property records, comps,
+market scan and rent, with realtor.com / RentCast / Melissa / TAD demoted to
+automatic fallbacks. Inert until Worker secrets exist; every route degrades
+cleanly on auth failure, empty result or timeout (verified locally against
+Trestle's real token endpoint with dummy credentials — it returns the
+documented `400 invalid_client`, and all four routes fell back correctly).
+New: `/mls/probe` field-mapping diagnostic, `worker/tests.mjs` (47 tests),
+seller-concessions netting in `appraise()` (URAR grid line 1), closed-lease
+preference in `rentFromComps()`, structured `PropertyCondition` over remarks
+prose in `classifyCondition()`, median-DOM in `marketTrend()`, per-comp price
+provenance badges, and a licence guard that withholds MLS-sourced line items
+from the tax-protest packet. Details in `CLAUDE.md` under "MLS feed".
+
+**Previously shipped (commit `231866a`)**: comps location map on the ARV page —
 Leaflet + Esri imagery below the comp cards, "S" subject pin + numbered comp
 pins (gray = unpriced/out of blend), popups with label / price / distance,
 in-place pin restyling so typing never closes a popup, label typing clears
@@ -90,6 +104,9 @@ back-solver; TX post-sale tax reassessment; comp condition read from listing
 remarks; blank start on every open; auto-suggested comps on ARV entry.
 
 **Keys / secrets status**:
+- Worker MLS secrets (`MLS_*`) — NOT set. This is the one thing standing
+  between the app and true sold prices. Full annotated list in
+  `worker/.dev.vars.example`; setup runbook in `worker/README.md`.
 - Worker `RENTCAST_API_KEY` — SET and live (50 lookups/mo free; only
   HTTP-200s billed; app-side localStorage cache keeps repeats free).
 - Worker `MELISSA_API_KEY` — NOT set (user never supplied one; ~1,000 free
@@ -118,12 +135,30 @@ tier hard cap means no billing risk; rotate the worker name if abused.
 2. Multi-year rental projections with depreciation from the land/improvement
    split; exit-strategy comparator; saved-deal archive (substrate for comp
    alerts + budget-vs-actual); Texas seller-net sheet; BRRRR seasoning.
-3. **NTREIS BBO / Trestle** = the endgame for TRUE sold prices (TX is
-   non-disclosure; today's comp prices are list-at-sale proxies and the UI
-   says to verify against MLS). Path: register as Technology Provider →
-   NTREIS BBO connection → 4-party DLA → RESO Web API; ~$100/mo Trestle +
-   NTREIS license. When credentials arrive, swap the `/comps` and `/market`
-   data source in the Worker.
+3. **MLS feed — BUILT 2026-08-27, waiting on credentials.** The whole rung
+   ships: both transports (RESO Web API + classic RETS), all four routes
+   (`/lookup`, `/comps`, `/market`, `/rent`), the `/mls/probe` diagnostic,
+   47 unit tests, and the licence-compliance guards. It is INERT until the
+   Worker secrets exist — see `worker/.dev.vars.example` and the "MLS feed"
+   sections of `worker/README.md` and `CLAUDE.md`.
+   What is still needed from James is paperwork, not code:
+   - NTREIS calls the back-office product **"Broker RETS Access for In-House
+     Office Use"** (they do NOT use the term "BBO"). Request the agreement
+     from **dataaccess@ntreis.net**, describing the intended use; credentials
+     then come from **rets@ntreis.net**. NTREIS runs its own RETS server
+     (matrixrets.ntreis.net, RETS 1.8) on a Matrix backend — which is why the
+     classic-RETS transport exists alongside the RESO one.
+   - IDX **cannot** carry sold prices or full remarks, and VOW blacklists
+     selling price in Texas. Back-office is the only product that works.
+   - The **Designated Broker must sign** — a sponsored agent cannot hold data
+     access alone. Confirm who that is.
+   - Trestle is the other path (published evidence of carrying NTREIS;
+     "IDX Plus" = on-market + 7 yrs of Sold incl. selling info). Trestle's own
+     2026 fee is $30/mo for a broker data feed, on top of NTREIS's.
+   - Open question that decides everything: Rule 15.03(b) grants the
+     valuation right to a licensee "acting as agent for an owner(s),
+     buyer(s) or tenant(s)". Underwriting for one's OWN account as a
+     principal may fall outside it. Ask NTREIS in writing.
 4. Store submission: Play Console ($25 one-time; personal accounts need a
    12-tester/14-day closed test), signed AAB / TestFlight secrets, a
    privacy-policy URL (offer to generate one on Pages), a proper adaptive
@@ -157,4 +192,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v34`).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v35`).
+- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (47).
+- MLS credentials NEVER go in the browser — Worker secrets only. There is
+  deliberately no paste-a-key field for them, unlike RentCast/Melissa.

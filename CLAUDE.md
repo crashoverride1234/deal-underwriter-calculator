@@ -20,8 +20,13 @@ GitHub Pages from `main`.
   `ruleOfThumbOffer()`/`suggestedRulePct()` (70%-rule flexed 65–75 by
   absorption score), `estimateRehab()`/`capexFlags()` (tiered $/sqft scope
   + DFW year-built era advisories), `marketTrend()` (1004MC-style
-  0–3/4–6/7–12-month sold buckets, ±3% = flat), `rentFromComps()` (median
-  $/sqft × subject sqft). underwrite() also models draw-based vs Dutch
+  0–3/4–6/7–12-month sold buckets, ±3% = flat; also `medianDom` per bucket
+  and trailing-year, null unless the feed carries days-on-market),
+  `rentFromComps()` (median $/sqft × subject sqft; CLOSED leases displace
+  asking rents outright rather than averaging with them — `basis` says
+  which). `classifyCondition(text, propertyCondition)` prefers a structured
+  MLS PropertyCondition over mining the remarks prose, and reports which it
+  used via `from: 'field' | 'remarks'`. underwrite() also models draw-based vs Dutch
   interest (`interestOnDraws`; holdback averages half-drawn) and emits
   flip `peakCashExposure` (cash + ⅓ holdback fronted between draws).
 - `app.js` — DOM wiring only. Charts update in place (never destroy/recreate
@@ -36,8 +41,13 @@ GitHub Pages from `main`.
 - `tests.js` — engine unit tests: `node tests.js`, or open `test.html` in a
   browser. Every engine change needs tests; UI-only changes need browser
   verification instead.
-- `worker/` — Cloudflare Worker proxy for keyless property auto-fill
-  (realtor.com GraphQL; optional RentCast/Melissa via Worker secrets).
+- `worker/` — Cloudflare Worker proxy. Holds the licensed **MLS feed** (the
+  primary source; see "MLS feed" below), keyless property auto-fill
+  (realtor.com GraphQL), and optional RentCast/Melissa via Worker secrets.
+  `worker/tests.mjs` (`node worker/tests.mjs`) unit-tests the MLS normalizers
+  against synthetic RESO and RETS payloads — the only verification possible
+  without licensed credentials. Extra named exports at the bottom of
+  `worker.js` exist for that harness; Cloudflare only consumes the default.
 - `native/` — Capacitor 8 iOS/Android store apps wrapping the same web files
   (see `native/README.md`). `build-www.mjs` stages `www/` (vendors the CDN
   libs, strips the SW); native-only behavior sits at the bottom of `app.js`
@@ -53,7 +63,8 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (72 tests as of 2026-08-16). Must pass before deploy.
+- **Test**: `node tests.js` (85 tests as of 2026-08-27) AND `node worker/tests.mjs`
+  (47 MLS-normalizer tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -61,6 +72,79 @@ GitHub Pages from `main`.
   download the artifacts. Store signing/submission: `native/README.md`.
 - Project norm: verify features end-to-end in the browser preview (including
   live API calls) BEFORE pushing; then push and confirm the Pages deploy.
+
+## MLS feed — the primary source (added 2026-08-27)
+
+Everything in the next section exists because the app had no MLS licence.
+With one configured, those sources become the FALLBACK and the feed answers
+with the actual transaction record. All of it lives in `worker/worker.js`
+under "MLS feed", gated by `mlsConfigured(env)` — **inert until the secrets
+exist**, so an unconfigured worker behaves exactly as it did before.
+
+- **Two transports.** `reso` = RESO Web API (OData v4 + OAuth2
+  client_credentials bearer; Trestle/Cotality, Bridge, MLS Grid, Spark).
+  `rets` = classic RETS 1.7.2/1.8 (Login handshake → DMQL2 →
+  COMPACT-DECODED). "A RETS feed" means either one in 2026, hence both.
+  The RETS half is written from the spec and **unverified against a live
+  server**; `/mls/probe` exercises the whole handshake and says where it stops.
+- **Credentials are Worker secrets ONLY.** A data licence forbids shipping
+  them to a browser, so unlike RentCast/Melissa there is deliberately no
+  client-side paste path. Full annotated list: `worker/.dev.vars.example`.
+- **Field names default to RESO Data Dictionary 2.0**; `MLS_FIELD_MAP` (JSON)
+  overrides any single entry. `/mls/probe` reports the server's actual field
+  list so the map is written from evidence, not guesswork.
+- **Routes**: `/lookup` gains an MLS rung that OVERLAYS every rung below it
+  (a listing knows the house; it rarely knows the tax roll or owner) while
+  obeying the same "no tax bill ⇒ don't end the ladder" invariant TAD obeys.
+  `/comps` returns MLS closed sales and drops the proxies entirely once 3+
+  are found — a verified close price and a list-at-sale guess are different
+  KINDS of number and must not be ranked in one list. `/market` gets true
+  closes + real statuses + a separate Active-Under-Contract bucket. `/rent`
+  gets closed LEASES (transacted rents, free) and skips the billable
+  RentCast AVM when it has 3+. Every route falls back on auth failure,
+  empty result, or timeout, and surfaces the reason in `providerErrors`.
+- **`priceTruth`** (`closed` | `mixed` | `proxy` | `none`) rides on `/comps`
+  and `/market`; the client's "TX non-disclosure, verify against MLS" hedge
+  is now conditional on it instead of being blanket-true.
+- **Gotchas** (all researched against primary sources 2026-08-27):
+  Trestle `$top` defaults to **10**, caps at 1,000. NO `$select` is sent by
+  default — naming a field the feed doesn't publish rejects the whole query.
+  Lat/Lon are NOT index-accelerated (only ListingId/ListingKey/
+  ModificationTimestamp/PhotosChangeTimestamp/PhotosCount/PostalCode/
+  StandardStatus are), so a geo filter is the query most likely to 504 — a
+  timeout auto-retries narrowed by PostalCode. `geo.distance()` works on
+  Trestle's `X_Location` GeographyPoint but is a vendor extension, so the
+  portable lat/lon bounding box + haversine trim is the default and
+  `MLS_GEO_FIELD` opts into the former. `BathroomsTotalInteger` is a SIMPLE
+  SUM (2 full + 1 half = 3, not 2.5) — prefer `BathroomsTotalDecimal`, then
+  the components. `Levels` beats `StoriesTotal` (the latter counts the
+  BUILDING, wrong for a condo unit). `ConcessionsAmount` is back-office
+  payload only and ~40% populated: null means "not reported", never $0, so
+  the separate `Concessions` Yes/No flag rides along as
+  `concessionsReported`. StandardStatus enum members are compact
+  (`ActiveUnderContract`) unless `PrettyEnums=true` — both spellings are
+  queried, each status group is its own fault-tolerant query, and values are
+  prettified for DISPLAY only, never for filtering. Classic RETS is one
+  session per login (a second Login silently kills the first, ReplyCode
+  20022) so logins are single-flighted; `/mls/probe?logout=1` clears a stuck
+  one. Workers has no cookie jar — the RETS session cookie is replayed by
+  hand — and no DOMParser, so COMPACT-DECODED is parsed with regex.
+  `redirect: 'manual'` on both RETS calls: Workers replays Authorization and
+  Cookie across a redirect, including to another host.
+- **Licence compliance is a design constraint, not a footnote.** NTREIS
+  Rule 15.03(b) bars a licensee from supplying confidential MLS information
+  as supporting documentation to a third party, and Rule 8.08 Note 2 makes
+  Texas sale prices confidential. The tax-protest packet therefore WITHHOLDS
+  the line items of any MLS-sourced comp (`mlsSourcedCompLabels()` in
+  app.js) while keeping the derived value conclusion, which is permitted,
+  and explains the omission in the printed packet. Rule 17.01 forbids
+  blending MLS with non-MLS data, and 16.06/17.23/19.16 permit augmentation
+  only when the non-MLS source is clearly identified and visually separated
+  — hence the per-candidate source badges and the proxies being dropped
+  wholesale once the feed delivers. `MLS_ATTRIBUTION` carries the licence's
+  own required wording through `/health` and `/comps` to the UI.
+  MLS-sourced records in the browser cache expire after 12 h
+  (`MLS_CACHE_TTL_MS`); non-MLS records still never expire.
 
 ## External data sources (all live-verified July 2026)
 
@@ -173,9 +257,13 @@ GitHub Pages from `main`.
 
 - Percent inputs are whole numbers (80 = 80%); the engine divides by 100.
 - Missing comp data must produce NO adjustment, not a phantom one.
-- Appraisal model semantics (all deliberate, all tested): time adjustment
-  first, % adjustments (condition/qualitative) apply to the time-adjusted
-  basis; renovated comps take no age adjustment (effective age); the sqft
+- Appraisal model semantics (all deliberate, all tested): SELLER CONCESSIONS
+  come off the price FIRST (URAR grid line 1) giving a cash-equivalent
+  basis, then the time adjustment, then % adjustments
+  (condition/qualitative) on the time-adjusted basis. Only an MLS feed knows
+  concessions; absent ⇒ 0 ⇒ every number is bit-identical to the
+  pre-concessions engine (tested). `pricePerSqft` is quoted cash-equivalent.
+  Renovated comps take no age adjustment (effective age); the sqft
   line nets out bedroom/bath footprints (`DEFAULTS.bedroomFootprintSqft`);
   story premium fires only single-story-vs-multi (stairs, not floor count);
   appreciation and storyAdj may be negative; the engine emits per-comp
@@ -187,7 +275,9 @@ GitHub Pages from `main`.
   persist (`underwriter-appraisal-v1` is settings-only now) plus API keys.
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
-  `underwriter-property-cache-v3`.
+  `underwriter-property-cache-v4` (v4: entries carry `_cachedAt`; MLS-sourced
+  records expire after 12 h for licence retention, everything else never
+  does). There is deliberately NO localStorage key for MLS credentials.
 - Never commit `worker/.wrangler/` (gitignored) or any secrets; the repo is
   public. The deployed Worker URL is deliberately baked into `app.js` as
   `DEFAULT_WORKER_URL` (zero-setup auto-fill was chosen over URL secrecy;

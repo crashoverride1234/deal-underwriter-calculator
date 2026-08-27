@@ -1,1 +1,4 @@
 .wrangler/
+
+# Local wrangler dev vars — may contain real MLS credentials, never commit
+.dev.vars
