@@ -66,7 +66,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (85 tests as of 2026-08-27) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (99 tests as of 2026-08-27) AND `node worker/tests.mjs`
   (83 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
@@ -343,6 +343,28 @@ exist**, so an unconfigured worker behaves exactly as it did before.
 
 - Percent inputs are whole numbers (80 = 80%); the engine divides by 100.
 - Missing comp data must produce NO adjustment, not a phantom one.
+- **Comp selection is filtered at the SOURCE, not sorted out afterwards.**
+  The MLS query carries sub-type, a ±35% size band and ±1 bedroom alongside
+  the geographic box, because the row cap is spent on whatever the server
+  returns first — an unfiltered query fills it with a studio condo and a
+  mansion and the best comps are never fetched at all. `mlsComps()` widens
+  geography before it loosens the material bands.
+- **The GLA adjustment is DERIVED from the comps** (`deriveMarketRates()`),
+  not a static default. The old fixed $50/sqft was a national rule of thumb;
+  in a $317/sqft Fort Worth street the derived rate is $142, and the gap
+  under-corrected every size difference by tens of thousands in the same
+  direction. Regression slope when it is explanatory (R² ≥ 0.35) and lands
+  in 20–90% of median $/sqft, else 45% of median — because a slope fitted to
+  a street where bigger houses are also nicer measures size PLUS everything
+  correlated with size. Typing in the field marks it overridden and the
+  derivation reports rather than overwrites.
+- **The sale price overrules the marketing copy on condition**
+  (`reconcileCondition()`). "Sold as-is" is boilerplate that appears on
+  renovated flips, and a condition uplift is the largest single line in the
+  grid — observed live adding $140,700 to a comp that had sold at $373/sqft
+  in a $317/sqft market. A "dated" read on a comp selling ABOVE market rate
+  (or "renovated" far BELOW) is dropped to unverified. It never substitutes
+  the opposite condition: a price gap can be lot, street or motivation.
 - Appraisal model semantics (all deliberate, all tested): SELLER CONCESSIONS
   come off the price FIRST (URAR grid line 1) giving a cash-equivalent
   basis, then the time adjustment, then % adjustments

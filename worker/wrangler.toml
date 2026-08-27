@@ -39,6 +39,10 @@ MLS_STATUS_ACTIVE = "ACT"
 MLS_STATUS_PENDING = "PND,ACTUC"
 MLS_PROPERTY_TYPES = "RESI"
 MLS_LEASE_TYPES = "RLSE"
+# PropertySubType: SFR=Single Family Residence, TH=Townhouse, CONDO, DUPLEX,
+# MANUHOME, MOBILE... Without this a 949 sqft one-bed condo comes back as a
+# candidate for a 1,842 sqft house — same PropertyType, different market.
+MLS_SUBTYPES = "SFR"
 
 # NTREIS's older guidance says to exclude their test area (MLSAreaMajor 1001,
 # which "can cause your RETS download to fail") and 1000. That advice predates

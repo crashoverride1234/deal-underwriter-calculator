@@ -1544,3 +1544,17 @@ input[type="range"]::-webkit-slider-thumb:active {
     font-size: 0.68rem;
     opacity: 0.85;
 }
+
+/* Provenance for an auto-derived adjustment rate. Quiet by default — it is
+   an explanation, not a warning — and amber once the user has overridden it,
+   because then the app is deliberately not using its own answer. */
+.derived-rate-note {
+    margin-top: 0.3rem;
+    font-size: 0.66rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+.derived-rate-note.overridden {
+    color: var(--accent-warning);
+}

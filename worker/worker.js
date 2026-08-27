@@ -1914,6 +1914,26 @@ function retsDmql(env, opts, f) {
   if (opts.propertyTypes && opts.propertyTypes.length && opts.propertyTypesExplicit) {
     parts.push(`(${f.propType}=|${opts.propertyTypes.join(',')})`);
   }
+  // Property SUB-type. Without it a 949 sqft one-bed condo comes back as a
+  // candidate for a 1,842 sqft house — same PropertyType (RESI), completely
+  // different market. Lookup value list, so the pipe prefix applies.
+  if (opts.subTypes && opts.subTypes.length) {
+    parts.push(`(${f.propSubType}=|${opts.subTypes.join(',')})`);
+  }
+  // MATERIAL BANDS. The single biggest reason the old comp sets were junk:
+  // the query asked only "closed, nearby, recent" and left every size and
+  // bedroom count in the pool, then hoped the client's ranking would sort it
+  // out. It couldn't — the row cap had already thrown away the good comps to
+  // make room for a mansion and a studio. Filtering here means the cap spends
+  // itself on candidates that are actually comparable.
+  // Numeric ranges use the min-max form, which is unambiguous for the
+  // positive values these fields hold (unlike longitude — see below).
+  if (opts.sqftMin > 0 && opts.sqftMax > 0) {
+    parts.push(`(${f.sqft}=${Math.round(opts.sqftMin)}-${Math.round(opts.sqftMax)})`);
+  }
+  if (opts.bedsMin > 0 && opts.bedsMax > 0) {
+    parts.push(`(${f.beds}=${Math.round(opts.bedsMin)}-${Math.round(opts.bedsMax)})`);
+  }
   // GEOGRAPHY. DMQL2 has no radius operator, but Latitude and Longitude are
   // ordinary numeric fields and the "or greater" / "or less" suffixes work on
   // them — including on negative longitudes. Four criteria give a true
@@ -2358,25 +2378,43 @@ async function mlsRecord(env, address, lat, lon) {
 }
 
 /** Closed sales near a point → /comps candidates, freshest first. */
-async function mlsComps(env, lat, lon, radiusMi, months, limit, zip) {
+// How far a comp may differ from the subject and still be worth ranking.
+// ±35% on size keeps a 1,842 sqft subject away from both the 949 sqft condo
+// and the 3,583 sqft mansion that used to crowd out the real comps, while
+// staying loose enough to fill a set in a thin market. ±1 bedroom is the
+// conventional bracket.
+const MLS_SQFT_TOLERANCE = 0.35;
+const MLS_BEDS_TOLERANCE = 1;
+
+async function mlsComps(env, lat, lon, radiusMi, months, limit, zip, subject) {
+  const s = subject || {};
+  const sqft = numOrNull(s.sqft);
+  const beds = numOrNull(s.beds);
+
   // Widen rather than come back nearly empty. A tight box is the right first
   // ask — the nearest sales are the best comps — but on a large-lot or thinly
   // traded street it can legitimately hold two sales, and three stretched
   // comps beat two perfect ones the appraisal grid can't weight.
-  const search = (r) => mlsSearch(env, {
+  const search = (r, loosen) => mlsSearch(env, {
     statuses: mlsStatuses(env, 'closed'),
     propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
     subTypes: mlsSubTypes(env),
     lat, lon, radiusMi: r, zip,
+    sqftMin: sqft ? sqft * (1 - MLS_SQFT_TOLERANCE * loosen) : 0,
+    sqftMax: sqft ? sqft * (1 + MLS_SQFT_TOLERANCE * loosen) : 0,
+    bedsMin: beds ? Math.max(1, beds - MLS_BEDS_TOLERANCE * loosen) : 0,
+    bedsMax: beds ? beds + MLS_BEDS_TOLERANCE * loosen : 0,
     sinceDays: Math.round(months * 30.44),
     limit, orderby: 'closeDateDesc'
   });
 
-  const ENOUGH = 5;
-  let rows = await search(radiusMi);
-  for (const factor of [2, 4]) {
+  // Widen geography first, then the material bands — a slightly-further house
+  // of the right size is a better comp than a next-door house of the wrong one.
+  const ENOUGH = 6;
+  let rows = await search(radiusMi, 1);
+  for (const [r, loosen] of [[radiusMi * 2, 1], [radiusMi * 2, 1.6], [radiusMi * 4, 1.6]]) {
     if (rows.length >= ENOUGH) break;
-    const wider = await search(radiusMi * factor).catch(() => null);
+    const wider = await search(r, loosen).catch(() => null);
     // Only accept the wider pass if it genuinely found more; a timeout or a
     // server hiccup must not throw away the comps already in hand
     if (wider && wider.length > rows.length) rows = wider;
@@ -2813,7 +2851,7 @@ async function handleComps(params, env, cors) {
   }
   const radius = Math.min(5, parseFloat(params.get('radius')) || 1);
   const months = Math.min(24, parseInt(params.get('months'), 10) || 12);
-  const limit = Math.min(20, parseInt(params.get('limit'), 10) || 12);
+  const limit = Math.min(50, parseInt(params.get('limit'), 10) || 25);
   const providerErrors = [];
   const candidates = [];
 
@@ -2821,7 +2859,9 @@ async function handleComps(params, env, cors) {
   let mlsCount = 0;
   if (mlsConfigured(env)) {
     try {
-      const found = await mlsComps(env, lat, lon, radius, months, limit, params.get('zip') || '');
+      const found = await mlsComps(env, lat, lon, radius, months, limit, params.get('zip') || '', {
+        sqft: params.get('sqft'), beds: params.get('beds')
+      });
       mlsCount = found.length;
       candidates.push(...found);
     } catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }

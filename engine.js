@@ -570,6 +570,151 @@
         return { buckets: out, direction, changePct, medianDom: median(allDoms) };
     }
 
+    // ---- Derived market rates ----
+    /**
+     * Read the adjustment rates out of the comp set instead of trusting a
+     * static default. The default $/sqft was 50 — a national-ish rule of
+     * thumb. In a Fort Worth market trading around $300/sqft that under-
+     * corrects every size difference by tens of thousands, always in the same
+     * direction, and no amount of careful ranking recovers from it.
+     *
+     * GLA rate: the slope of price against size across the comps, which is
+     * literally "what the market paid for the next square foot". Regression
+     * is the right statistic but it is noisy on a handful of mixed sales, so
+     * it is only trusted when there are enough points and the answer lands in
+     * a defensible band; otherwise a fraction of the median $/sqft is used.
+     * That fraction is the appraisal convention — extra space is worth less
+     * per foot than the first foot, because land, kitchen and baths are
+     * already paid for.
+     *
+     * Returns null when there is nothing to learn from, so callers keep their
+     * own settings rather than adopting a fabricated number.
+     */
+    var GLA_FRACTION_OF_PPSF = 0.45;   // contributory value of extra space
+    var GLA_MIN_FRACTION = 0.20;       // a slope below this is noise
+    var GLA_MAX_FRACTION = 0.90;       // above this is a size-confounded fit
+
+    function deriveMarketRates(comps) {
+        const usable = (comps || []).filter(c =>
+            c && num(c.salePrice) > 0 && num(c.sqft) > 0);
+        if (usable.length < 3) return null;
+
+        const prices = usable.map(c => num(c.salePrice));
+        const sqfts = usable.map(c => num(c.sqft));
+        const ppsfs = usable.map((c, i) => prices[i] / sqfts[i]).sort((a, b) => a - b);
+        const mid = Math.floor(ppsfs.length / 2);
+        const medianPpsf = ppsfs.length % 2 ? ppsfs[mid] : (ppsfs[mid - 1] + ppsfs[mid]) / 2;
+
+        const floor = medianPpsf * GLA_MIN_FRACTION;
+        const ceiling = medianPpsf * GLA_MAX_FRACTION;
+        let pricePerSqftAdj = medianPpsf * GLA_FRACTION_OF_PPSF;
+        let method = 'fraction';
+        let rSquared = null;
+
+        // Least-squares slope of price on sqft
+        if (usable.length >= 6) {
+            const n = usable.length;
+            const meanX = sqfts.reduce((a, b) => a + b, 0) / n;
+            const meanY = prices.reduce((a, b) => a + b, 0) / n;
+            let sxy = 0, sxx = 0, syy = 0;
+            for (let i = 0; i < n; i++) {
+                const dx = sqfts[i] - meanX;
+                const dy = prices[i] - meanY;
+                sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+            }
+            if (sxx > 0 && syy > 0) {
+                const slope = sxy / sxx;
+                rSquared = (sxy * sxy) / (sxx * syy);
+                // Trust the slope only where it is both explanatory and sane.
+                // A negative or wild slope means size is not what separated
+                // these sales — condition or street did — and the fraction is
+                // the honest fallback.
+                if (rSquared >= 0.35 && slope >= floor && slope <= ceiling) {
+                    pricePerSqftAdj = slope;
+                    method = 'regression';
+                }
+            }
+        }
+
+        return {
+            pricePerSqftAdj: Math.round(Math.min(Math.max(pricePerSqftAdj, floor), ceiling)),
+            medianPricePerSqft: Math.round(medianPpsf),
+            method,
+            rSquared: rSquared === null ? null : Math.round(rSquared * 100) / 100,
+            used: usable.length
+        };
+    }
+
+    /**
+     * How far each comp's $/sqft sits from the set's median. An appraiser
+     * rejects the new-build at $505/sqft in a $270/sqft street on sight; this
+     * is the number that lets the UI say the same thing out loud instead of
+     * silently blending it in.
+     */
+    function pricePerSqftOutliers(comps, tolerancePct) {
+        const usable = (comps || []).filter(c => c && num(c.salePrice) > 0 && num(c.sqft) > 0);
+        if (usable.length < 3) return [];
+        const ppsfs = usable.map(c => num(c.salePrice) / num(c.sqft)).sort((a, b) => a - b);
+        const mid = Math.floor(ppsfs.length / 2);
+        const median = ppsfs.length % 2 ? ppsfs[mid] : (ppsfs[mid - 1] + ppsfs[mid]) / 2;
+        const tol = (tolerancePct === undefined ? 35 : tolerancePct) / 100;
+        return usable.map(c => {
+            const ppsf = num(c.salePrice) / num(c.sqft);
+            const deviation = (ppsf - median) / median;
+            return {
+                label: c.label || c.address || '',
+                pricePerSqft: Math.round(ppsf),
+                deviationPct: Math.round(deviation * 1000) / 10,
+                outlier: Math.abs(deviation) > tol
+            };
+        });
+    }
+
+    /**
+     * Cross-check a condition read from listing prose against what the comp
+     * actually sold for per square foot.
+     *
+     * The text is a WEAK signal. "Sold as-is" is boilerplate that appears on
+     * renovated flips as often as on tear-downs, and reading it as "dated"
+     * triggers the largest single line in the grid — a full condition uplift.
+     * Observed live: a comp that sold at $373/sqft in a $317/sqft market was
+     * called dated on the strength of "as-is" and adjusted UP by $140,700.
+     *
+     * Price per square foot is a STRONG signal. A dated house does not sell
+     * meaningfully above the market rate, and a renovated one does not sell
+     * far below it. Where the two disagree, believe the money, drop the text
+     * read, and tell the caller so a human can look — never silently swap in
+     * the opposite condition, because the price gap might be lot size, street
+     * or motivation rather than condition.
+     */
+    function reconcileCondition(read, ppsfDeviationPct) {
+        const dev = parseFloat(ppsfDeviationPct);
+        if (!read) return null;
+        if (!Number.isFinite(dev)) return { ...read, trusted: true };
+
+        // "dated" ADDS value in the grid, so a comp already selling above the
+        // market rate cannot be the fixer the remarks imply
+        if (read.condition === 'dated' && dev > 8) {
+            return {
+                ...read,
+                trusted: false,
+                conflict: `remarks read "${read.evidence}" as dated, but it sold `
+                    + `${Math.round(dev)}% ABOVE the market rate per sqft — treating condition as unverified`
+            };
+        }
+        // "renovated" takes no uplift, so a comp selling far below the market
+        // rate is suspicious in the other direction
+        if (read.condition === 'renovated' && dev < -25) {
+            return {
+                ...read,
+                trusted: false,
+                conflict: `remarks read "${read.evidence}" as renovated, but it sold `
+                    + `${Math.abs(Math.round(dev))}% BELOW the market rate per sqft — treating condition as unverified`
+            };
+        }
+        return { ...read, trusted: true };
+    }
+
     // ---- Rent from comps ----
     // Median $/sqft across usable rent comps × the subject's sqft (plain
     // median rent when the subject sqft is unknown). Rounded to $25;
@@ -764,5 +909,6 @@
         return null;
     }
 
-    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory };
+    return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory,
+        deriveMarketRates, pricePerSqftOutliers, reconcileCondition };
 }));

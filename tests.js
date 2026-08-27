@@ -675,6 +675,155 @@ test('market trend: scraped solds with no DOM leave the DOM read null, never zer
     assert(t.buckets.every(b => b.medianDom === null), 'no phantom zeros in the buckets');
 });
 
+// ---- deriveMarketRates: the adjustment rate comes from the market ----
+// The static $50/sqft default was a national rule of thumb. In a $300/sqft
+// market it under-corrects every size difference by tens of thousands, always
+// in the same direction, and no amount of careful ranking recovers from that.
+
+test('derive: a real Fort Worth 76109 set yields a rate near half its $/sqft', () => {
+    // Verbatim from the live NTREIS feed, 2026-08-27
+    const r = Engine.deriveMarketRates([
+        { salePrice: 775000, sqft: 2304 }, { salePrice: 495000, sqft: 1845 },
+        { salePrice: 667500, sqft: 2278 }, { salePrice: 415000, sqft: 2204 },
+        { salePrice: 426500, sqft: 1314 }, { salePrice: 550000, sqft: 2474 },
+        { salePrice: 1275000, sqft: 3130 }, { salePrice: 1015000, sqft: 3197 },
+        { salePrice: 1175000, sqft: 3583 }, { salePrice: 1550000, sqft: 3069 }
+    ]);
+    assert(r.medianPricePerSqft > 300 && r.medianPricePerSqft < 340, 'median $/sqft: ' + r.medianPricePerSqft);
+    assert(r.pricePerSqftAdj > 120 && r.pricePerSqftAdj < 180,
+        'derived GLA rate should land near half the market rate, got ' + r.pricePerSqftAdj);
+    assert(r.pricePerSqftAdj > 50 * 2, 'and far above the old $50 default');
+    assert(r.used === 10);
+});
+
+test('derive: too few usable comps returns null rather than inventing a rate', () => {
+    assert(Engine.deriveMarketRates([]) === null);
+    assert(Engine.deriveMarketRates([{ salePrice: 400000, sqft: 2000 }]) === null);
+    assert(Engine.deriveMarketRates(null) === null);
+    // priced but sizeless comps teach nothing about the value of a square foot
+    assert(Engine.deriveMarketRates([
+        { salePrice: 400000 }, { salePrice: 500000 }, { salePrice: 600000 }
+    ]) === null);
+});
+
+test('derive: a clean linear market is read by regression, not the fallback', () => {
+    // Same $/sqft throughout with a fixed lot component: slope is exactly 200
+    const comps = [1200, 1500, 1800, 2100, 2400, 2700].map(sqft => ({
+        salePrice: 100000 + sqft * 200, sqft
+    }));
+    const r = Engine.deriveMarketRates(comps);
+    assert(r.method === 'regression', 'expected regression, got ' + r.method);
+    assertNear(r.pricePerSqftAdj, 200, 1, 'slope recovered');
+    assert(r.rSquared > 0.99, 'a perfect line: ' + r.rSquared);
+});
+
+test('derive: a slope inflated by confounders is REJECTED for the fraction', () => {
+    // Bigger houses here are also newer and nicer, so the slope measures
+    // "size plus everything correlated with size" and overstates the value of
+    // a square foot. The band catches it.
+    const comps = [
+        { salePrice: 300000, sqft: 1500 }, { salePrice: 350000, sqft: 1600 },
+        { salePrice: 420000, sqft: 1700 }, { salePrice: 900000, sqft: 2400 },
+        { salePrice: 1100000, sqft: 2600 }, { salePrice: 1400000, sqft: 2900 }
+    ];
+    const r = Engine.deriveMarketRates(comps);
+    assert(r.method === 'fraction', 'a runaway slope must not be trusted: ' + JSON.stringify(r));
+    assert(r.pricePerSqftAdj <= r.medianPricePerSqft * 0.9, 'clamped under the ceiling');
+});
+
+test('derive: a negative or nonsense slope never escapes as a rate', () => {
+    // Price falling as size rises — condition, not area, separated these sales
+    const comps = [
+        { salePrice: 900000, sqft: 1200 }, { salePrice: 800000, sqft: 1500 },
+        { salePrice: 700000, sqft: 1800 }, { salePrice: 600000, sqft: 2100 },
+        { salePrice: 500000, sqft: 2400 }, { salePrice: 400000, sqft: 2700 }
+    ];
+    const r = Engine.deriveMarketRates(comps);
+    assert(r.method === 'fraction', 'negative slope rejected');
+    assert(r.pricePerSqftAdj > 0, 'and the rate is still positive: ' + r.pricePerSqftAdj);
+});
+
+test('derive: the rate is always inside a defensible band of the median', () => {
+    const comps = [1000, 1400, 1800, 2200, 2600, 3000].map((sqft, i) => ({
+        salePrice: [250000, 700000, 400000, 1200000, 500000, 900000][i], sqft
+    }));
+    const r = Engine.deriveMarketRates(comps);
+    assert(r.pricePerSqftAdj >= r.medianPricePerSqft * 0.20, 'not below the floor');
+    assert(r.pricePerSqftAdj <= r.medianPricePerSqft * 0.90, 'not above the ceiling');
+});
+
+// ---- reconcileCondition: the sale price overrules the marketing copy ----
+
+test('reconcile: "as-is" is NOT dated when the comp sold above the market rate', () => {
+    // Live case, 2026-08-27: 3217 Chaparral Lane sold at $373/sqft in a
+    // $317/sqft market. "as-is" in the remarks made the grid call it dated
+    // and add $140,700 — the largest line in the whole appraisal.
+    const read = Engine.classifyCondition('Charming home sold as-is');
+    assert(read.condition === 'dated', 'the text read stands on its own');
+    const r = Engine.reconcileCondition(read, 17.7);
+    assert(r.trusted === false, 'but the price contradicts it');
+    assert(/ABOVE the market rate/.test(r.conflict), 'and says why: ' + r.conflict);
+});
+
+test('reconcile: "as-is" IS dated when the price agrees', () => {
+    const read = Engine.classifyCondition('Investor special, needs work');
+    const r = Engine.reconcileCondition(read, -32);
+    assert(r.trusted === true, 'selling 32% under the market rate corroborates it');
+    assert(r.condition === 'dated');
+    assert(!r.conflict);
+});
+
+test('reconcile: a "renovated" read selling far under the market is also flagged', () => {
+    const read = Engine.classifyCondition('Completely remodeled throughout');
+    assert(Engine.reconcileCondition(read, -5).trusted === true, 'slightly under is normal');
+    const r = Engine.reconcileCondition(read, -30);
+    assert(r.trusted === false, '30% under the market rate is not a renovated house');
+    assert(/BELOW the market rate/.test(r.conflict));
+});
+
+test('reconcile: it never silently substitutes the opposite condition', () => {
+    // A price gap can be lot, street or motivation rather than condition —
+    // the honest move is "unverified", not a confident flip to the other side
+    const read = Engine.classifyCondition('Sold as-is');
+    const r = Engine.reconcileCondition(read, 20);
+    assert(r.condition === 'dated', 'the original read is preserved for display');
+    assert(r.trusted === false, 'but not trusted, so the caller leaves it unverified');
+});
+
+test('reconcile: with no price signal the text read is used unchanged', () => {
+    const read = Engine.classifyCondition('Sold as-is');
+    assert(Engine.reconcileCondition(read, null).trusted === true);
+    assert(Engine.reconcileCondition(read, undefined).trusted === true);
+    assert(Engine.reconcileCondition(null, 20) === null, 'no read, nothing to reconcile');
+});
+
+test('reconcile: an "average" read is left alone — it carries a small adjustment', () => {
+    const read = Engine.classifyCondition('Updated kitchen with granite');
+    assert(read.condition === 'average');
+    assert(Engine.reconcileCondition(read, 30).trusted === true);
+    assert(Engine.reconcileCondition(read, -30).trusted === true);
+});
+
+// ---- pricePerSqftOutliers: say the segment mismatch out loud ----
+
+test('outliers: the new-build at $505/sqft in a $270 street is flagged', () => {
+    const rows = Engine.pricePerSqftOutliers([
+        { label: 'A', salePrice: 495000, sqft: 1845 },   // $268
+        { label: 'B', salePrice: 550000, sqft: 2474 },   // $222
+        { label: 'C', salePrice: 775000, sqft: 2304 },   // $336
+        { label: 'D', salePrice: 1550000, sqft: 3069 }   // $505 — different segment
+    ]);
+    const d = rows.find(r => r.label === 'D');
+    assert(d.outlier === true, 'the $505/sqft new build is flagged: ' + JSON.stringify(d));
+    assert(rows.find(r => r.label === 'A').outlier === false, 'the near-twin is not');
+    assert(d.pricePerSqft === 505, 'reports the actual figure');
+});
+
+test('outliers: too small a set makes no claims', () => {
+    assert(Engine.pricePerSqftOutliers([{ label: 'A', salePrice: 400000, sqft: 2000 }]).length === 0);
+    assert(Engine.pricePerSqftOutliers([]).length === 0);
+});
+
 // ---- rentFromComps ----
 
 test('rent from comps: median $/sqft scaled to the subject, rounded to $25', () => {

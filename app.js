@@ -1591,6 +1591,72 @@ let suggestRunId = 0;
 // permanent loss of a hand-tuned appraisal.
 let preResetComps = null;
 
+// ---- Derived adjustment rates ----
+// The grid's $/sqft used to be a fixed 50 — a national rule of thumb that
+// under-corrects by tens of thousands in a $300/sqft market, in the same
+// direction on every comp. It is now read off the comps themselves. The user
+// keeps the last word: touching the field marks it overridden and the
+// derivation stops writing to it for the rest of the session.
+const derivedRateInputs = {
+    pricePerSqftAdj: { el: adjPriceSqftInput, overridden: false, note: null }
+};
+
+function markRateOverridden(key) {
+    const slot = derivedRateInputs[key];
+    if (slot) slot.overridden = true;
+}
+
+// The note sits at the bottom of the setting's own row, under the slider and
+// impact readout — the adjustment inputs live in .weight-row, not the
+// .form-group used elsewhere on the page.
+function derivedNoteFor(slot) {
+    if (slot.note && slot.note.isConnected) return slot.note;
+    const row = slot.el.closest('.weight-row') || slot.el.closest('.form-group');
+    if (!row) return null;
+    const note = document.createElement('div');
+    note.className = 'derived-rate-note';
+    row.appendChild(note);
+    slot.note = note;
+    return note;
+}
+
+function applyDerivedRates(derived, compCount) {
+    const slot = derivedRateInputs.pricePerSqftAdj;
+    if (!slot || !slot.el) return;
+    const note = derivedNoteFor(slot);
+    if (!note) return;
+
+    if (!derived) {
+        note.textContent = compCount
+            ? 'Not enough priced comps with sizes to derive a rate — using your setting.'
+            : '';
+        note.classList.toggle('hidden', !compCount);
+        return;
+    }
+    const how = derived.method === 'regression'
+        ? `regression across ${derived.used} sales, R² ${derived.rSquared}`
+        : `45% of the $${derived.medianPricePerSqft}/sqft this market trades at, across ${derived.used} sales`;
+
+    if (slot.overridden) {
+        note.textContent = `Your override — the comps suggest $${derived.pricePerSqftAdj}/sqft (${how}).`;
+        note.className = 'derived-rate-note overridden';
+    } else {
+        slot.el.value = String(derived.pricePerSqftAdj);
+        // The paired range slider mirrors the number field, but its ceiling
+        // was set for the old $50-ish defaults — lift it rather than let a
+        // derived rate look pinned at the top of the track.
+        const slider = document.querySelector(`input[type="range"][data-for="${slot.el.id}"]`);
+        if (slider && derived.pricePerSqftAdj > Number(slider.max)) {
+            slider.max = String(Math.ceil(derived.pricePerSqftAdj * 1.5 / 25) * 25);
+        }
+        syncWeightSliders();
+        note.textContent = `Auto-derived from these comps: $${derived.pricePerSqftAdj}/sqft — ${how}. Type here to override.`;
+        note.className = 'derived-rate-note';
+        saveAppraisalState();
+    }
+    note.classList.remove('hidden');
+}
+
 // Set-level provenance from the last /comps response: { priceTruth, mls }.
 // priceTruth is 'closed' | 'mixed' | 'proxy' | 'none' and decides whether the
 // panel hedges about Texas non-disclosure or states the prices as fact.
@@ -1609,37 +1675,64 @@ function candidateScore(c) {
     const sGarage = Engine.num(subjectGarageInput.value);
     const sSingleStory = Engine.num(subjectStoriesInput.value) === 1;
 
-    // 1. Location — 40 pts, fading to 0 at 2 miles
-    let score = (c.distanceMi != null)
-        ? 40 * Math.max(0, 1 - c.distanceMi / 2)
-        : 15; // unknown location = middling, never top-tier
+    // The weighting used to be 40 location + 30 time + 30 similarity. Inside
+    // a one-mile, twelve-month search that is almost all constant: every
+    // candidate banked 45–55 points before similarity was consulted, so 30
+    // points had to separate a three-foot twin from a house 25% bigger. It
+    // couldn't, and the twin lost. Similarity now carries the set.
 
-    // 2. Time — 30 pts, fading to 0 at 12 months
-    if (c.soldDate) {
-        const months = (Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
-        score += 30 * Math.max(0, 1 - months / 12);
+    let score = 0;
+
+    // 1. Size — 32 pts. The dominant material fact: a $/sqft model breaks
+    //    down across size classes, and every dollar of the GLA adjustment
+    //    downstream is an admission that this comp was the wrong size.
+    if (sSqft > 0 && c.sqft) {
+        const dev = Math.abs(c.sqft - sSqft) / sSqft;
+        score += 32 * Math.max(0, 1 - dev / 0.30);
     } else {
-        score += 10;
+        score += 8; // unknown size can't be trusted to the top
     }
 
-    // 3. Material similarity — 30 pts (sqft 14, beds 5, baths 4, vintage 7)
-    if (sSqft > 0 && c.sqft) score += 14 * Math.max(0, 1 - (Math.abs(c.sqft - sSqft) / sSqft) / 0.35);
-    else score += 5;
-    if (sBeds && c.beds != null) score += 5 * Math.max(0, 1 - Math.abs(c.beds - sBeds) / 2);
-    if (sBaths && c.baths != null) score += 4 * Math.max(0, 1 - Math.abs(c.baths - sBaths) / 2);
-    if (sYear && c.yearBuilt) score += 7 * Math.max(0, 1 - Math.abs(c.yearBuilt - sYear) / 30);
+    // 2. Location — 26 pts, fading to 0 at 2 miles
+    score += (c.distanceMi != null)
+        ? 26 * Math.max(0, 1 - c.distanceMi / 2)
+        : 8; // unknown location = middling, never top-tier
 
-    // 4. Common-sense gates — material wrongness caps what proximity can buy
+    // 3. Time — 18 pts, fading to 0 at 12 months
+    if (c.soldDate) {
+        const months = (Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44);
+        score += 18 * Math.max(0, 1 - months / 12);
+    } else {
+        score += 5;
+    }
+
+    // 4. Vintage — 12 pts. In a street of 1930s bungalows a 2018 new build is
+    //    a different product, not a comp with an age adjustment.
+    if (sYear && c.yearBuilt) score += 12 * Math.max(0, 1 - Math.abs(c.yearBuilt - sYear) / 25);
+
+    // 5. Room count — 12 pts (beds 7, baths 5)
+    if (sBeds && c.beds != null) score += 7 * Math.max(0, 1 - Math.abs(c.beds - sBeds) / 2);
+    if (sBaths && c.baths != null) score += 5 * Math.max(0, 1 - Math.abs(c.baths - sBaths) / 2);
+
+    // 6. Common-sense gates — material wrongness caps what proximity can buy
     let gate = 1;
     if (sSqft > 0 && c.sqft) {
         const dev = Math.abs(c.sqft - sSqft) / sSqft;
-        if (dev > 0.5) gate *= 0.3;        // different class of house
-        else if (dev > 0.3) gate *= 0.6;   // stretch comp at best
+        if (dev > 0.5) gate *= 0.25;       // different class of house
+        else if (dev > 0.3) gate *= 0.55;  // stretch comp at best
     }
-    if (sBeds && c.beds != null && Math.abs(c.beds - sBeds) >= 3) gate *= 0.6;
-    if (sYear && c.yearBuilt && Math.abs(c.yearBuilt - sYear) > 40) gate *= 0.6;
+    if (sBeds && c.beds != null && Math.abs(c.beds - sBeds) >= 2) gate *= 0.6;
+    if (sYear && c.yearBuilt && Math.abs(c.yearBuilt - sYear) > 40) gate *= 0.5;
     if (sGarage > 0 && c.garage != null && Math.abs(c.garage - sGarage) >= 2) gate *= 0.85;
     if (c.stories != null && (c.stories === 1) !== sSingleStory) gate *= 0.9;
+    // A different KIND of dwelling is not a comp at any distance. The worker
+    // filters sub-type server-side, but a fallback source may not carry it.
+    if (c.propType && /condo|townh|duplex|triplex|quad|mobile|manufactur|apartment/i.test(c.propType)) {
+        gate *= 0.35;
+    }
+    // Segment mismatch: a price per foot far off the rest of the set means a
+    // new build or a teardown, not a house the grid can adjust into place.
+    if (c.ppsfOutlier) gate *= 0.5;
 
     return Math.max(0, Math.round(score * gate));
 }
@@ -1682,8 +1775,28 @@ async function suggestComps() {
         // priceTruth / mls describe the SET, not one comp: whether every
         // price came back a recorded closing, some did, or none did
         compsMeta = { priceTruth: data.priceTruth || null, mls: data.mls || null };
-        const ranked = (data.candidates || [])
-            .map(c => ({ ...c, score: candidateScore(c) }))
+        const pool = data.candidates || [];
+        // Read the market's own numbers off the set BEFORE ranking: the
+        // segment flag feeds the ranking gates, and the GLA rate replaces a
+        // static default that is wrong in every market but the one it was
+        // guessed for.
+        const priced = pool.filter(c => c.price > 0 && c.sqft > 0)
+            .map(c => ({ label: c.address, salePrice: c.price, sqft: c.sqft }));
+        const outliers = new Map(
+            Engine.pricePerSqftOutliers(priced).map(o => [o.label, o]));
+        applyDerivedRates(Engine.deriveMarketRates(priced), priced.length);
+
+        const ranked = pool
+            .map(c => {
+                const o = outliers.get(c.address);
+                const withFlags = {
+                    ...c,
+                    ppsfOutlier: Boolean(o && o.outlier),
+                    ppsf: o ? o.pricePerSqft : null,
+                    ppsfDeviationPct: o ? o.deviationPct : null
+                };
+                return { ...withFlags, score: candidateScore(withFlags) };
+            })
             .sort((a, b) => b.score - a.score);
         if (autoApplyCandidates(ranked) > 0) preResetComps = null; // replacement secured
         renderCandidates(ranked);
@@ -1814,13 +1927,20 @@ function applyCandidateData(c) {
     // carries one, else read from the remarks when the language is clear.
     // Otherwise the card default (renovated) stands but is FLAGGED so the
     // assumption is never silent. Remarks survive closing; photos don't.
-    const read = Engine.classifyCondition(c.remarks, c.propertyCondition);
-    if (read) {
+    // ...then cross-checked against what the comp actually sold for per
+    // square foot. Marketing prose is a weak signal and "sold as-is" is
+    // boilerplate; a full condition uplift is the single largest line in the
+    // grid, so it does not get to fire on a phrase the sale price contradicts.
+    const textRead = Engine.classifyCondition(c.remarks, c.propertyCondition);
+    const read = Engine.reconcileCondition(textRead, c.ppsfDeviationPct);
+    if (read && read.trusted) {
         comp.condition = read.condition;
         comp.conditionEvidence = read.evidence;
         comp.conditionUnverified = false;
+        delete comp.conditionConflict;
     } else {
         comp.conditionUnverified = true;
+        if (read && read.conflict) comp.conditionConflict = read.conflict;
     }
     return true;
 }
@@ -1864,14 +1984,21 @@ function renderCandidates(list) {
     list.forEach(c => {
         const row = document.createElement('div');
         row.className = 'candidate-row';
-        const read = Engine.classifyCondition(c.remarks, c.propertyCondition);
-        const conditionNote = read
-            ? `${read.from === 'field' ? 'MLS condition' : 'remarks'} → ${read.condition} (“${read.evidence}”)`
-            : (c.remarks ? 'remarks: no condition signal' : 'no remarks');
+        const textRead = Engine.classifyCondition(c.remarks, c.propertyCondition);
+        const read = Engine.reconcileCondition(textRead, c.ppsfDeviationPct);
+        const conditionNote = !textRead
+            ? (c.remarks ? 'remarks: no condition signal' : 'no remarks')
+            : (read && read.trusted)
+                ? `${textRead.from === 'field' ? 'MLS condition' : 'remarks'} → ${textRead.condition} (“${textRead.evidence}”)`
+                : `⚠ ${read.conflict}`;
         const priceNote = !c.price ? 'no price'
             : formatCurrency(c.price) + (c.priceType === 'closed' ? ' closed' : ' list');
         const specs = [
             priceNote,
+            // $/sqft is how you see at a glance that two "comps" are in
+            // different market segments — it is the number an appraiser
+            // scans first, and the grid cannot adjust a segment mismatch away
+            c.ppsf ? `$${c.ppsf}/sf${c.ppsfOutlier ? ' ⚠ off-market-rate' : ''}` : null,
             c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null,
             c.concessions > 0 ? `−${formatCurrency(c.concessions)} concessions` : null,
             c.sqft ? `${c.sqft.toLocaleString()} sqft` : null,
@@ -3908,6 +4035,11 @@ addCompBtn.addEventListener('click', () => {
     adjCondDatedInput, adjAppreciationInput, adjLotInput, adjGarageInput,
     adjPoolInput, adjYearInput, adjStoryInput
 ].forEach(input => input.addEventListener('input', recalcAppraisal));
+
+// Typing in a derived field is the override. From then on the next comp
+// search reports what it would have suggested instead of overwriting the
+// number under the user's cursor.
+adjPriceSqftInput.addEventListener('input', () => markRateOverridden('pricePerSqftAdj'));
 
 [subjectStoriesInput, subjectPoolInput, subjectHoaInput, subjectOwnerOccupiedInput]
     .forEach(sel => sel.addEventListener('change', recalcAppraisal));
