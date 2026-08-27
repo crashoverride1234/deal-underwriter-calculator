@@ -67,7 +67,7 @@ GitHub Pages from `main`.
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
 - **Test**: `node tests.js` (85 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (79 MLS-transport tests). Both must pass before deploy.
+  (83 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -177,6 +177,18 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   searches ≥15 min apart, and excluding their test area (MLSAreaMajor 1001,
   which "can cause your RETS download to fail") plus 1000 (outside the US) —
   that is what `MLS_RETS_QUERY_EXTRA=(MLSAreaMajor=~1000,1001)` is for.
+- **Geography on RETS is a bounding box, not a postcode.** DMQL2 has no
+  radius operator, but Latitude/Longitude are ordinary numeric fields and the
+  `value+` / `value-` suffixes work on them — including on negative
+  longitudes — so four criteria bracket the subject and `mlsSearch()` trims
+  the box to a circle with haversine. Do NOT use the range form
+  (`Latitude=32.69-32.73`): the minus is simultaneously separator, "or less"
+  suffix and sign, which makes a negative longitude range genuinely
+  ambiguous. Postal boundaries follow mail routes, so a comp 0.1 mi away
+  across the street can be in another ZIP while a poor one two miles off
+  shares yours — postcode is only the fallback for rows with no coordinates.
+  `mlsComps()` widens the radius (2x, then 4x) when the first box holds
+  fewer than 5, and keeps the earlier result if the wider pass fails.
 - **DMQL2 punctuation is overloaded and silently inverts intent.** Between
   parenthesized criteria a comma means AND; INSIDE a value list it means OR.
   `(Status=|A,S)` is "A or S"; `(Status=|A),(Status=|S)` is "A and S" —

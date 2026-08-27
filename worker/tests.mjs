@@ -457,6 +457,45 @@ test('rets: the DMQL status set is ONE criterion, not several ANDed together', (
     assert(!/\)\s*,\s*\(StandardStatus/.test(q), 'not ANDed: ' + q);
 });
 
+test('rets: coordinates produce a real bounding box, not a postcode', () => {
+    // Postal boundaries follow mail routes: a comp 0.1 mi away across the
+    // street can be in another ZIP. The box is drawn around the subject.
+    const q = W.retsDmql({}, {
+        statuses: ['CLS'], sinceDays: 180, lat: 32.71, lon: -97.375, radiusMi: 1, zip: '76109'
+    }, W.mlsFields({}));
+    assert(/\(Latitude=32\.\d+\+\)/.test(q), 'latitude floor: ' + q);
+    assert(/\(Latitude=32\.\d+-\)/.test(q), 'latitude ceiling: ' + q);
+    assert(/\(Longitude=-97\.\d+\+\)/.test(q), 'negative longitude floor: ' + q);
+    assert(/\(Longitude=-97\.\d+-\)/.test(q), 'negative longitude ceiling: ' + q);
+    assert(!q.includes('PostalCode'), 'the postcode is NOT also applied — it would '
+        + 'clip the box back to one ZIP and undo the point: ' + q);
+});
+
+test('rets: the box brackets the subject and widens with the radius', () => {
+    const build = (r) => W.retsDmql({}, { statuses: ['CLS'], lat: 32.71, lon: -97.375, radiusMi: r }, W.mlsFields({}));
+    const nums = (q, field) => [...q.matchAll(/\((Latitude|Longitude)=(-?[\d.]+)[+-]\)/g)]
+        .filter(m => m[1] === field).map(m => parseFloat(m[2]));
+    const [latMin, latMax] = nums(build(1), 'Latitude');
+    assert(latMin < 32.71 && latMax > 32.71, `subject inside the box: ${latMin}..${latMax}`);
+    const [lonMin, lonMax] = nums(build(1), 'Longitude');
+    assert(lonMin < -97.375 && lonMax > -97.375, `subject inside E/W: ${lonMin}..${lonMax}`);
+    const [wideMin, wideMax] = nums(build(3), 'Latitude');
+    assert(wideMax - wideMin > latMax - latMin, 'a 3 mi box is wider than a 1 mi box');
+});
+
+test('rets: no coordinates falls back to the postcode rather than going global', () => {
+    const q = W.retsDmql({}, { statuses: ['CLS'], zip: '76109' }, W.mlsFields({}));
+    assert(q.includes('(PostalCode=76109)'), 'coarse fallback: ' + q);
+    assert(!q.includes('Latitude'), 'no box without coordinates: ' + q);
+});
+
+test('rets: the postcode fallback carries NO pipe — it is a character field', () => {
+    // (PostalCode=|76109) queries a lookup the field does not have, and
+    // matches nothing without raising an error. Confirmed live.
+    const q = W.retsDmql({}, { statuses: ['CLS'], zip: '76109' }, W.mlsFields({}));
+    assert(!q.includes('PostalCode=|'), 'no lookup pipe on a string field: ' + q);
+});
+
 test('rets: the date floor widens by a day for the GMT/Central skew', () => {
     const q = W.retsDmql({}, { statuses: ['S'], sinceDays: 30, dateField: 'L_ClosingDate' }, W.mlsFields({}));
     const day = /\(L_ClosingDate=(\d{4}-\d{2}-\d{2})\+\)/.exec(q);

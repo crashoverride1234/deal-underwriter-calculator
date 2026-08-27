@@ -1079,7 +1079,12 @@ function mlsSystemName(env) {
 
 // Subrequest budget guard: a hung feed must degrade to the keyless fallback,
 // never hold the whole response open until the platform kills it.
+// 8s is right for a RESO feed answering an indexed OData query. A RETS
+// bounding-box search scans unindexed Latitude/Longitude columns and is
+// legitimately slower, so it gets a longer leash — still well inside the
+// platform's limit, and the routes fall back rather than hang if it expires.
 const MLS_TIMEOUT_MS = 8000;
+const MLS_RETS_TIMEOUT_MS = 20000;
 
 function mlsSignal(ms) {
   try { return AbortSignal.timeout(ms || MLS_TIMEOUT_MS); }
@@ -1214,14 +1219,15 @@ function mlsOrFilter(field, values) {
  */
 async function mlsSearch(env, opts) {
   const f = mlsFields(env);
-  // A RETS search with no postcode cannot be geographically bounded — DMQL2
-  // has no radius and NTREIS publishes no coordinates to trim by — so it
-  // would return the most recent closings from anywhere in the feed and
-  // present them as comps. Refuse; the caller falls back to a source that
-  // does understand "near".
-  if (mlsTransport(env) === 'rets' && opts.radiusMi && !opts.zip) {
-    throw new Error('search needs a postcode — this feed cannot be filtered by radius, '
-      + 'and unbounded results would not be comps');
+  // A geographic search needs something to bound it. With coordinates the
+  // DMQL builder draws a bounding box; without them it falls back to the
+  // postcode. With neither, the query would return the most recent closings
+  // from anywhere in the feed and present them as comps — refuse, and let the
+  // caller fall back to a source that understands "near".
+  if (mlsTransport(env) === 'rets' && opts.radiusMi
+      && !(Number.isFinite(opts.lat) && Number.isFinite(opts.lon)) && !opts.zip) {
+    throw new Error('search needs coordinates or a postcode to bound it — '
+      + 'unbounded results would not be comps');
   }
   const rows = mlsTransport(env) === 'rets'
     ? await retsSearch(env, opts, f)
@@ -1624,7 +1630,7 @@ async function retsLoginOnce(env) {
   // redirect:'manual' — Workers replays Authorization and Cookie headers
   // across a redirect, including to a different host. An MLS login credential
   // must never be handed to whatever a 302 happens to point at.
-  const opts = { redirect: 'manual', signal: mlsSignal() };
+  const opts = { redirect: 'manual', signal: mlsSignal(MLS_RETS_TIMEOUT_MS) };
 
   let digest = null;
   let cookie = '';
@@ -1714,7 +1720,7 @@ async function retsGetMetadataInner(env, type, id, attempt) {
   const full = `${url}?${q}`;
   const res = await fetch(full, {
     headers: await retsHeaders(env, 'GET', full, session),
-    redirect: 'manual', signal: mlsSignal()
+    redirect: 'manual', signal: mlsSignal(MLS_RETS_TIMEOUT_MS)
   });
   const xml = await res.text();
   if (!res.ok) throw new Error(`GetMetadata HTTP ${res.status}: ${xml.slice(0, 200)}`);
@@ -1881,6 +1887,7 @@ function retsSelectList(env) {
 // DMQL2 has no geography. Date and status are expressible; the spatial cut is
 // done here from the returned Latitude/Longitude columns (see mlsSearch).
 function retsDmql(env, opts, f) {
+  if (opts._rawQuery) return opts._rawQuery; // /mls/probe?dmql= diagnostic
   const parts = [];
   // DMQL2 overloads its punctuation viciously. Between parenthesized criteria
   // a comma means AND; INSIDE a value list it means OR. So the status set is
@@ -1907,16 +1914,32 @@ function retsDmql(env, opts, f) {
   if (opts.propertyTypes && opts.propertyTypes.length && opts.propertyTypesExplicit) {
     parts.push(`(${f.propType}=|${opts.propertyTypes.join(',')})`);
   }
-  // GEOGRAPHY. DMQL2 has no radius operator, and NTREIS returns no
-  // Latitude/Longitude at all — so there is nothing to trim against
-  // afterwards either. PostalCode is the only usable locator, and without it
-  // a "comp search" is just the most recent closings anywhere in North Texas.
-  // mlsSearch refuses the search outright rather than return those.
-  // No pipe here. In DMQL2 the pipe prefix marks a LOOKUP value list, which
-  // is right for StandardStatus and PropertyType but wrong for a character
-  // field — (PostalCode=|76109) parses as a lookup query against a field that
-  // has no lookup, and matches nothing without erroring.
-  if (opts.zip) parts.push(`(${f.postal}=${String(opts.zip).trim()})`);
+  // GEOGRAPHY. DMQL2 has no radius operator, but Latitude and Longitude are
+  // ordinary numeric fields and the "or greater" / "or less" suffixes work on
+  // them — including on negative longitudes. Four criteria give a true
+  // bounding box, which mlsSearch then trims to a circle with haversine.
+  //
+  // A postcode is NOT the right tool here: postal boundaries follow mail
+  // routes, so a comp 0.1 mi away across the street can sit in another ZIP
+  // while a poor one two miles off shares yours. The box is drawn around the
+  // subject, so it crosses those boundaries the way an appraiser does.
+  //
+  // Use the RANGE form (Latitude=32.69-32.73) at your peril — the minus is
+  // simultaneously the separator, the "or less" suffix and the sign, so a
+  // negative longitude range is genuinely ambiguous. These separate criteria
+  // are not. Verified live against NTREIS 2026-08-27.
+  const box = (Number.isFinite(opts.lat) && Number.isFinite(opts.lon) && opts.radiusMi > 0)
+    ? mlsBbox(opts.lat, opts.lon, opts.radiusMi) : null;
+  if (box) {
+    parts.push(`(${f.lat}=${box.latMin.toFixed(6)}+)`, `(${f.lat}=${box.latMax.toFixed(6)}-)`);
+    parts.push(`(${f.lon}=${box.lonMin.toFixed(6)}+)`, `(${f.lon}=${box.lonMax.toFixed(6)}-)`);
+  } else if (opts.zip) {
+    // No coordinates to draw a box from. Postcode is the coarse fallback —
+    // and no pipe: the pipe prefix marks a LOOKUP value list, so on a
+    // character field it queries a lookup that does not exist and quietly
+    // matches nothing.
+    parts.push(`(${f.postal}=${String(opts.zip).trim()})`);
+  }
   if (env.MLS_RETS_QUERY_EXTRA) parts.push(env.MLS_RETS_QUERY_EXTRA.trim());
   // A DMQL2 query cannot be empty; a wide-open date range is the safe filler
   return parts.length ? parts.join(',') : `(${f.modified}=1980-01-01+)`;
@@ -1965,7 +1988,7 @@ async function retsSearchInner(env, opts, f) {
   const full = `${searchUrl}?${q}`;
   const res = await fetch(full, {
     headers: await retsHeaders(env, 'GET', full, session),
-    redirect: 'manual', signal: mlsSignal()
+    redirect: 'manual', signal: mlsSignal(MLS_RETS_TIMEOUT_MS)
   });
   // A mid-session 401 is usually just an aged nonce (Matrix's nonce is a
   // base64 timestamp). RFC 7616: stale=true means re-compute with the new
@@ -2336,14 +2359,28 @@ async function mlsRecord(env, address, lat, lon) {
 
 /** Closed sales near a point → /comps candidates, freshest first. */
 async function mlsComps(env, lat, lon, radiusMi, months, limit, zip) {
-  const rows = await mlsSearch(env, {
+  // Widen rather than come back nearly empty. A tight box is the right first
+  // ask — the nearest sales are the best comps — but on a large-lot or thinly
+  // traded street it can legitimately hold two sales, and three stretched
+  // comps beat two perfect ones the appraisal grid can't weight.
+  const search = (r) => mlsSearch(env, {
     statuses: mlsStatuses(env, 'closed'),
     propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
     subTypes: mlsSubTypes(env),
-    lat, lon, radiusMi, zip,
+    lat, lon, radiusMi: r, zip,
     sinceDays: Math.round(months * 30.44),
     limit, orderby: 'closeDateDesc'
   });
+
+  const ENOUGH = 5;
+  let rows = await search(radiusMi);
+  for (const factor of [2, 4]) {
+    if (rows.length >= ENOUGH) break;
+    const wider = await search(radiusMi * factor).catch(() => null);
+    // Only accept the wider pass if it genuinely found more; a timeout or a
+    // server hiccup must not throw away the comps already in hand
+    if (wider && wider.length > rows.length) rows = wider;
+  }
   return rows.map(r => mlsToCandidate(r, env)).filter(c => c.address);
 }
 
@@ -2495,6 +2532,36 @@ async function handleMlsProbe(params, env, cors) {
       ? `still need: ${missing.join(', ')} — set each with: npx wrangler secret put <NAME>`
       : 'no MLS transport configured — set MLS_API_BASE + MLS_CLIENT_ID/MLS_CLIENT_SECRET (RESO Web API) '
         + 'or MLS_RETS_LOGIN_URL + MLS_RETS_USERNAME/MLS_RETS_PASSWORD (classic RETS)';
+    return json(out, 200, cors);
+  }
+
+  // ?dmql=<raw DMQL2> — run one query and report only what it matched, so a
+  // syntax question can be settled against the server instead of argued from
+  // the spec. DMQL2's grammar is ambiguous enough (see the pipe/comma/minus
+  // overloads) that guessing costs more than asking. Counts and street lines
+  // only unless sample=1; this is a diagnostic, not a data tap.
+  if (transport === 'rets' && params.get('dmql')) {
+    const f = mlsFields(env);
+    const q = params.get('dmql');
+    try {
+      const rows = await retsSearch(env, {
+        _rawQuery: q, limit: parseInt(params.get('limit'), 10) || 5
+      }, f);
+      out.dmql = {
+        query: q,
+        rows: rows.length,
+        truncated: Boolean(rows.truncated),
+        withCoords: rows.filter(r => mlsCoord(r[f.lat]) != null && mlsCoord(r[f.lon]) != null).length,
+        sample: rows.slice(0, 5).map(r => ({
+          address: mlsStreetAddress(r, f),
+          zip: mlsFlat(r[f.postal]),
+          lat: mlsCoord(r[f.lat]),
+          lon: mlsCoord(r[f.lon])
+        }))
+      };
+    } catch (e) {
+      out.dmql = { query: q, error: e.message };
+    }
     return json(out, 200, cors);
   }
 

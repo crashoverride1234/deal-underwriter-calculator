@@ -64,9 +64,13 @@ MLS_RETS_QUERY_EXTRA = ""
 #   - BathroomsTotalDecimal is deliberately NOT bound: NTREIS writes "2 full
 #     plus 1 half" as 2.1, not 2.5, so binding it would under-count every
 #     half bath. BathroomsFull + 0.5 x BathroomsHalf is computed instead.
-#   - Latitude/Longitude are published in the metadata but come back EMPTY,
-#     so there is nothing to distance-trim by; PostalCode is the only usable
-#     locator and a comp search without one is refused.
+#   - Latitude/Longitude ARE usable: DMQL2 has no radius operator, but the
+#     "or greater"/"or less" suffixes work on them (including on negative
+#     longitudes), so four criteria give a true bounding box which is then
+#     trimmed to a circle with haversine. Verified live. Postcode is only the
+#     fallback for the ~14% of rows with no coordinates — a comp 0.1 mi away
+#     across the street is often in another ZIP, so postal boundaries are the
+#     wrong tool for choosing comps.
 #   - no PropertyCondition, so comp condition still comes from the remarks
 #   - no TaxAssessedValue (TAD supplies it) and no AssociationYN (derived
 #     from the fee)

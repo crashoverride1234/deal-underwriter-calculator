@@ -43,7 +43,7 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 
 - **Every turn ends deployed and live**, not just coded. Cadence per feature:
   implement → verify end-to-end in a browser preview against LIVE APIs (real
-  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (79/79) →
+  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (83/83) →
   bump `CACHE_NAME` in `sw.js` → commit + push to `main` → poll the live URL
   for a marker string with no-cache headers to confirm the Pages deploy → tell
   him concretely what to tap/test, with the numbers you verified.
@@ -90,9 +90,13 @@ ONE class called `Property`; status and type are CODED (`CLS`/`ACT`/`ACTUC`/
 UnparsedAddress (compose from components), NO ConcessionsAmount (only a Y/N
 flag), NO PropertyCondition, and annual tax is `UnexemptTaxes`.
 `BathroomsTotalDecimal` is deliberately unbound — NTREIS writes "2 full + 1
-half" as 2.1, not 2.5. DMQL2 has no radius operator, so PostalCode is the only
-locator and a comp search without one is REFUSED rather than returning
-closings from anywhere in North Texas. All of this is in `worker/wrangler.toml`
+half" as 2.1, not 2.5. DMQL2 has no radius operator, but Latitude/Longitude
+accept the `value+`/`value-` suffixes (negatives included), so comps are
+bounded by a real BOUNDING BOX around the subject and trimmed to a circle —
+verified crossing ZIP boundaries, which postcode filtering could never do.
+Postcode is only the fallback when a row has no coordinates, and a search
+with neither is REFUSED rather than returning closings from anywhere in
+North Texas. All of this is in `worker/wrangler.toml`
 with the reasoning inline.
 
 Operationally: NTREIS allows ONE session per login and Workers isolates share
@@ -234,7 +238,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v40`).
-- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (79).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v41`).
+- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (83).
 - MLS credentials NEVER go in the browser — Worker secrets only. There is
   deliberately no paste-a-key field for them, unlike RentCast/Melissa.
