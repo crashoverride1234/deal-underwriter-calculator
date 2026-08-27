@@ -1663,6 +1663,13 @@ async function suggestComps() {
     if (beds > 0) q.set('beds', String(beds));
     const baths = totalBaths(subjectBathsFullInput, subjectBathsHalfInput);
     if (baths > 0) q.set('baths', String(baths));
+    // An MLS feed served over classic RETS has no radius operator, and NTREIS
+    // publishes no coordinates to trim by, so the postcode is the only thing
+    // that makes a comp search local. Without it the worker declines the MLS
+    // rung and falls back, rather than returning recent closings from
+    // anywhere in North Texas and calling them comps.
+    const compZip = subjectZip();
+    if (compZip) q.set('zip', compZip);
 
     const runId = ++suggestRunId;
     compCandidatesPanel.innerHTML = '<div class="candidates-note">Searching recent solds near the subject…</div>';
@@ -2109,6 +2116,8 @@ async function scanMarket() {
     } else {
         q.set('address', address);
     }
+    const marketZip = subjectZip(); // RETS can only be bounded by postcode — see suggestComps()
+    if (marketZip) q.set('zip', marketZip);
     const runId = ++marketRunId;
     marketScanData = null;
     marketScanEl.textContent = 'Scanning live listings near the subject…';

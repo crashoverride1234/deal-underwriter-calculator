@@ -22,6 +22,56 @@ MLS_SYSTEM_NAME = "NTREIS"
 # with whatever the signed data licence actually demands.
 MLS_ATTRIBUTION = "Information deemed reliable but not guaranteed. Data provided by NTREIS."
 
+# Everything below was read off the server's own metadata via /mls/probe on
+# 2026-08-27 — not guessed. Re-run the probe after any NTREIS schema change.
+
+# The Property resource publishes exactly ONE class, and it is called
+# "Property". Not "Listing" (the 2015 guide), not "RES".
+MLS_RETS_CLASS = "Property"
+
+# CODED lookup values, which is what a DMQL2 query needs — COMPACT-DECODED
+# decodes only the response. Sending the labels ("Closed", "Residential")
+# matches nothing and looks exactly like a quiet market.
+#   StandardStatus: ACT ACTUC CAN CLS CSN DEL EXP HOLD INC PND WTH
+#   PropertyType:   COML COMS LAND RESI RINC RLSE
+MLS_STATUS_CLOSED = "CLS"
+MLS_STATUS_ACTIVE = "ACT"
+MLS_STATUS_PENDING = "PND,ACTUC"
+MLS_PROPERTY_TYPES = "RESI"
+MLS_LEASE_TYPES = "RLSE"
+
+# NTREIS's older guidance says to exclude their test area (MLSAreaMajor 1001,
+# which "can cause your RETS download to fail") and 1000. That advice predates
+# their RESO migration: this schema publishes NO MLSAreaMajor field at all, and
+# naming it fails the whole query with ReplyCode 20200 "Field is not known".
+# Left empty deliberately — do not re-add without checking /mls/probe's
+# fieldsSeen for whatever replaced it. NOTE: this must be present-but-empty
+# rather than absent. keep_vars = true above means a var DELETED from this
+# file stays on the deployed worker forever; only an explicit "" clears it.
+MLS_RETS_QUERY_EXTRA = ""
+
+# Field bindings from METADATA-TABLE Property:Property (443 fields). NTREIS
+# has migrated to RESO Data Dictionary names, so most bind straight through;
+# the ones worth knowing about are the exceptions:
+#   - no UnparsedAddress at all, so the street line is composed from
+#     StreetNumber/DirPrefix/Name/Suffix/DirSuffix/UnitNumber
+#   - annual tax is UnexemptTaxes, not TaxAnnualAmount
+#   - zoning is ZoningDescription; pool is PoolYN not PoolPrivateYN
+#   - ConcessionsYN exists but there is NO ConcessionsAmount and no
+#     ConcessionsComments, so the app can report THAT concessions occurred
+#     but never how much — the grid's concession line stays 0 and the UI
+#     shows "reported, amount not published"
+#   - BathroomsTotalDecimal is deliberately NOT bound: NTREIS writes "2 full
+#     plus 1 half" as 2.1, not 2.5, so binding it would under-count every
+#     half bath. BathroomsFull + 0.5 x BathroomsHalf is computed instead.
+#   - Latitude/Longitude are published in the metadata but come back EMPTY,
+#     so there is nothing to distance-trim by; PostalCode is the only usable
+#     locator and a comp search without one is refused.
+#   - no PropertyCondition, so comp condition still comes from the remarks
+#   - no TaxAssessedValue (TAD supplies it) and no AssociationYN (derived
+#     from the fee)
+MLS_FIELD_MAP = '{"mlsNumber":"ListingId","streetNumber":"StreetNumber","streetDirPrefix":"StreetDirPrefix","streetName":"StreetName","streetSuffix":"StreetSuffix","streetDirSuffix":"StreetDirSuffix","unitNumber":"UnitNumber","city":"City","state":"StateOrProvince","postal":"PostalCode","county":"CountyOrParish","lat":"Latitude","lon":"Longitude","sqft":"LivingArea","beds":"BedroomsTotal","bathsFull":"BathroomsFull","bathsHalf":"BathroomsHalf","lotSqft":"LotSizeSquareFeet","lotAcres":"LotSizeAcres","year":"YearBuilt","garage":"GarageSpaces","stories":"StoriesTotal","levels":"Levels","pool":"PoolYN","subdivision":"SubdivisionName","propType":"PropertyType","propSubType":"PropertySubType","listPrice":"ListPrice","originalListPrice":"OriginalListPrice","closePrice":"ClosePrice","closeDate":"CloseDate","listDate":"OnMarketDate","contractDate":"ListingContractDate","dom":"DaysOnMarket","cdom":"CumulativeDaysOnMarket","status":"StandardStatus","mlsStatus":"MlsStatus","concessionsYN":"ConcessionsYN","remarks":"PublicRemarks","taxAnnual":"UnexemptTaxes","parcel":"ParcelNumber","hoaFee":"AssociationFee","hoaFreq":"AssociationFeeFrequency","roof":"Roof","foundation":"FoundationDetails","heating":"Heating","cooling":"Cooling","exterior":"ConstructionMaterials","zoning":"ZoningDescription","modified":"ModificationTimestamp"}'
+
 # Workers AI (free daily allocation) — vision model for the /vision route
 [ai]
 binding = "AI"

@@ -949,9 +949,15 @@ function mergeRecords(primary, filler) {
 const MLS_DEFAULT_FIELDS = {
   key: 'ListingKey',
   mlsNumber: 'ListingId',
+  // NTREIS publishes no UnparsedAddress — only the parsed components — so
+  // the street line is composed from them when the one-liner is absent.
   address: 'UnparsedAddress',
-  streetNumber: 'StreetNumberNumeric',
+  streetNumber: 'StreetNumber',
+  streetDirPrefix: 'StreetDirPrefix',
   streetName: 'StreetName',
+  streetSuffix: 'StreetSuffix',
+  streetDirSuffix: 'StreetDirSuffix',
+  unitNumber: 'UnitNumber',
   city: 'City',
   state: 'StateOrProvince',
   postal: 'PostalCode',
@@ -1208,6 +1214,15 @@ function mlsOrFilter(field, values) {
  */
 async function mlsSearch(env, opts) {
   const f = mlsFields(env);
+  // A RETS search with no postcode cannot be geographically bounded — DMQL2
+  // has no radius and NTREIS publishes no coordinates to trim by — so it
+  // would return the most recent closings from anywhere in the feed and
+  // present them as comps. Refuse; the caller falls back to a source that
+  // does understand "near".
+  if (mlsTransport(env) === 'rets' && opts.radiusMi && !opts.zip) {
+    throw new Error('search needs a postcode — this feed cannot be filtered by radius, '
+      + 'and unbounded results would not be comps');
+  }
   const rows = mlsTransport(env) === 'rets'
     ? await retsSearch(env, opts, f)
     : await resoSearch(env, opts, f);
@@ -1509,6 +1524,23 @@ function mergeCookies(older, newer) {
 
 let retsSessionCache = null; // { caps, cookie, sessionId, digest, base, expiresAt }
 
+// NTREIS answers concurrent calls with ReplyCode 20512 "Too many outstanding
+// requests" — observed live. The market scan fires three searches at once and
+// the probe walks several metadata calls, so without a queue those fail at
+// random and look like a flaky feed. Every RETS operation goes through here,
+// one at a time. The cost is latency on a handful of requests per user
+// action; the alternative is intermittent, unexplainable emptiness.
+let retsQueue = Promise.resolve();
+
+function retsSerial(fn) {
+  // .then(fn, fn) so one operation's failure never wedges the queue
+  const run = retsQueue.then(fn, fn);
+  retsQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 // Single-flight guard. RETS servers commonly permit ONE session per login,
 // and a second Login silently invalidates the first (ReplyCode 20022,
 // "Additional login not permitted"). The market scan fires three searches
@@ -1519,7 +1551,21 @@ let retsLoginInFlight = null;
 async function retsLogin(env) {
   if (retsSessionCache && retsSessionCache.expiresAt > Date.now()) return retsSessionCache;
   if (retsLoginInFlight) return await retsLoginInFlight;
-  retsLoginInFlight = retsLoginOnce(env);
+  retsLoginInFlight = (async () => {
+    try {
+      return await retsLoginOnce(env);
+    } catch (e) {
+      // 20022 means a session opened by a previous isolate is still held
+      // server-side. The fetch handler logs out on the way out, so this is
+      // now a race rather than a leak — one short wait clears it, and
+      // failing here would degrade an otherwise healthy feed to the proxies.
+      if (/20022/.test(e.message)) {
+        await sleep(2000);
+        return await retsLoginOnce(env);
+      }
+      throw e;
+    }
+  })();
   try { return await retsLoginInFlight; }
   finally { retsLoginInFlight = null; }
 }
@@ -1642,6 +1688,10 @@ async function retsLoginOnce(env) {
   return retsSessionCache;
 }
 
+// Is a RETS session currently held? The request handler releases it on the
+// way out — see the logout note in the fetch handler.
+function retsSessionOpen() { return Boolean(retsSessionCache); }
+
 function retsAbsolute(session, capUrl) {
   if (!capUrl) return null;
   return /^https?:\/\//i.test(capUrl) ? capUrl : session.base + (capUrl.startsWith('/') ? '' : '/') + capUrl;
@@ -1652,7 +1702,11 @@ function retsAbsolute(session, capUrl) {
 // Dictionary names, so without this the default field map is guesswork.
 // COMPACT metadata is the same DELIMITER/COLUMNS/DATA table as a search
 // result, so parseCompactDecoded reads it unchanged.
-async function retsGetMetadata(env, type, id) {
+function retsGetMetadata(env, type, id) {
+  return retsSerial(() => retsGetMetadataInner(env, type, id));
+}
+
+async function retsGetMetadataInner(env, type, id, attempt) {
   const session = await retsLogin(env);
   const url = retsAbsolute(session, session.caps.GetMetadata);
   if (!url) throw new Error('RETS login returned no GetMetadata capability URL');
@@ -1678,6 +1732,12 @@ async function retsGetMetadata(env, type, id) {
 const MLS_FIELD_CANDIDATES = {
   mlsNumber: ['ListingId', 'ListingID', 'MLSNumber', 'MLS_Number', 'L_DisplayId'],
   address: ['UnparsedAddress', 'FullStreetAddress', 'StreetAddress', 'PropertyAddress', 'Address'],
+  streetNumber: ['StreetNumber', 'StreetNumberNumeric'],
+  streetDirPrefix: ['StreetDirPrefix'],
+  streetName: ['StreetName'],
+  streetSuffix: ['StreetSuffix'],
+  streetDirSuffix: ['StreetDirSuffix'],
+  unitNumber: ['UnitNumber'],
   city: ['City', 'PostalCity', 'L_City'],
   state: ['StateOrProvince', 'State', 'StateProvince'],
   postal: ['PostalCode', 'ZipCode', 'Zip', 'L_Zip'],
@@ -1710,11 +1770,11 @@ const MLS_FIELD_CANDIDATES = {
   status: ['StandardStatus', 'Status', 'ListingStatus'],
   mlsStatus: ['MlsStatus', 'MLSStatus'],
   concessions: ['ConcessionsAmount', 'SellerConcessionsAmount', 'ConcessionAmount'],
-  concessionsYN: ['Concessions', 'SellerConcessionsYN'],
+  concessionsYN: ['Concessions', 'ConcessionsYN', 'SellerConcessionsYN'],
   concessionsComments: ['ConcessionsComments', 'ConcessionComments'],
   remarks: ['PublicRemarks', 'Remarks', 'MarketingRemarks', 'PropertyDescription'],
   condition: ['PropertyCondition', 'Condition'],
-  taxAnnual: ['TaxAnnualAmount', 'Taxes', 'TaxAmount', 'AnnualTaxes'],
+  taxAnnual: ['TaxAnnualAmount', 'UnexemptTaxes', 'Taxes', 'TaxAmount', 'AnnualTaxes'],
   taxAssessed: ['TaxAssessedValue', 'AssessedValue'],
   parcel: ['ParcelNumber', 'APN', 'TaxParcelID', 'ParcelID'],
   hoaFee: ['AssociationFee', 'HOAFee', 'AssocFee'],
@@ -1725,7 +1785,7 @@ const MLS_FIELD_CANDIDATES = {
   heating: ['Heating', 'HeatingType', 'HeatingCooling'],
   cooling: ['Cooling', 'CoolingType', 'AirConditioning'],
   exterior: ['ConstructionMaterials', 'ExteriorFinish', 'Construction'],
-  zoning: ['Zoning', 'ZoningCode'],
+  zoning: ['Zoning', 'ZoningDescription', 'ZoningCode'],
   modified: ['ModificationTimestamp', 'LastChangeTimestamp', 'ModifiedDate']
 };
 
@@ -1839,12 +1899,38 @@ function retsDmql(env, opts, f) {
     const since = Date.now() - (opts.sinceDays + 1) * 86400000;
     parts.push(`(${field}=${odataDay(since)}+)`);
   }
+  // Property type, but ONLY when it was configured explicitly. The RESO
+  // default of 'Residential' is a Data Dictionary label, and a RETS server
+  // wants its own coded value — guessing here returns zero rows and looks
+  // exactly like a quiet market. mlsSearch refuses a lease search without it
+  // rather than letting sale prices through as rents.
+  if (opts.propertyTypes && opts.propertyTypes.length && opts.propertyTypesExplicit) {
+    parts.push(`(${f.propType}=|${opts.propertyTypes.join(',')})`);
+  }
+  // GEOGRAPHY. DMQL2 has no radius operator, and NTREIS returns no
+  // Latitude/Longitude at all — so there is nothing to trim against
+  // afterwards either. PostalCode is the only usable locator, and without it
+  // a "comp search" is just the most recent closings anywhere in North Texas.
+  // mlsSearch refuses the search outright rather than return those.
+  // No pipe here. In DMQL2 the pipe prefix marks a LOOKUP value list, which
+  // is right for StandardStatus and PropertyType but wrong for a character
+  // field — (PostalCode=|76109) parses as a lookup query against a field that
+  // has no lookup, and matches nothing without erroring.
+  if (opts.zip) parts.push(`(${f.postal}=${String(opts.zip).trim()})`);
   if (env.MLS_RETS_QUERY_EXTRA) parts.push(env.MLS_RETS_QUERY_EXTRA.trim());
   // A DMQL2 query cannot be empty; a wide-open date range is the safe filler
   return parts.length ? parts.join(',') : `(${f.modified}=1980-01-01+)`;
 }
 
-async function retsSearch(env, opts, f) {
+// Public entry point: serialized, so nothing else is in flight against the
+// server while this runs (login included).
+function retsSearch(env, opts, f) {
+  return retsSerial(() => retsSearchInner(env, opts, f));
+}
+
+// Inner form. Its retries call ITSELF, never the serialized wrapper — going
+// back through the queue from inside the queue would deadlock.
+async function retsSearchInner(env, opts, f) {
   const session = await retsLogin(env);
   const searchUrl = retsAbsolute(session, session.caps.Search);
   if (!searchUrl) throw new Error('RETS login returned no Search capability URL');
@@ -1890,10 +1976,10 @@ async function retsSearch(env, opts, f) {
     const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
     if (challenge && String(challenge.stale).toLowerCase() === 'true' && session.digest) {
       session.digest = { ...challenge, nc: 0 };
-      return await retsSearch(env, { ...opts, _retried: true }, f);
+      return await retsSearchInner(env, { ...opts, _retried: true }, f);
     }
     retsSessionCache = null; // genuinely unauthenticated: start over
-    return await retsSearch(env, { ...opts, _retried: true }, f);
+    return await retsSearchInner(env, { ...opts, _retried: true }, f);
   }
   const xml = await res.text();
   if (!res.ok) throw new Error(`RETS search HTTP ${res.status}: ${xml.slice(0, 200)}`);
@@ -1901,6 +1987,10 @@ async function retsSearch(env, opts, f) {
   // 20201 "no records found" is an answer, not a failure. 20208 means the
   // result set was CAPPED — the rows that did come back are good, so parse
   // them and let the MAXROWS flag below record the truncation.
+  if (code === 20512 && !opts._throttled) {
+    await sleep(1500);
+    return await retsSearchInner(env, { ...opts, _throttled: true }, f);
+  }
   if (code === 20201) return Object.assign([], { truncated: false });
   if (code !== null && code !== 0 && code !== 20208) {
     throw new Error(`RETS search ReplyCode ${code}: ${retsReplyText(xml)}`);
@@ -2030,8 +2120,29 @@ function mlsPool(row, f) {
   return !/^none$/i.test(features);
 }
 
+/**
+ * The street line. A RESO feed usually publishes UnparsedAddress; NTREIS does
+ * not, so it is rebuilt from the parsed components — and it has to include the
+ * directionals and suffix, or "3529 W Rogers Ave S" collapses to "3529 Rogers"
+ * and stops matching anything.
+ */
+function mlsStreetAddress(row, f) {
+  const direct = mlsFlat(row[f.address]);
+  if (direct) return direct;
+  const parts = [
+    mlsFlat(row[f.streetNumber]),
+    mlsFlat(row[f.streetDirPrefix]),
+    mlsFlat(row[f.streetName]),
+    mlsFlat(row[f.streetSuffix]),
+    mlsFlat(row[f.streetDirSuffix])
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  const unit = mlsFlat(row[f.unitNumber]);
+  return parts.join(' ') + (unit ? ` #${unit}` : '');
+}
+
 function mlsFormattedAddress(row, f) {
-  const line = mlsFlat(row[f.address]);
+  const line = mlsStreetAddress(row, f);
   const city = mlsFlat(row[f.city]);
   const state = mlsFlat(row[f.state]);
   const zip = mlsFlat(row[f.postal]);
@@ -2115,7 +2226,7 @@ function mlsToCandidate(row, env) {
   const closePrice = numOrNull(row[f.closePrice]);
   const listPrice = numOrNull(row[f.listPrice]);
   return {
-    address: mlsFlat(row[f.address]) || [mlsFlat(row[f.streetNumber]), mlsFlat(row[f.streetName])].filter(Boolean).join(' ') || null,
+    address: mlsStreetAddress(row, f),
     city: mlsFlat(row[f.city]),
     state: mlsFlat(row[f.state]),
     zip: mlsFlat(row[f.postal]),
@@ -2159,6 +2270,11 @@ function mlsPropertyTypes(env) {
   return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : MLS_RESIDENTIAL();
 }
 
+// Whether the property type was CONFIGURED rather than defaulted. On RETS a
+// defaulted RESO label would be the wrong code, so only an explicit value is
+// allowed into the query.
+function mlsTypesExplicit(env) { return Boolean((env.MLS_PROPERTY_TYPES || '').trim()); }
+
 function mlsSubTypes(env) {
   const raw = (env.MLS_SUBTYPES || '').trim();
   return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
@@ -2188,7 +2304,7 @@ async function mlsRecord(env, address, lat, lon) {
       const filter = `contains(${f.address},${odataStr(street.split(/\s+/)[0])}) and startswith(${f.address},${odataStr(houseNum)})`;
       try {
         const rows = await mlsSearch(env, {
-          statuses: anyStatus, propertyTypes: mlsPropertyTypes(env),
+          statuses: anyStatus, propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
           extraFilter: mlsTransport(env) === 'rets' ? null : filter,
           limit: 25, orderby: 'closeDateDesc'
         });
@@ -2203,9 +2319,10 @@ async function mlsRecord(env, address, lat, lon) {
   }
 
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    const zip = (/(d{5})/.exec(address || '') || [, ''])[1];
     const rows = await mlsSearch(env, {
-      statuses: anyStatus, propertyTypes: mlsPropertyTypes(env),
-      lat, lon, radiusMi: 0.05, limit: 10, orderby: 'closeDateDesc'
+      statuses: anyStatus, propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
+      lat, lon, radiusMi: 0.05, zip, limit: 10, orderby: 'closeDateDesc'
     });
     // Same wrong-house guard the TAD rung uses: a geocode landing on the
     // neighbour's roof must not fill this property's data
@@ -2221,7 +2338,7 @@ async function mlsRecord(env, address, lat, lon) {
 async function mlsComps(env, lat, lon, radiusMi, months, limit, zip) {
   const rows = await mlsSearch(env, {
     statuses: mlsStatuses(env, 'closed'),
-    propertyTypes: mlsPropertyTypes(env),
+    propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
     subTypes: mlsSubTypes(env),
     lat, lon, radiusMi, zip,
     sinceDays: Math.round(months * 30.44),
@@ -2240,7 +2357,7 @@ async function mlsMarket(env, lat, lon, radiusMi, zip) {
   const types = mlsPropertyTypes(env);
   const subTypes = mlsSubTypes(env);
   const mapRow = (r) => ({
-    address: mlsFlat(r[f.address]),
+    address: mlsStreetAddress(r, f),
     price: numOrNull(r[f.closePrice]) || numOrNull(r[f.listPrice]),
     listPrice: numOrNull(r[f.listPrice]),
     soldDate: mlsFlat(r[f.closeDate]),
@@ -2257,7 +2374,7 @@ async function mlsMarket(env, lat, lon, radiusMi, zip) {
   // — and losing it must cost the pending count, not the whole scan.
   const errors = [];
   const group = (name, extra) => mlsSearch(env, {
-    statuses: mlsStatuses(env, name), propertyTypes: types, subTypes,
+    statuses: mlsStatuses(env, name), propertyTypes: types, propertyTypesExplicit: mlsTypesExplicit(env), subTypes,
     lat, lon, radiusMi, zip, limit: 200, ...extra
   }).catch(e => { errors.push(name + ': ' + e.message); return []; });
 
@@ -2285,8 +2402,18 @@ async function mlsMarket(env, lat, lon, radiusMi, zip) {
 async function mlsLeases(env, lat, lon, radiusMi, zip) {
   const f = mlsFields(env);
   const leaseTypes = mlsLeaseTypes(env);
+  // On classic RETS the property type is a DMQL criterion, and it is only
+  // safe to emit when the coded value was configured. Without it the "lease"
+  // search is just the sale search again — and a $572,500 close price would
+  // land in the rent ladder as a monthly rent. Refuse instead.
+  if (mlsTransport(env) === 'rets' && !(env.MLS_LEASE_TYPES || '').trim()) {
+    const rows = [];
+    rows.errors = ['lease search skipped — set MLS_LEASE_TYPES to this feed\'s coded '
+      + 'lease PropertyType value, or closed SALES would be read as rents'];
+    return rows;
+  }
   const mapRow = (r, status) => ({
-    address: mlsFlat(r[f.address]),
+    address: mlsStreetAddress(r, f),
     rent: numOrNull(r[f.closePrice]) || numOrNull(r[f.listPrice]),
     sqft: numOrNull(r[f.sqft]) || numOrNull(r[f.sqftAlt]),
     beds: numOrNull(r[f.beds]),
@@ -2301,9 +2428,9 @@ async function mlsLeases(env, lat, lon, radiusMi, zip) {
   // the user otherwise.
   const errors = [];
   const [closed, active] = await Promise.all([
-    mlsSearch(env, { statuses: mlsStatuses(env, 'closed'), propertyTypes: leaseTypes, lat, lon, radiusMi, zip, sinceDays: 366, limit: 40, orderby: 'closeDateDesc' })
+    mlsSearch(env, { statuses: mlsStatuses(env, 'closed'), propertyTypes: leaseTypes, propertyTypesExplicit: true, lat, lon, radiusMi, zip, sinceDays: 366, limit: 40, orderby: 'closeDateDesc' })
       .catch(e => { errors.push('closed leases: ' + e.message); return []; }),
-    mlsSearch(env, { statuses: mlsStatuses(env, 'active'), propertyTypes: leaseTypes, lat, lon, radiusMi, zip, limit: 25 })
+    mlsSearch(env, { statuses: mlsStatuses(env, 'active'), propertyTypes: leaseTypes, propertyTypesExplicit: true, lat, lon, radiusMi, zip, limit: 25 })
       .catch(e => { errors.push('active rentals: ' + e.message); return []; })
   ]);
   const rows = [].concat(
@@ -2458,6 +2585,27 @@ async function handleMlsProbe(params, env, cors) {
         out.steps.push(`no LookupName on the status field (${statusField}) — `
           + 'set MLS_STATUS_* from the metadata browser by hand');
       }
+
+      // ?lookup=PropertyType,PropertySubType — dump any other coded field's
+      // value=label pairs. Same reason as the status codes: every DMQL
+      // criterion needs the CODE, and guessing the label returns nothing.
+      const wanted = (params.get('lookup') || '').split(',').map(x => x.trim()).filter(Boolean);
+      if (wanted.length) {
+        out.lookups = {};
+        for (const name of wanted) {
+          const row = table.find(r => r.SystemName === name);
+          const ln = row && (row.LookupName || row.LookUpName);
+          if (!ln) { out.lookups[name] = 'no lookup on that field'; continue; }
+          try {
+            const vals = await retsGetMetadata(env, 'METADATA-LOOKUP_TYPE', `${resource}:${ln}`);
+            out.lookups[name] = vals
+              .map(r => ({ value: r.Value, label: r.LongValue || r.ShortValue }))
+              .filter(r => r.value);
+          } catch (e) {
+            out.lookups[name] = 'failed: ' + e.message;
+          }
+        }
+      }
     } catch (e) {
       out.steps.push(`METADATA-TABLE ${resource}:${cls} failed: ` + e.message);
     }
@@ -2470,7 +2618,7 @@ async function handleMlsProbe(params, env, cors) {
     const lon = parseFloat(params.get('longitude'));
     const rows = await mlsSearch(env, {
       statuses: mlsStatuses(env, 'closed'),
-      propertyTypes: mlsPropertyTypes(env),
+      propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
       subTypes: mlsSubTypes(env),
       lat: Number.isFinite(lat) ? lat : undefined,
       lon: Number.isFinite(lon) ? lon : undefined,
@@ -2896,7 +3044,7 @@ async function handleMelissa(params, env, cors) {
 // ---- Entry ----
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
     const origins = allowedOrigins(env);
@@ -2957,6 +3105,17 @@ export default {
       }
     } catch (err) {
       return json({ error: 'worker error: ' + (err && err.message ? err.message : 'unknown') }, 502, cors);
+    } finally {
+      // Release the RETS session on the way out. NTREIS permits ONE session
+      // per login, and Workers isolates share no state — so a session left
+      // open by one isolate makes the NEXT cold isolate's login fail with
+      // ReplyCode 20022, at random, for as long as the server holds it.
+      // Acquire-use-release is the only correct pattern here. waitUntil keeps
+      // it off the response's critical path, and a logout that fails is not
+      // worth surfacing: the session times out server-side regardless.
+      if (retsSessionOpen() && ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(retsLogout(env).catch(() => {}));
+      }
     }
   }
 };
@@ -2971,10 +3130,11 @@ export {
   MLS_DEFAULT_FIELDS, MLS_STATUS,
   mlsFields, mlsTransport, mlsConfigured, mlsSystemName, mlsStatuses, mlsPrettyStatus,
   mlsConcessionsReported, mlsDom,
-  mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft,
-  mlsMonthlyHoa, mlsPool, mlsFormattedAddress,
+  mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft, mlsTypesExplicit,
+  mlsMonthlyHoa, mlsPool, mlsFormattedAddress, mlsStreetAddress,
   mlsToRecord, mlsToCandidate,
   parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql, retsAbsolute, retsSelectList,
+  retsSessionOpen, retsLogout,
   parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie, retsReplyText,
   suggestFieldMapFromMetadata, MLS_FIELD_CANDIDATES,
   odataStr, odataDay, mlsOrFilter,

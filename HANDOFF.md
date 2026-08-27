@@ -74,14 +74,38 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 
 ## 5. State as of 2026-08-27
 
-**Just shipped (2026-08-27)**: the MLS feed rework — a licensed RESO Web API
-/ classic RETS feed is now the PRIMARY source for property records, comps,
-market scan and rent, with realtor.com / RentCast / Melissa / TAD demoted to
-automatic fallbacks. Inert until Worker secrets exist; every route degrades
-cleanly on auth failure, empty result or timeout (verified locally against
-Trestle's real token endpoint with dummy credentials — it returns the
-documented `400 invalid_client`, and all four routes fell back correctly).
-New: `/mls/probe` field-mapping diagnostic, `worker/tests.mjs` (47 tests),
+**THE MLS FEED IS LIVE (2026-08-27).** NTREIS credentials are set and the app
+is serving REAL closed sale prices, closed lease rents and true days-on-market.
+Verified end to end on 3529 Rogers Ave, Fort Worth 76109: 12 closed comps in
+zip, 128 closed sales + 34 actives + 10 pendings on the market scan (median
+DOM 34), 40 closed leases on the rent ladder. The proof it was worth doing:
+realtor.com had 3412 Rogers Ave at $649,000 LIST; the recorded NTREIS close
+was $550,000 — a 15% overstatement that would have gone straight into an ARV.
+
+NTREIS-specific truths, all read off their metadata rather than guessed
+(re-run `/mls/probe` after any schema change — it emits a ready-to-paste
+field map): they have MIGRATED TO RESO field names; the Property resource has
+ONE class called `Property`; status and type are CODED (`CLS`/`ACT`/`ACTUC`/
+`PND`, `RESI`/`RLSE`) and sending labels matches nothing; there is NO
+UnparsedAddress (compose from components), NO ConcessionsAmount (only a Y/N
+flag), NO PropertyCondition, and annual tax is `UnexemptTaxes`.
+`BathroomsTotalDecimal` is deliberately unbound — NTREIS writes "2 full + 1
+half" as 2.1, not 2.5. DMQL2 has no radius operator, so PostalCode is the only
+locator and a comp search without one is REFUSED rather than returning
+closings from anywhere in North Texas. All of this is in `worker/wrangler.toml`
+with the reasoning inline.
+
+Operationally: NTREIS allows ONE session per login and Workers isolates share
+no state, so the fetch handler releases the session via `ctx.waitUntil` on
+every request — without that, cold isolates fail at random with ReplyCode
+20022. Concurrent calls get 20512 "too many outstanding requests", so every
+RETS operation goes through a serial queue.
+
+Earlier the same day: the rework itself — a licensed RESO Web API / classic
+RETS feed became the PRIMARY source for property records, comps, market scan
+and rent, with realtor.com / RentCast / Melissa / TAD demoted to automatic
+fallbacks. Every route degrades cleanly on auth failure, empty result or
+timeout. New: `/mls/probe` diagnostic, `worker/tests.mjs` (79 tests),
 seller-concessions netting in `appraise()` (URAR grid line 1), closed-lease
 preference in `rentFromComps()`, structured `PropertyCondition` over remarks
 prose in `classifyCondition()`, median-DOM in `marketTrend()`, per-comp price
@@ -104,12 +128,13 @@ back-solver; TX post-sale tax reassessment; comp condition read from listing
 remarks; blank start on every open; auto-suggested comps on ARV entry.
 
 **Keys / secrets status**:
-- Worker MLS secrets — the non-secret half (MLS_TRANSPORT=rets, the NTREIS
-  login URL, system name, attribution) is committed in `worker/wrangler.toml`
-  and deployed. Only `MLS_RETS_USERNAME` and `MLS_RETS_PASSWORD` remain, and
-  `/mls/probe` names them under `missingSecrets`. Those two are the ONLY
-  thing between the app and true sold prices. Runbook: `worker/README.md`;
-  full annotated variable list: `worker/.dev.vars.example`.
+- Worker MLS — LIVE. `MLS_RETS_USERNAME` / `MLS_RETS_PASSWORD` are set as
+  secrets; everything non-secret is in `worker/wrangler.toml`. GOTCHA that
+  cost a debugging round: `keep_vars = true` means a var DELETED from that
+  file stays on the deployed worker forever — only an explicit `""` clears
+  it. Second gotcha: secrets are baked into a VERSION, so a secret added
+  after the last deploy needs a redeploy before the running worker sees it.
+  Diagnostics: `/mls/probe`, and `/mls/probe?logout=1` clears a stuck session.
 - Worker `RENTCAST_API_KEY` — SET and live (50 lookups/mo free; only
   HTTP-200s billed; app-side localStorage cache keeps repeats free).
 - Worker `MELISSA_API_KEY` — NOT set (user never supplied one; ~1,000 free
@@ -209,7 +234,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v39`).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v40`).
 - Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (79).
 - MLS credentials NEVER go in the browser — Worker secrets only. There is
   deliberately no paste-a-key field for them, unlike RentCast/Melissa.
