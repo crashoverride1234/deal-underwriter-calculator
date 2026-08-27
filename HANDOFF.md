@@ -43,7 +43,7 @@ unconfirmed — it determines who can sign an NTREIS/Trestle data license.
 
 - **Every turn ends deployed and live**, not just coded. Cadence per feature:
   implement → verify end-to-end in a browser preview against LIVE APIs (real
-  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (67/67) →
+  DFW addresses; hand-check the math) → `node tests.js` (85/85) AND `node worker/tests.mjs` (79/79) →
   bump `CACHE_NAME` in `sw.js` → commit + push to `main` → poll the live URL
   for a marker string with no-cache headers to confirm the Pages deploy → tell
   him concretely what to tap/test, with the numbers you verified.
@@ -206,7 +206,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v38`).
-- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (67).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v39`).
+- Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (79).
 - MLS credentials NEVER go in the browser — Worker secrets only. There is
   deliberately no paste-a-key field for them, unlike RentCast/Melissa.

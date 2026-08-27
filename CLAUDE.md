@@ -67,7 +67,7 @@ GitHub Pages from `main`.
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
 - **Test**: `node tests.js` (85 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (67 MLS-transport tests). Both must pass before deploy.
+  (79 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -170,6 +170,33 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   `Format` the server returns STANDARD-XML, which this parser cannot read.
   If UA auth ever fails with 20037, note clients disagree on whether
   version-info is `RETS/1.7.2` or `1.7.2` — we send the full header form.
+  `Count` is sent as 0 (CoreLogic asks clients not to make Matrix count in
+  production); `Select` is auto-built from `MLS_FIELD_MAP` once that map is
+  substantial, pinning the schema against future NTREIS field additions.
+  NTREIS also asks for no large pulls 08:00–18:00 Mon–Fri, incremental
+  searches ≥15 min apart, and excluding their test area (MLSAreaMajor 1001,
+  which "can cause your RETS download to fail") plus 1000 (outside the US) —
+  that is what `MLS_RETS_QUERY_EXTRA=(MLSAreaMajor=~1000,1001)` is for.
+- **DMQL2 punctuation is overloaded and silently inverts intent.** Between
+  parenthesized criteria a comma means AND; INSIDE a value list it means OR.
+  `(Status=|A,S)` is "A or S"; `(Status=|A),(Status=|S)` is "A and S" —
+  always empty, no error. The pipe is a value PREFIX, not a separator; the
+  tilde negates. The trailing `+` ("or later") must reach the server as
+  `%2B` — URLSearchParams does that; a raw `+` decodes to a space and
+  becomes a syntax error. Date floors are widened a day because the server
+  keeps GMT while NTREIS data is Central.
+- **Query with CODES, not labels.** `Format=COMPACT-DECODED` decodes only
+  the RESPONSE. A query still needs the coded lookup value, so on Matrix
+  `Closed` matches nothing where `S` works. This is the single most common
+  way a RETS query returns zero rows and looks like a quiet market —
+  `/mls/probe` reads METADATA-LOOKUP_TYPE for the status field and prints
+  the value=label pairs to copy into `MLS_STATUS_*`.
+- **The TRAILING `<RETS-STATUS/>` wins over the envelope.** Matrix
+  routinely returns `<RETS ReplyCode="0">` and then contradicts it with a
+  trailing 20201 (no records) or 20208 (truncated). Reading only the envelope
+  reports an empty result set as a clean success. 20201 is an empty answer,
+  20208 still carries good rows plus a truncation flag, and `<MAXROWS/>`
+  marks the same thing.
 - **RETS field names are NOT RESO names** — this is the one that would
   otherwise waste a day. `StandardNames` defaults to **0** (the server's own
   SystemNames), and `/mls/probe` reads METADATA-RESOURCE / METADATA-CLASS /

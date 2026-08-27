@@ -44,8 +44,15 @@ MLS_RETS_PASSWORD=your-rets-password
 # their StandardNames and every mapped field would read null.
 # MLS_RETS_STANDARD_NAMES=0
 
-# Extra DMQL2 clause ANDed onto every search, e.g. (County=|Tarrant)
-# MLS_RETS_QUERY_EXTRA=
+# Extra DMQL2 clause ANDed onto every search. NTREIS specifically warns that
+# their TEST listings (MLSAreaMajor 1001) "can cause your RETS download to
+# fail", and 1000 is outside the US — exclude both. The tilde means NOT.
+# MLS_RETS_QUERY_EXTRA=(MLSAreaMajor=~1000,1001)
+
+# Column list. Left unset the server returns every field, which is what
+# /mls/probe needs; once MLS_FIELD_MAP is populated the Select list is built
+# from it automatically, so set this only to override that.
+# MLS_RETS_SELECT=
 
 # ============================================================
 # RESO Web API (Trestle / Bridge / MLS Grid / Spark)
@@ -76,12 +83,14 @@ MLS_SYSTEM_NAME=NTREIS
 # is not optional — a RETS server does not use RESO Data Dictionary names.
 # MLS_FIELD_MAP={"closePrice":"L_SoldPrice","beds":"LM_Int1_1"}
 
-# Status values as THIS server spells them. Read them off the probe's
-# metadata rather than assuming — Matrix lookups are often single letters
-# (A/P/S/C) rather than words.
-# MLS_STATUS_CLOSED=Closed
-# MLS_STATUS_ACTIVE=Active
-# MLS_STATUS_PENDING=Pending,ActiveUnderContract
+# Status values as THIS server spells them. THIS IS THE #1 WAY A RETS QUERY
+# SILENTLY RETURNS NOTHING: Format=COMPACT-DECODED changes only the RESPONSE,
+# so a query must still use the CODED lookup value. On Matrix that is usually
+# a single letter — "Closed" matches nothing where "S" works. /mls/probe
+# reads the status lookup and prints value=label pairs; copy them here.
+# MLS_STATUS_CLOSED=S
+# MLS_STATUS_ACTIVE=A
+# MLS_STATUS_PENDING=P,AC
 
 # Property-type / class filtering (RESO transport only; on RETS the class
 # does this job)

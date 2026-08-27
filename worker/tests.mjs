@@ -428,6 +428,66 @@ test('rets: a non-zero ReplyCode is surfaced, not swallowed', () => {
     eq(W.retsReplyCode('no xml here'), null);
 });
 
+test('rets: the TRAILING RETS-STATUS wins over the envelope', () => {
+    // Matrix routinely returns a success envelope and then contradicts it in
+    // the trailer. Reading only the envelope reports an empty result set as a
+    // clean success and a capped one as complete.
+    const noRecords = '<RETS ReplyCode="0" ReplyText="Operation Success.">\n'
+        + '<DELIMITER value="09"/>\n'
+        + '<RETS-STATUS ReplyCode="20201" ReplyText="No Records Found."/>\n</RETS>';
+    eq(W.retsReplyCode(noRecords), 20201, 'the trailer is the truth');
+    eq(W.retsReplyText(noRecords), 'No Records Found.');
+
+    const truncated = '<RETS ReplyCode="0" ReplyText="Operation Success.">\n'
+        + '<MAXROWS/>\n<RETS-STATUS ReplyCode="20208" ReplyText="Maximum records exceeded."/>\n</RETS>';
+    eq(W.retsReplyCode(truncated), 20208);
+});
+
+test('rets: with no trailer the envelope still answers', () => {
+    eq(W.retsReplyCode('<RETS ReplyCode="0" ReplyText="Operation Success.">x</RETS>'), 0);
+    eq(W.retsReplyText('<RETS ReplyCode="0" ReplyText="Operation Success.">x</RETS>'), 'Operation Success.');
+});
+
+test('rets: the DMQL status set is ONE criterion, not several ANDed together', () => {
+    // (Status=|A,S) is "A or S". (Status=|A),(Status=|S) is "A and S", which
+    // is always empty — the comma means OR inside a value and AND between
+    // criteria, and getting it backwards returns zero rows with no error.
+    const q = W.retsDmql({}, { statuses: ['A', 'S'] }, W.mlsFields({}));
+    assert(q.includes('=|A,S)'), 'single pipe-prefixed value list: ' + q);
+    assert(!/\)\s*,\s*\(StandardStatus/.test(q), 'not ANDed: ' + q);
+});
+
+test('rets: the date floor widens by a day for the GMT/Central skew', () => {
+    const q = W.retsDmql({}, { statuses: ['S'], sinceDays: 30, dateField: 'L_ClosingDate' }, W.mlsFields({}));
+    const day = /\(L_ClosingDate=(\d{4}-\d{2}-\d{2})\+\)/.exec(q);
+    assert(day, 'date criterion present: ' + q);
+    const daysBack = Math.round((Date.now() - Date.parse(day[1] + 'T00:00:00Z')) / 86400000);
+    assert(daysBack >= 30 && daysBack <= 32, 'about 31 days back, got ' + daysBack);
+});
+
+test('rets: the DMQL trailing + survives URL encoding as %2B', () => {
+    // A raw + decodes to a space in a query string and becomes a syntax error
+    const q = W.retsDmql({}, { statuses: ['S'], sinceDays: 30 }, W.mlsFields({}));
+    const encoded = new URLSearchParams({ Query: q }).toString();
+    assert(encoded.includes('%2B'), 'plus encoded: ' + encoded);
+    assert(!/[^%]\+/.test(encoded.replace(/^Query=/, '')), 'no raw plus: ' + encoded);
+});
+
+test('rets: Select is built from the field map, and omitted while the map is thin', () => {
+    eq(W.retsSelectList({}), null, 'no map = ask for everything (the probe needs it)');
+    eq(W.retsSelectList({ MLS_FIELD_MAP: '{"sqft":"LM_Int4_3","beds":"LM_Int1_1"}' }), null,
+        'a 2-field map is partial — selecting only those would starve the normalizers');
+    const full = {};
+    for (let i = 0; i < 12; i++) full['f' + i] = 'COL_' + i;
+    const sel = W.retsSelectList({ MLS_FIELD_MAP: JSON.stringify(full) });
+    assert(sel && sel.split(',').length === 12, 'full map pins the schema: ' + sel);
+    eq(W.retsSelectList({ MLS_RETS_SELECT: 'A,B,C' }), 'A,B,C', 'an explicit list always wins');
+});
+
+test('rets: a broken MLS_FIELD_MAP does not produce a broken Select', () => {
+    eq(W.retsSelectList({ MLS_FIELD_MAP: '{not json' }), null);
+});
+
 test('rets: COMPACT-DECODED parses to rows without a DOM parser', () => {
     const TAB = String.fromCharCode(9);
     const xml = `<RETS ReplyCode="0">

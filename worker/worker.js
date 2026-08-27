@@ -1459,9 +1459,22 @@ function retsCapabilities(xml) {
   return caps;
 }
 
+// The REAL reply code. Matrix routinely returns an envelope of
+// <RETS ReplyCode="0"> and then contradicts it with a trailing
+// <RETS-STATUS ReplyCode="20201"/> ("no records") or 20208 ("truncated").
+// The spec is explicit that when both are present the TRAILER wins — reading
+// only the envelope reports an empty or capped result set as a clean success.
 function retsReplyCode(xml) {
-  const m = /ReplyCode\s*=\s*"(\d+)"/i.exec(xml || '');
-  return m ? parseInt(m[1], 10) : null;
+  const trailer = /<RETS-STATUS\b[^>]*\bReplyCode\s*=\s*"(\d+)"/i.exec(xml || '');
+  if (trailer) return parseInt(trailer[1], 10);
+  const envelope = /ReplyCode\s*=\s*"(\d+)"/i.exec(xml || '');
+  return envelope ? parseInt(envelope[1], 10) : null;
+}
+
+function retsReplyText(xml) {
+  const trailer = /<RETS-STATUS\b[^>]*\bReplyText\s*=\s*"([^"]*)"/i.exec(xml || '');
+  if (trailer) return trailer[1];
+  return (/ReplyText\s*=\s*"([^"]*)"/i.exec(xml || '') || [, ''])[1];
 }
 
 // Worker fetch does NOT persist cookies between calls, so the RETS session
@@ -1787,16 +1800,44 @@ function parseCompactDecoded(xml) {
   return rows;
 }
 
+/**
+ * The Select= column list, or null to ask for every field.
+ * Derived from the configured field map so it can never drift out of sync
+ * with what the normalizers actually read. An explicit MLS_RETS_SELECT wins.
+ */
+function retsSelectList(env) {
+  const explicit = (env.MLS_RETS_SELECT || '').trim();
+  if (explicit) return explicit;
+  let override;
+  try { override = JSON.parse(env.MLS_FIELD_MAP || '{}'); }
+  catch (e) { return null; }
+  const names = [...new Set(Object.values(override).filter(v => typeof v === 'string' && v))];
+  // Below a handful of mapped fields the map is clearly partial and the
+  // defaults still carry most columns — asking for only those would starve
+  // the normalizers of everything the map doesn't mention.
+  return names.length >= 10 ? names.join(',') : null;
+}
+
 // DMQL2 has no geography. Date and status are expressible; the spatial cut is
 // done here from the returned Latitude/Longitude columns (see mlsSearch).
 function retsDmql(env, opts, f) {
   const parts = [];
+  // DMQL2 overloads its punctuation viciously. Between parenthesized criteria
+  // a comma means AND; INSIDE a value list it means OR. So the status set is
+  // one criterion with a pipe-prefixed value list — (Status=|A,S) is "A or S",
+  // whereas (Status=|A),(Status=|S) is "A and S", i.e. always empty.
   if (opts.statuses && opts.statuses.length) {
     parts.push(`(${f.status}=|${opts.statuses.join(',')})`);
   }
   if (opts.sinceDays > 0) {
     const field = opts.dateField || f.closeDate;
-    parts.push(`(${field}=${odataDay(Date.now() - opts.sinceDays * 86400000)}+)`);
+    // The trailing + is DMQL2's "or later". It reaches the server as %2B —
+    // URLSearchParams encodes it — and a raw + would decode to a space and
+    // become a syntax error.
+    // One extra day of slack because the RETS server keeps GMT while the data
+    // is Central: without it the most recent closings fall outside the window.
+    const since = Date.now() - (opts.sinceDays + 1) * 86400000;
+    parts.push(`(${field}=${odataDay(since)}+)`);
   }
   if (env.MLS_RETS_QUERY_EXTRA) parts.push(env.MLS_RETS_QUERY_EXTRA.trim());
   // A DMQL2 query cannot be empty; a wide-open date range is the safe filler
@@ -1822,10 +1863,19 @@ async function retsSearch(env, opts, f) {
     // this to 1 without also rewriting the field map returns columns under
     // their StandardNames and every mapped field reads null.
     StandardNames: (env.MLS_RETS_STANDARD_NAMES || '0').trim(),
-    Count: '1',
+    // CoreLogic asks clients not to make Matrix count matches in production;
+    // the row cap is detected from <MAXROWS/> instead, which costs nothing.
+    Count: '0',
     Limit: String(Math.min(500, Math.max(50, (opts.limit || 20) * 10))),
     Query: retsDmql(env, opts, f)
   });
+  // Pin the schema. NTREIS warns that omitting Select returns every field, so
+  // a future field addition on their side can change the payload underneath
+  // you. Once MLS_FIELD_MAP exists we know exactly which columns are read, so
+  // Select is built from it — before that, ask for everything, because the
+  // probe needs the full list to suggest the map in the first place.
+  const selected = retsSelectList(env);
+  if (selected) q.set('Select', selected);
   const full = `${searchUrl}?${q}`;
   const res = await fetch(full, {
     headers: await retsHeaders(env, 'GET', full, session),
@@ -1848,16 +1898,18 @@ async function retsSearch(env, opts, f) {
   const xml = await res.text();
   if (!res.ok) throw new Error(`RETS search HTTP ${res.status}: ${xml.slice(0, 200)}`);
   const code = retsReplyCode(xml);
-  // "No records found" is an answer, not a failure
-  if (code === 20201 || code === 20208) return [];
-  if (code !== null && code !== 0) {
-    throw new Error(`RETS search ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
+  // 20201 "no records found" is an answer, not a failure. 20208 means the
+  // result set was CAPPED — the rows that did come back are good, so parse
+  // them and let the MAXROWS flag below record the truncation.
+  if (code === 20201) return Object.assign([], { truncated: false });
+  if (code !== null && code !== 0 && code !== 20208) {
+    throw new Error(`RETS search ReplyCode ${code}: ${retsReplyText(xml)}`);
   }
   const rows = parseCompactDecoded(xml);
   // <MAXROWS/> means the server capped the result set. The comp search asks
   // for far more rows than it needs, so this is informational rather than a
   // problem — but silently returning a truncated market scan would be a lie.
-  rows.truncated = /<MAXROWS\s*\/?>/i.test(xml);
+  rows.truncated = /<MAXROWS\s*\/?>/i.test(xml) || code === 20208;
   return rows;
 }
 
@@ -2364,6 +2416,30 @@ async function handleMlsProbe(params, env, cors) {
         .map(r => r.SystemName + (r.StandardName ? ` (${r.StandardName})` : ''))
         .filter(Boolean).sort();
       if (params.get('sample') === '1') out.tableSample = table.slice(0, 5);
+
+      // The status LOOKUP VALUES, which are the single most common way a
+      // RETS query silently returns nothing. Format=COMPACT-DECODED changes
+      // only the RESPONSE — a query must still use the coded value, so on a
+      // Matrix server "Closed" matches nothing and "S" is what works. These
+      // go straight into MLS_STATUS_CLOSED / _ACTIVE / _PENDING.
+      const statusField = suggestion.map.status || mlsFields(env).status;
+      const statusRow = table.find(r => r.SystemName === statusField);
+      const lookupName = statusRow && (statusRow.LookupName || statusRow.LookUpName);
+      if (lookupName) {
+        try {
+          const lookup = await retsGetMetadata(env, 'METADATA-LOOKUP_TYPE', `${resource}:${lookupName}`);
+          out.statusValues = lookup
+            .map(r => ({ value: r.Value, label: r.LongValue || r.ShortValue }))
+            .filter(r => r.value);
+          out.steps.push(`status lookup ${lookupName}: `
+            + out.statusValues.map(v => `${v.value}=${v.label}`).join(', '));
+        } catch (e) {
+          out.steps.push(`METADATA-LOOKUP_TYPE ${lookupName} failed: ` + e.message);
+        }
+      } else {
+        out.steps.push(`no LookupName on the status field (${statusField}) — `
+          + 'set MLS_STATUS_* from the metadata browser by hand');
+      }
     } catch (e) {
       out.steps.push(`METADATA-TABLE ${resource}:${cls} failed: ` + e.message);
     }
@@ -2880,8 +2956,8 @@ export {
   mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft,
   mlsMonthlyHoa, mlsPool, mlsFormattedAddress,
   mlsToRecord, mlsToCandidate,
-  parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql, retsAbsolute,
-  parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie,
+  parseCompactDecoded, retsCapabilities, retsReplyCode, retsDmql, retsAbsolute, retsSelectList,
+  parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie, retsReplyText,
   suggestFieldMapFromMetadata, MLS_FIELD_CANDIDATES,
   odataStr, odataDay, mlsOrFilter,
   mergeRecords, milesBetween, streetMatch
