@@ -155,6 +155,21 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   extension) but on no other runtime including Node, so the auth paths would
   have been untestable. Verified against all RFC 1321 vectors, the RFC 2617
   worked example, and 700 random inputs cross-checked against Node crypto.
+- **NTREIS/Matrix specifics** (live-probed 2026-08-27): Matrix advertises
+  ONLY Digest — no Basic scheme is offered on any capability endpoint, and
+  each endpoint issues its OWN challenge, so Authorization goes on every
+  request. The nonce is base64 of a server timestamp and ages out;
+  `stale=true` means re-digest with the new nonce, NOT re-login (re-login
+  on a one-session server can collide with the session already held). The
+  residential class is **`Listing`**, not `RES` — NTREIS's own published
+  example is `CLASS=Listing&searchtype=Property`; resources map
+  Property→Listing/Cross Property, Media→Media, Agent→Agent, Office→Office,
+  OpenHouse→Open House. Matrix accepts RETS/1.5, 1.7.2 and 1.8 and echoes
+  the version back, defaulting to 1.7.2 on anything unrecognized. Offset is
+  1-based; `<MAXROWS/>` marks a capped result set. Without an explicit
+  `Format` the server returns STANDARD-XML, which this parser cannot read.
+  If UA auth ever fails with 20037, note clients disagree on whether
+  version-info is `RETS/1.7.2` or `1.7.2` — we send the full header form.
 - **RETS field names are NOT RESO names** — this is the one that would
   otherwise waste a day. `StandardNames` defaults to **0** (the server's own
   SystemNames), and `/mls/probe` reads METADATA-RESOURCE / METADATA-CLASS /

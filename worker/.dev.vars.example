@@ -29,9 +29,14 @@ MLS_RETS_PASSWORD=your-rets-password
 
 # MLS_RETS_VERSION=RETS/1.7.2
 # MLS_RETS_RESOURCE=Property
-# MLS_RETS_CLASS=RES          # confirm against /mls/probe's "classes" output
-#                             # before trusting it — Matrix installs vary
-#                             # (RES / RESI / A / 1)
+# MLS_RETS_CLASS=Listing      # NTREIS/Matrix names the residential class
+#                             # 'Listing' (their own published example is
+#                             # CLASS=Listing&searchtype=Property), NOT 'RES'.
+#                             # Confirm against /mls/probe's "classes" output.
+#                             # Known NTREIS resources -> classes:
+#                             #   Property -> Listing, Cross Property
+#                             #   Media -> Media, Agent -> Agent,
+#                             #   Office -> Office, OpenHouse -> Open House
 
 # 0 = the server's own SystemNames, which is what /mls/probe reads out of
 # METADATA-TABLE and what its suggested MLS_FIELD_MAP binds to. Do NOT flip

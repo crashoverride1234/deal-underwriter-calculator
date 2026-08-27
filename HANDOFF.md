@@ -206,7 +206,7 @@ tier hard cap means no billing risk; rotate the worker name if abused.
   does nothing — dynamic icons are inline SVG constants.
 - Every open starts BLANK (no restored subject/comps); only adjustment-grid
   settings + API keys persist in localStorage.
-- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v37`).
+- Bump `sw.js` `CACHE_NAME` on EVERY deployable change (currently `v38`).
 - Two test suites now: `node tests.js` (85) AND `node worker/tests.mjs` (67).
 - MLS credentials NEVER go in the browser — Worker secrets only. There is
   deliberately no paste-a-key field for them, unlike RentCast/Melissa.

@@ -1809,8 +1809,13 @@ async function retsSearch(env, opts, f) {
   if (!searchUrl) throw new Error('RETS login returned no Search capability URL');
   const q = new URLSearchParams({
     SearchType: (env.MLS_RETS_RESOURCE || 'Property').trim(),
-    Class: (env.MLS_RETS_CLASS || 'RES').trim(),
+    // NTREIS/Matrix names the residential class 'Listing', not 'RES' — their
+    // own published example is CLASS=Listing&searchtype=Property. /mls/probe
+    // lists the real classes; check it before trusting this default.
+    Class: (env.MLS_RETS_CLASS || 'Listing').trim(),
     QueryType: 'DMQL2',
+    // Without an explicit Format the spec says the server returns
+    // STANDARD-XML, which this parser does not read
     Format: 'COMPACT-DECODED',
     // 0 = the server's own SystemNames, which is what /mls/probe reads out of
     // METADATA-TABLE and what its suggested MLS_FIELD_MAP binds to. Flipping
@@ -1826,14 +1831,21 @@ async function retsSearch(env, opts, f) {
     headers: await retsHeaders(env, 'GET', full, session),
     redirect: 'manual', signal: mlsSignal()
   });
-  const xml = await res.text();
-  // A mid-session 401 means the server's nonce went stale or the session
-  // timed out. One clean re-login beats surfacing an auth error the user
-  // can do nothing about.
+  // A mid-session 401 is usually just an aged nonce (Matrix's nonce is a
+  // base64 timestamp). RFC 7616: stale=true means re-compute with the new
+  // nonce and DO NOT re-prompt. Taking that path matters on a
+  // one-session-per-login server, where a needless re-login can collide with
+  // the session we already hold.
   if (res.status === 401 && !opts._retried) {
-    retsSessionCache = null;
+    const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
+    if (challenge && String(challenge.stale).toLowerCase() === 'true' && session.digest) {
+      session.digest = { ...challenge, nc: 0 };
+      return await retsSearch(env, { ...opts, _retried: true }, f);
+    }
+    retsSessionCache = null; // genuinely unauthenticated: start over
     return await retsSearch(env, { ...opts, _retried: true }, f);
   }
+  const xml = await res.text();
   if (!res.ok) throw new Error(`RETS search HTTP ${res.status}: ${xml.slice(0, 200)}`);
   const code = retsReplyCode(xml);
   // "No records found" is an answer, not a failure
@@ -1841,7 +1853,12 @@ async function retsSearch(env, opts, f) {
   if (code !== null && code !== 0) {
     throw new Error(`RETS search ReplyCode ${code}: ${(/ReplyText\s*=\s*"([^"]*)"/i.exec(xml) || [, ''])[1]}`);
   }
-  return parseCompactDecoded(xml);
+  const rows = parseCompactDecoded(xml);
+  // <MAXROWS/> means the server capped the result set. The comp search asks
+  // for far more rows than it needs, so this is informational rather than a
+  // problem — but silently returning a truncated market scan would be a lie.
+  rows.truncated = /<MAXROWS\s*\/?>/i.test(xml);
+  return rows;
 }
 
 // ---- Normalizers ----
