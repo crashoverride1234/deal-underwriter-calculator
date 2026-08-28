@@ -34,6 +34,18 @@ const maoMinDscrInput = document.getElementById('mao-min-dscr');
 const maoMinCocInput = document.getElementById('mao-min-coc');
 const maoProfitGroup = document.getElementById('mao-profit-group');
 const maoResult = document.getElementById('mao-result');
+const breakevenResult = document.getElementById('breakeven-result');
+const monthlyInsuranceInput = document.getElementById('monthly-insurance');
+const sellingCostPercentInput = document.getElementById('selling-cost-percent');
+const sellingCostNote = document.getElementById('selling-cost-note');
+const sellingCostGroup = document.getElementById('selling-cost-group');
+const arvCapPercentInput = document.getElementById('arv-cap-percent');
+const arvCapGroup = document.getElementById('arv-cap-group');
+const arvCapNote = document.getElementById('arv-cap-note');
+const carrySectionLabel = document.getElementById('carry-section-label');
+const carryTotalNote = document.getElementById('carry-total-note');
+const summaryTotalCarry = document.getElementById('summary-total-carry');
+const summaryCarryLabel = document.getElementById('summary-carry-label');
 const rehabTierSelect = document.getElementById('rehab-tier');
 const rehabPerSqftInput = document.getElementById('rehab-per-sqft');
 const rehabContingencyInput = document.getElementById('rehab-contingency');
@@ -167,11 +179,19 @@ function switchStrategy(strategy) {
         holdingPeriodLabel.textContent = 'Project Hold Period';
         sliderVarianceLabel.textContent = 'ARV Market Variance';
         rentalOperationsSection.classList.add('hidden');
+        // A flip carries taxes and insurance through the hold exactly like a
+        // rental does — the section stays visible, only its framing changes.
+        carrySectionLabel.textContent = 'Monthly Carrying Costs (during the flip)';
+        summaryCarryLabel.textContent = 'Total Carry (hold period):';
     } else {
         holdingPeriodLabel.textContent = 'Rehab/Stabilization Hold';
         sliderVarianceLabel.textContent = 'Appraised Value Variance';
         rentalOperationsSection.classList.remove('hidden');
+        carrySectionLabel.textContent = 'Monthly Ownership Costs';
+        summaryCarryLabel.textContent = 'Total Carry (stabilization):';
     }
+    // Selling costs are a flip exit; a rental's refi closing costs are derived
+    sellingCostGroup.classList.toggle('hidden', strategy === 'rental');
     maoProfitGroup.classList.toggle('hidden', strategy === 'rental');
     document.querySelectorAll('.mao-rental').forEach(el => el.classList.toggle('hidden', strategy !== 'rental'));
 
@@ -219,6 +239,8 @@ function refreshFinancingUI() {
     const type = financingTypeSelect.value;
     // Draw-vs-Dutch interest only exists where the rehab rides in the loan
     drawsGroup.classList.toggle('hidden', type !== 'hard_money' && type !== 'private_money');
+    // The ARV ceiling only exists on a hard/private money note
+    arvCapGroup.classList.toggle('hidden', type !== 'hard_money' && type !== 'private_money');
     if (type === 'cash') {
         financingParamsDiv.classList.add('hidden');
         summaryLeverageLabel.textContent = 'Financed Loan Amount:';
@@ -252,6 +274,10 @@ function readInputs() {
         vacancyPercent: vacancyRateInput.value,
         operatingExpensesPercent: operatingExpensesInput.value,
         monthlyTaxesIns: monthlyTaxesInsInput.value,
+        monthlyInsurance: monthlyInsuranceInput.value,
+        sellingCostPercent: sellingCostPercentInput.value,
+        arvCapPercent: arvCapPercentInput.value,
+        minDscr: maoMinDscrInput.value,
         interestOnDraws: interestAccrualSelect.value
     };
 }
@@ -264,14 +290,71 @@ function calculateDeal() {
         updateRentalUI(m);
     }
     updateSummary(m);
+    updateFlipAdvisories(m);
     updateTaxProjection();
     updateMaxOffer();
+    updateBreakEven();
+    updateHoaGate();
     updateProtestNote(); // purchase price is protest evidence
 }
 
 // Max-offer back-solver: the daily question is "what do I offer", so run
 // the model in reverse — floor targets in, highest workable price out —
 // with the 70%-rule screen beside it, flexed by live market temperature.
+// The floor, stated as a number. The chart has always drawn a break-even
+// segment but never labelled it, and it approximated the figure by ignoring
+// that selling costs scale WITH the sale price.
+function updateBreakEven() {
+    const inputs = readInputs();
+    const b = Engine.breakEven(inputs);
+    breakevenResult.innerHTML = '';
+    const line = (text, cls) => {
+        const d = document.createElement('div');
+        if (cls) d.className = cls;
+        d.textContent = text;
+        breakevenResult.appendChild(d);
+        return d;
+    };
+    if (b.strategy === 'flip') {
+        if (b.salePrice === null) {
+            line('Break-even sale price: not reachable at any price with these costs.');
+            return;
+        }
+        line('Break-even sale price', 'mao-label');
+        line(formatCurrency(b.salePrice), 'mao-price');
+        const arv = Engine.num(arvInput.value);
+        if (arv > 0) {
+            const cushion = arv - b.salePrice;
+            const pct = Math.abs(b.salePriceVsArv);
+            line(cushion >= 0
+                ? `${formatCurrency(cushion)} below your ${formatCurrency(arv)} ARV `
+                  + `— the market can fall ${pct.toFixed(1)}% before this deal loses money.`
+                : `${formatCurrency(-cushion)} ABOVE your ${formatCurrency(arv)} ARV `
+                  + `— you must beat your own ARV by ${pct.toFixed(1)}% just to break even.`,
+                cushion >= 0 ? '' : 'mao-warn');
+        }
+    } else {
+        if (b.monthlyRent === null) {
+            line('Break-even rent: not reachable at any rent with these costs.');
+            return;
+        }
+        line('Break-even rent', 'mao-label');
+        line(formatCurrency(b.monthlyRent) + '/mo', 'mao-price');
+        const actual = Engine.num(monthlyRentInput.value);
+        if (actual > 0) {
+            const cushion = actual - b.monthlyRent;
+            line(cushion >= 0
+                ? `${formatCurrency(cushion)}/mo of cushion above break-even.`
+                : `${formatCurrency(-cushion)}/mo SHORT of break-even.`,
+                cushion >= 0 ? '' : 'mao-warn');
+        }
+        if (b.rentAtDscrFloor !== null) {
+            line(`A ${b.dscrFloor} DSCR needs ${formatCurrency(b.rentAtDscrFloor)}/mo `
+                + `(gross rent ÷ PITIA — the ratio the lender actually runs).`);
+        }
+    }
+}
+
 function updateMaxOffer() {
     const arv = Engine.num(arvInput.value);
     if (arv <= 0) {
@@ -626,6 +709,39 @@ function updateTaxProjection() {
         });
         taxReassessNote.appendChild(btn);
     }
+    // Explain an unexpected rate before the user protests an address rather
+    // than an assessment. Only meaningful against verified closed prices.
+    const nb = compsMeta.taxRate;
+    if (nb && compsMeta.priceTruth === 'closed') {
+        const gap = proj.effectiveRatePct - nb.medianRatePct;
+        const line = document.createElement('div');
+        line.className = 'comp-adj-foot';
+        if (Math.abs(gap) < 0.25) {
+            line.textContent = `Nearby closed sales carry a median ${nb.medianRatePct.toFixed(2)}% `
+                + `effective rate across ${nb.n} comps — this property is in line with its neighbours.`;
+        } else if (gap > 0) {
+            line.textContent = `This rate runs ${gap.toFixed(2)} points ABOVE the `
+                + `${nb.medianRatePct.toFixed(2)}% median of ${nb.n} nearby closed sales. In DFW that `
+                + `usually means a MUD or PID district rather than a bad assessment — check the tax `
+                + `bill's line items before budgeting a protest win.`;
+        } else {
+            line.textContent = `This rate runs ${Math.abs(gap).toFixed(2)} points BELOW the `
+                + `${nb.medianRatePct.toFixed(2)}% median of ${nb.n} nearby closed sales — confirm no `
+                + `exemption is still riding on the seller's bill.`;
+        }
+        taxReassessNote.appendChild(line);
+    }
+
+    // This figure is taxes (+ HOA) only — it has never included insurance.
+    // Insurance now has its own field precisely so adopting this can't quietly
+    // zero it out, but a blank one still understates PITIA and the carry.
+    if (!hasValue(monthlyInsuranceInput.value)) {
+        const ins = document.createElement('span');
+        ins.className = 'tax-hint';
+        ins.textContent = ' Insurance is separate and currently blank —'
+            + ' add it or the carry and any DSCR are understated.';
+        taxReassessNote.appendChild(ins);
+    }
     taxReassessNote.classList.remove('hidden');
 }
 
@@ -654,8 +770,112 @@ function updateSummary(m) {
     if (m.peakCashExposure !== undefined) summaryPeakCash.textContent = formatCurrency(m.peakCashExposure);
     summaryLoanAmount.textContent = formatCurrency(m.loanAmount);
     summaryMonthlyHoldingCost.textContent = formatCurrency(m.monthlyHoldingCost);
+    // The monthly figure was always shown; the total it compounds to never was
+    summaryTotalCarry.textContent = formatCurrency(m.totalHoldingCarryingCosts);
     summaryTotalFinanceCosts.textContent = formatCurrency(m.financeFees);
     summarySellingCosts.textContent = formatCurrency(m.sellingRefiCosts);
+
+    // Say out loud which carry figure is being used, and where it came from
+    const usingBaseline = m.strategy === 'flip'
+        && !hasValue(monthlyTaxesInsInput.value) && !hasValue(monthlyInsuranceInput.value);
+    carryTotalNote.classList.toggle('hidden', !usingBaseline);
+    if (usingBaseline) {
+        carryTotalNote.textContent = `Using the $${Engine.DEFAULTS.flipBaselineMonthlyCarry}/mo `
+            + `placeholder — enter this property's real taxes and insurance, or use the `
+            + `projection above, and the profit figure will account for them.`;
+    }
+
+    // The ARV ceiling, stated only when it is the constraint that actually bound
+    const capBinds = m.bindingConstraint === 'ltarv' && m.capShortfall > 0;
+    arvCapNote.classList.toggle('hidden', !capBinds);
+    if (capBinds) {
+        arvCapNote.textContent = `This lender's ${(m.arvCapRatio * 100).toFixed(0)}% of-ARV ceiling is `
+            + `sizing the loan, not your LTC. It funds ${formatCurrency(m.capShortfall)} less than `
+            + `the LTC alone would, and that shortfall is cash you bring to closing.`;
+    }
+
+    // What the exit stack is costing, in dollars rather than a percentage
+    if (m.strategy === 'flip') {
+        const pct = (m.sellingCostRatio * 100).toFixed(2).replace(/\.?0+$/, '');
+        sellingCostNote.textContent = `${pct}% of ARV = ${formatCurrency(m.sellingRefiCosts)}`
+            + (hasValue(sellingCostPercentInput.value) ? '' : ' (default — set your real stack)');
+    } else {
+        sellingCostNote.textContent = '';
+    }
+}
+
+// A blank field is "not supplied"; a typed 0 is a real answer
+function hasValue(v) {
+    return v !== undefined && v !== null && String(v).trim() !== '';
+}
+
+// FHA's anti-flipping rule governs WHO can buy the house back from you, which
+// on a starter-price DFW flip is a large slice of the buyer pool. Both tests
+// run off fields already on the calculator. Rule text is dated deliberately —
+// FHA has been publicly pursuing repeal, so this must not read as timeless.
+function updateFlipAdvisories(m) {
+    const el = document.getElementById('flip-advisories');
+    if (!el) return;
+    el.innerHTML = '';
+    if (!m || m.strategy !== 'flip') return;
+    const notes = [];
+    if (m.holdingPeriod > 0 && m.holdingPeriod < 3) {
+        notes.push(`Hold is ${m.holdingPeriod} month${m.holdingPeriod === 1 ? '' : 's'}: `
+            + `an FHA buyer cannot sign a contract until day 91 of your ownership. `
+            + `Selling faster than that means cash and conventional buyers only.`);
+    }
+    const purchase = Engine.num(purchasePriceInput.value);
+    if (purchase > 0 && m.arv >= purchase * 2) {
+        notes.push(`Resale at ${formatCurrency(m.arv)} is ${(m.arv / purchase).toFixed(1)}× your `
+            + `${formatCurrency(purchase)} purchase. On an FHA sale between days 91 and 180 that `
+            + `triggers a second independent appraisal, and if it lands more than 5% below your `
+            + `price the LOWER value governs the loan.`);
+    }
+    if (!notes.length) return;
+    notes.forEach(t => {
+        const d = document.createElement('div');
+        d.className = 'appraisal-warning';
+        d.textContent = '⚠ ' + t;
+        el.appendChild(d);
+    });
+    const foot = document.createElement('div');
+    foot.className = 'comp-adj-foot';
+    foot.textContent = 'FHA 24 CFR 203.37a as it stands in 2026 — FHA has proposed relaxing it, so re-check before relying on it.';
+    el.appendChild(foot);
+}
+
+// An HOA can forbid the exit the deal is underwritten on. A leasing cap is
+// binary — the rental thesis survives it or it doesn't — and it is knowable
+// during the option period for the price of the resale certificate, which
+// Texas Property Code §207.003 caps at $375. Nothing in the engine reads the
+// HOA flag, so this is the one place it gets to matter.
+function updateHoaGate() {
+    const gate = document.getElementById('hoa-gate');
+    if (!gate) return;
+    const show = subjectHoaInput.value === 'yes' && currentStrategy === 'rental';
+    gate.classList.toggle('hidden', !show);
+    if (!show) { gate.innerHTML = ''; return; }
+    gate.innerHTML = '';
+    const head = document.createElement('div');
+    head.textContent = '⚠ This property has an HOA and you are underwriting a rental. '
+        + 'Pull the resale certificate in the option period (§207.003 caps it at $375) '
+        + 'and confirm before the option expires:';
+    gate.appendChild(head);
+    const ul = document.createElement('ul');
+    ul.className = 'hoa-gate-list';
+    [
+        'Is there a leasing cap, and is it currently full? (a full cap can mean a multi-year wait)',
+        'Minimum lease term — a 6 or 12 month floor kills short and mid-term plans',
+        'Any outright short-term-rental prohibition',
+        'Owner-occupancy waiting period before you may lease at all',
+        'Transfer and capitalization fees due at closing, and who pays them',
+        'Special assessments already voted or pending'
+    ].forEach(t => {
+        const li = document.createElement('li');
+        li.textContent = t;
+        ul.appendChild(li);
+    });
+    gate.appendChild(ul);
 }
 
 // Fix & Flip dashboard
@@ -689,15 +909,33 @@ function updateFlipUI(m) {
         trendText: 'Time-to-Cash Factor'
     });
 
+    // ROI alone will call a $9,000 profit "excellent" on a thin cash stake.
+    // Fix&flip lenders decline that file against a gross-margin floor and a
+    // dollar floor, and it leaves no room for the overrun the buffer slider
+    // exists to model — so all three have to clear, and a failure says which.
+    const grossMargin = m.arv > 0 ? (m.netProfit / m.arv) * 100 : 0;
+    const MIN_PROFIT = 15000;
+    const MIN_MARGIN = 10;
     if (m.netProfit < 0) {
         setScorecard('fail', ICONS.cross, 'WARNING: Unprofitable Deal',
             'Carrying costs and fees exceed returns. Review purchase price or rehab costs.');
+    } else if (m.netProfit < MIN_PROFIT) {
+        setScorecard('warning', ICONS.warning, 'CAUTION: Thin Dollar Profit',
+            `${formatCurrency(m.netProfit)} of profit is under the ${formatCurrency(MIN_PROFIT)} `
+            + `most fix&flip lenders want to see, and a ${formatCurrency(m.rehabBudget * 0.1)} `
+            + `rehab overrun would take most of it.`);
+    } else if (grossMargin < MIN_MARGIN) {
+        setScorecard('warning', ICONS.warning, 'CAUTION: Thin Margin on Exit',
+            `Profit is ${grossMargin.toFixed(1)}% of the ${formatCurrency(m.arv)} exit — `
+            + `under ${MIN_MARGIN}%, the deal depends on the ARV being right. `
+            + `Check the break-even sale price against your comps.`);
     } else if (m.roi < 12) {
         setScorecard('warning', ICONS.warning, 'CAUTION: Tight Margins',
             'ROI is below 12%. Small rehab overrun will wipe out profit.');
     } else {
         setScorecard('success', ICONS.check, 'EXCELLENT: Strong Flip Deal',
-            `Excellent margins with ROI of ${formatPercent(m.roi)}.`);
+            `${formatCurrency(m.netProfit)} profit — ${formatPercent(m.roi)} ROI on cash, `
+            + `${grossMargin.toFixed(1)}% margin on the exit.`);
     }
 
     updateFlipChart(m);
@@ -707,7 +945,11 @@ function updateFlipUI(m) {
 function updateRentalUI(m) {
     const cashFlowClass = m.monthlyCashFlow >= 250 ? 'success' : (m.monthlyCashFlow > 0 ? 'warning' : 'danger');
     const cocClass = m.cocReturn >= 8 ? 'success' : (m.cocReturn > 3 ? 'warning' : 'danger');
-    const noDebt = m.dscrRatio === Infinity;
+    const noDebt = m.lenderDscr === null;
+    // Two different ratios, both called "DSCR". lenderHealthy is the one that
+    // decides whether the loan gets written; dscrHealthy is whether the
+    // property covers its debt after vacancy and operating expenses.
+    const lenderHealthy = !noDebt && m.lenderDscr >= 1.25;
     const dscrHealthy = m.dscrRatio >= 1.25;
 
     setMetric('monthlyCashFlow', {
@@ -729,25 +971,36 @@ function updateRentalUI(m) {
         trendClass: m.cocReturn >= 6 ? 'trend-up' : 'trend-down',
         trendText: 'Annual Dividend Return'
     });
+    // This card claims lender approval, so it must show the ratio a 1–4 unit
+    // DSCR lender actually underwrites: gross scheduled rent ÷ PITIA. The
+    // NOI-over-debt-service figure is the commercial 5+ unit convention and
+    // sits far lower — reporting it under a "Lender Approved (1.25+)" label
+    // failed deals the lender would have written, and vice versa.
     setMetric('dscrRatio', {
-        value: noDebt ? 'N/A' : m.dscrRatio.toFixed(2),
-        cardClass: noDebt ? 'info' : (dscrHealthy ? 'success' : 'danger'),
-        trendClass: noDebt ? 'trend-neutral' : (dscrHealthy ? 'trend-up' : 'trend-down'),
-        trendText: noDebt ? 'No Debt — All Cash' : (dscrHealthy ? 'Lender Approved (1.25+)' : 'Rejection Risk (< 1.25)')
+        value: noDebt ? 'N/A' : m.lenderDscr.toFixed(2),
+        cardClass: noDebt ? 'info' : (lenderHealthy ? 'success' : 'danger'),
+        trendClass: noDebt ? 'trend-neutral' : (lenderHealthy ? 'trend-up' : 'trend-down'),
+        trendText: noDebt ? 'No Debt — All Cash'
+            : (lenderHealthy ? 'Rent ÷ PITIA — clears 1.25' : 'Rent ÷ PITIA — under 1.25')
     });
 
     if (m.monthlyCashFlow < 0) {
         setScorecard('fail', ICONS.cross, 'WARNING: Negative Cash Flow',
             'Property costs exceed net operating rent. Review expenses, price, or interest rate.');
-    } else if (!noDebt && m.dscrRatio < 1.25) {
+    } else if (!noDebt && !lenderHealthy) {
         setScorecard('warning', ICONS.warning, 'CAUTION: Low Debt Coverage',
-            `DSCR is ${m.dscrRatio.toFixed(2)}. Banks generally require 1.20 - 1.25 to finance.`);
+            `Lender DSCR is ${m.lenderDscr.toFixed(2)} (rent ÷ PITIA); most 1–4 unit `
+            + `DSCR programs want 1.20–1.25. After vacancy and operating expenses the `
+            + `property covers its debt ${m.dscrRatio.toFixed(2)}×.`);
     } else if (m.cocReturn > 10) {
         setScorecard('success', ICONS.check, 'EXCELLENT: High Yield Rental',
-            `High Cash-on-Cash yield of ${formatPercent(m.cocReturn)}. Safe coverage ratio.`);
+            `High Cash-on-Cash yield of ${formatPercent(m.cocReturn)}. `
+            + (noDebt ? 'No debt to cover.' : `Lender DSCR ${m.lenderDscr.toFixed(2)}.`));
     } else {
         setScorecard('success', ICONS.check, 'SOLID: Balanced Rental',
-            'DSCR passes bank underwriting easily. Positive net cash flow.');
+            noDebt ? 'No debt to cover. Positive net cash flow.'
+                : `Lender DSCR ${m.lenderDscr.toFixed(2)} clears underwriting, and after `
+                  + `vacancy and expenses the property still covers debt ${m.dscrRatio.toFixed(2)}×.`);
     }
 
     updateRentalChart(m);
@@ -782,7 +1035,11 @@ function flipChartConfig() {
                 { label: 'Carrying, Buying & Financing', data: [0, 0], backgroundColor: '#f59e0b' },
                 { label: 'Selling Costs', data: [0, 0], backgroundColor: '#a855f7' },
                 { label: 'Net Profit Margin', data: [0, 0], backgroundColor: '#10b981' },
-                { label: 'Break-Even ARV Baseline', data: [0, 0], backgroundColor: '#374151' }
+                // This segment is everything the sale has to give back before
+                // a dollar is profit. It is NOT the break-even price — that is
+                // costs grossed up by the exit rate, and it is stated as a
+                // number under the max offer instead of guessed at from a bar.
+                { label: 'Costs Recovered at Sale', data: [0, 0], backgroundColor: '#374151' }
             ]
         },
         options: {
@@ -899,7 +1156,8 @@ varianceSlider.addEventListener('input', (e) => {
     purchasePriceInput, buyingCostsInput, arvInput, rehabBudgetInput,
     holdingPeriodInput, loanLtvInput, interestRateInput, lenderPointsInput,
     lenderFeesInput, monthlyRentInput, vacancyRateInput, operatingExpensesInput,
-    monthlyTaxesInsInput
+    monthlyTaxesInsInput, monthlyInsuranceInput, sellingCostPercentInput,
+    arvCapPercentInput
 ].forEach(input => input.addEventListener('input', calculateDeal));
 
 financingTypeSelect.addEventListener('change', handleFinancingChange);
@@ -996,6 +1254,16 @@ const arvConfidenceValue = document.getElementById('arv-confidence-value');
 const arvSpreadNote = document.getElementById('arv-spread-note');
 const compResultsBody = document.getElementById('comp-results-body');
 const appraisalWarnings = document.getElementById('appraisal-warnings');
+
+// Human names for the engine's adjustment keys, so the per-comp breakdown
+// reads like an appraiser's grid rather than a variable dump.
+const ADJ_LABELS = {
+    sqft: 'Living area', beds: 'Bedrooms', baths: 'Bathrooms', lot: 'Lot size',
+    garage: 'Garage', year: 'Age / year built', pool: 'Pool', stories: 'Stories',
+    condition: 'Condition', concessions: 'Seller concessions', time: 'Market time',
+    lotPlacement: 'Lot placement', lotUsability: 'Lot usability', schools: 'Schools',
+    curbAppeal: 'Curb appeal', floorplan: 'Floorplan', locationInfluence: 'Location influence'
+};
 const useArvBtn = document.getElementById('use-arv-btn');
 
 const APPRAISAL_STORAGE_KEY = 'underwriter-appraisal-v1';
@@ -1789,7 +2057,11 @@ async function suggestComps() {
         // to the previous subject's neighbourhood, not this one
         compsMeta = {
             priceTruth: data.priceTruth || null, mls: data.mls || null,
-            trend: null, ppsfSpreadPct: 0
+            trend: null, ppsfSpreadPct: 0,
+            // The neighbours' own bills, so a high effective rate can be
+            // attributed to a MUD/PID district instead of read as an
+            // assessment error worth protesting.
+            taxRate: Engine.neighborhoodTaxRate(data.candidates || [])
         };
         const pool = data.candidates || [];
         // Read the market's own numbers off the set BEFORE ranking: the
@@ -2368,9 +2640,36 @@ function renderMarketScan() {
         // number a flip holding period should actually be built on
         if (trend.medianDom != null) {
             const dom = document.createElement('div');
+            // Marketing time to contract, plus the ~30 days a DFW close takes
+            // after that — the hold period a flip actually has to fund.
+            const toContract = Math.max(1, Math.round(trend.medianDom / 30));
+            const suggested = Math.max(1, Math.round((trend.medianDom + 30) / 30));
             dom.textContent = `Median days on market (12 mo): ${Math.round(trend.medianDom)}`
-                + ` — a resale here takes about ${Math.max(1, Math.round(trend.medianDom / 30))} month`
-                + `${Math.round(trend.medianDom / 30) === 1 ? '' : 's'} to go under contract before closing time.`;
+                + ` — a resale here takes about ${toContract} month${toContract === 1 ? '' : 's'}`
+                + ` to go under contract, plus roughly a month to close. `;
+            // The hold period drives carry, interest, annualized ROI and the
+            // max offer, and it has always been a hardcoded 6 sitting next to
+            // a measured figure that never reached it.
+            const rehabMonths = Math.max(0, Engine.num(rehabBudgetInput.value) > 0 ? 2 : 0);
+            const target = suggested + rehabMonths;
+            const cur = Engine.num(holdingPeriodInput.value);
+            if (Math.abs(cur - target) <= 0) {
+                const ok = document.createElement('span');
+                ok.className = 'tax-applied';
+                ok.textContent = ' ✓ hold period matches';
+                dom.appendChild(ok);
+            } else {
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-secondary';
+                btn.textContent = `Set hold to ${target} mo`;
+                btn.title = `${suggested} months to market and close`
+                    + (rehabMonths ? ` + ${rehabMonths} months of rehab` : '');
+                btn.addEventListener('click', () => {
+                    holdingPeriodInput.value = target;
+                    calculateDeal();
+                });
+                dom.appendChild(btn);
+            }
             marketScanEl.appendChild(dom);
         }
     }
@@ -2933,7 +3232,16 @@ async function scanSubjectSite() {
         [floodChip, soilChip, hailChip, schoolChip, trafficChip, crimeChip, acsChip]
             .concat(permitChips || [])
             .filter(Boolean)
-            .forEach(c => siteInfluencesEl.appendChild(influenceChipDiv(c)));
+            .forEach(c => {
+                const div = influenceChipDiv(c);
+                // Fannie B4-1.1-04 names "reference to crime rate or related
+                // data" an Unacceptable Appraisal Practice, and this user is a
+                // licensed agent. Fine as private underwriting input; it must
+                // never ride along into anything handed to a third party, so
+                // it is excluded from every print surface at the source.
+                if (c === crimeChip || c === acsChip) div.classList.add('no-print');
+                siteInfluencesEl.appendChild(div);
+            });
     } catch (e) {
         siteInfluencesEl.textContent = 'Map scan failed — Overpass may be busy; try again in a minute.';
     } finally {
@@ -3199,7 +3507,7 @@ function recalcAppraisal() {
         const row = document.createElement('tr');
         const netPrefix = c.netAdjustment >= 0 ? '+' : '';
         row.innerHTML = `
-            <td>${c.flagged ? '⚠ ' : ''}<span class="comp-name"></span></td>
+            <td>${c.flagged ? '⚠ ' : ''}<button type="button" class="comp-adj-toggle" aria-expanded="false" title="Show the adjustment line items">▸</button> <span class="comp-name"></span></td>
             <td>${formatCurrency(c.salePrice)}</td>
             <td class="${c.netAdjustment >= 0 ? 'adj-pos' : 'adj-neg'}">${netPrefix}${formatCurrency(c.netAdjustment)}</td>
             <td><strong>${formatCurrency(c.adjustedValue)}</strong></td>
@@ -3208,6 +3516,44 @@ function recalcAppraisal() {
         `;
         row.querySelector('.comp-name').textContent = c.label || `Comp ${i + 1}`;
         compResultsBody.appendChild(row);
+
+        // The net figure alone can't answer "why is this comp down $40k?".
+        // Every line is already computed on the comp object each keystroke —
+        // this is pure render of data that was being thrown away.
+        const detail = document.createElement('tr');
+        detail.className = 'comp-adj-detail hidden';
+        const cell = document.createElement('td');
+        cell.colSpan = 6;
+        const lines = Object.entries(c.adjustments || {})
+            .filter(([, v]) => Math.round(v) !== 0)
+            .sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]));
+        if (!lines.length) {
+            cell.textContent = 'No adjustments — this comp matches the subject on every field with data on both sides.';
+        } else {
+            const list = document.createElement('div');
+            list.className = 'comp-adj-lines';
+            lines.forEach(([key, v]) => {
+                const item = document.createElement('span');
+                item.className = 'comp-adj-line ' + (v >= 0 ? 'adj-pos' : 'adj-neg');
+                item.textContent = `${ADJ_LABELS[key] || key}: ${v >= 0 ? '+' : ''}${formatCurrency(v)}`;
+                list.appendChild(item);
+            });
+            cell.appendChild(list);
+            if (c.concessions > 0) {
+                const note = document.createElement('div');
+                note.className = 'comp-adj-foot';
+                note.textContent = `Seller concessions of ${formatCurrency(c.concessions)} came off the price first `
+                    + `(cash-equivalent ${formatCurrency(c.cashEquivalent)}), before any adjustment above.`;
+                cell.appendChild(note);
+            }
+        }
+        detail.appendChild(cell);
+        compResultsBody.appendChild(detail);
+        row.querySelector('.comp-adj-toggle').addEventListener('click', (e) => {
+            const open = detail.classList.toggle('hidden');
+            e.currentTarget.setAttribute('aria-expanded', String(!open));
+            e.currentTarget.textContent = open ? '▸' : '▾';
+        });
     });
 
     const flagged = a.comps.filter(c => c.flagged);
@@ -3215,9 +3561,27 @@ function recalcAppraisal() {
     if (flagged.length) {
         const warn = document.createElement('div');
         warn.className = 'appraisal-warning';
-        warn.textContent = `⚠ ${flagged.map(c => c.label || 'Unnamed comp').join(', ')}: gross adjustments exceed 25% of sale price — weak comparable(s), consider replacing.`;
+        // Fannie ELIMINATED the 15%/25% net/gross adjustment guidelines in
+        // Selling Guide B4-1.3-09 (2025-06-04): "Fannie Mae does not have
+        // specific limitations or guidelines associated with net or gross
+        // adjustments." The signal is still real — a comp needing a quarter of
+        // its price in adjustments is being argued into place — but it must
+        // not be presented as somebody's rule.
+        warn.textContent = `⚠ ${flagged.map(c => c.label || 'Unnamed comp').join(', ')}: adjustments total more than 25% of the sale price — that comp is being argued into place rather than compared. Not a lender rule (Fannie dropped its 25% guideline in 2025), but a strong hint to find a closer sale.`;
         appraisalWarnings.appendChild(warn);
     }
+
+    // Does the comp set SURROUND the subject? valuationInterval() measures how
+    // much the comps disagree with each other and scoreComp() rates them one
+    // at a time — neither can see a set that agrees closely and sits entirely
+    // on one side of the subject, which is a narrow band around an
+    // extrapolation. Read appraisalComps: appraise() does not echo sqft/beds.
+    Engine.bracketingDefects(readAppraisalInputs().subject, appraisalComps).forEach(d => {
+        const warn = document.createElement('div');
+        warn.className = 'appraisal-warning';
+        warn.textContent = '⚠ Not bracketed — ' + d.message;
+        appraisalWarnings.appendChild(warn);
+    });
     a.comps.filter(c => c.overlaps.length).forEach((c, i) => {
         const warn = document.createElement('div');
         warn.className = 'appraisal-warning';
@@ -4168,6 +4532,9 @@ adjAppreciationInput.addEventListener('input', () => markRateOverridden('annualA
 
 [subjectStoriesInput, subjectPoolInput, subjectHoaInput, subjectOwnerOccupiedInput]
     .forEach(sel => sel.addEventListener('change', recalcAppraisal));
+// The HOA answer gates a rental thesis, and that gate lives on the calculator
+// page — the appraisal recalc above never reaches it.
+subjectHoaInput.addEventListener('change', updateHoaGate);
 // Tax-projection inputs live on the subject page; keep the calculator note current
 [subjectAssessedValueInput, subjectAnnualTaxesInput, subjectHoaFeeInput]
     .forEach(input => input.addEventListener('input', updateTaxProjection));

@@ -143,7 +143,12 @@
                         </div>
                         <div class="form-group">
                             <label for="subject-hoa">HOA</label>
+                            <!-- Unknown leads deliberately: "No HOA" first made
+                                 an unanswered field read as a confirmed
+                                 negative, which is the one thing a missing
+                                 value must never do. -->
                             <select id="subject-hoa">
+                                <option value="">Unknown</option>
                                 <option value="no">No HOA</option>
                                 <option value="yes">HOA</option>
                             </select>
@@ -679,6 +684,17 @@
                             </div>
                         </div>
                     </div>
+                    <!-- The exit stack is the investor's own, not a national
+                         average: a licensed agent self-listing runs several
+                         points under the 8% default. Blank keeps that default. -->
+                    <div class="form-group" id="selling-cost-group">
+                        <label for="selling-cost-percent">Selling Costs (commissions, title, closing)</label>
+                        <div class="input-wrapper has-suffix">
+                            <input type="number" id="selling-cost-percent" value="" min="0" max="20" step="0.25" placeholder="8">
+                            <span class="input-suffix">%</span>
+                        </div>
+                        <div id="selling-cost-note" class="tax-reassess-note"></div>
+                    </div>
                 </div>
 
                 <!-- Rehab & Timeline -->
@@ -783,6 +799,16 @@
                                 <option value="draws">Drawn balance (rehab drawn evenly — typical)</option>
                             </select>
                         </div>
+                        <!-- The ceiling that silently shrinks a fix&flip loan.
+                             It was always modelled; it was never visible. -->
+                        <div class="form-group hidden" id="arv-cap-group" style="margin-top: 1rem;">
+                            <label for="arv-cap-percent">Lender Max Loan-to-ARV</label>
+                            <div class="input-wrapper has-suffix">
+                                <input type="number" id="arv-cap-percent" value="" min="30" max="100" step="1" placeholder="75">
+                                <span class="input-suffix">%</span>
+                            </div>
+                            <div id="arv-cap-note" class="tax-reassess-note hidden"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -799,6 +825,7 @@
                                 <input type="number" id="monthly-rent" value="2200" min="0" step="50">
                             </div>
                             <div id="rent-note" class="tax-reassess-note"></div>
+                            <div id="hoa-gate" class="appraisal-warning hidden"></div>
                         </div>
                         <div class="input-row">
                             <div class="form-group">
@@ -816,15 +843,33 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Carrying costs — a flip pays taxes and insurance too, so
+                     this section is deliberately visible for BOTH strategies. -->
+                <div class="input-section-title">
+                    <i data-lucide="receipt"></i> <span id="carry-section-label">Monthly Carrying Costs</span>
+                </div>
+                <div class="inputs-group">
+                    <div class="input-row">
                         <div class="form-group">
-                            <label for="monthly-taxes-ins">Monthly Taxes, Insurance & HOA</label>
+                            <label for="monthly-taxes-ins">Monthly Taxes &amp; HOA</label>
                             <div class="input-wrapper has-prefix">
                                 <span class="input-prefix">$</span>
                                 <input type="number" id="monthly-taxes-ins" value="350" min="0" step="25">
                             </div>
-                            <div id="tax-reassess-note" class="tax-reassess-note hidden"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="monthly-insurance">Monthly Insurance</label>
+                            <div class="input-wrapper has-prefix">
+                                <span class="input-prefix">$</span>
+                                <input type="number" id="monthly-insurance" value="" min="0" step="25" placeholder="0">
+                            </div>
                         </div>
                     </div>
+                    <div id="tax-reassess-note" class="tax-reassess-note hidden"></div>
+                    <div id="carry-total-note" class="tax-reassess-note hidden"></div>
                 </div>
 
                 <!-- Max Offer back-solver: targets in, price out -->
@@ -860,6 +905,10 @@
                         </div>
                     </div>
                     <div id="mao-result" class="mao-result"></div>
+                    <!-- The floor the deal has to clear, stated as a number
+                         rather than left as an unlabelled bar on the chart. -->
+                    <div id="breakeven-result" class="mao-result"></div>
+                    <div id="flip-advisories"></div>
                 </div>
             </div>
 
@@ -959,6 +1008,10 @@
                             <div class="summary-row">
                                 <span class="label">Monthly Holding Cost:</span>
                                 <span class="value" style="color: var(--accent-danger);" id="summary-monthly-holding-cost">$0</span>
+                            </div>
+                            <div class="summary-row">
+                                <span class="label" id="summary-carry-label">Total Carry (hold period):</span>
+                                <span class="value" id="summary-total-carry">$0</span>
                             </div>
                             <div class="summary-row">
                                 <span class="label">Total Financing Costs:</span>

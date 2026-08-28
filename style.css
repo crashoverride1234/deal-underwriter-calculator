@@ -1416,6 +1416,11 @@ input[type="range"]::-webkit-slider-thumb:active {
 #protest-packet { display: none; }
 
 @media print {
+    /* Crime and neighborhood-demographic readings are private underwriting
+       input only. Fannie B4-1.1-04 lists crime-rate references among the
+       Unacceptable Appraisal Practices, and for a licensed agent putting them
+       in a document handed to a third party is fair-housing exposure. */
+    .no-print { display: none !important; }
     body.protest-print .container { display: none !important; }
     body.protest-print #protest-packet {
         display: block !important;
@@ -1558,3 +1563,53 @@ input[type="range"]::-webkit-slider-thumb:active {
 .derived-rate-note.overridden {
     color: var(--accent-warning);
 }
+
+/* Per-comp adjustment breakdown — the line items behind the net figure.
+   Rendered from data the engine already computes each keystroke. */
+.comp-adj-toggle {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0 0.15rem;
+    line-height: 1;
+}
+.comp-adj-toggle:hover { color: var(--text-primary); }
+.comp-adj-toggle:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.comp-adj-detail > td {
+    background: rgba(255, 255, 255, 0.03);
+    padding: 0.6rem 0.75rem;
+}
+.comp-adj-lines {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.9rem;
+    font-size: 0.78rem;
+}
+.comp-adj-line { white-space: nowrap; }
+.comp-adj-foot {
+    margin-top: 0.45rem;
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+.tax-hint {
+    display: block;
+    margin-top: 0.35rem;
+    color: var(--accent-warning);
+    font-size: 0.78rem;
+}
+.mao-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+}
+.mao-warn { color: var(--accent-danger); }
+.hoa-gate-list {
+    margin: 0.5rem 0 0 1.1rem;
+    padding: 0;
+    font-size: 0.8rem;
+    line-height: 1.55;
+}
+.hoa-gate-list li { margin-bottom: 0.2rem; }

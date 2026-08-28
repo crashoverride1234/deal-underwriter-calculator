@@ -1264,6 +1264,220 @@ test('tax projection: garbage inputs are sanitized like every other engine input
     assert(p !== null && p.projectedAnnual === 8000, 'numeric strings accepted');
 });
 
+// ---- Flip carrying costs, exit stack, and the ARV cap ----
+
+test('flip carry: a supplied taxes figure is used; blank falls back to the baseline', () => {
+    const blank = Engine.underwrite(FLIP_BASE);
+    eq(blank.baselineMonthlyCarry, Engine.DEFAULTS.flipBaselineMonthlyCarry, 'blank uses baseline');
+    const supplied = Engine.underwrite({ ...FLIP_BASE, monthlyTaxesIns: 767 });
+    eq(supplied.baselineMonthlyCarry, 767, 'supplied figure wins');
+    // 6 months × ($767 − $300) of carry that used to be silently discarded
+    assertNear(supplied.totalHoldingCarryingCosts - blank.totalHoldingCarryingCosts,
+        (767 - 300) * 6, 0.01, 'extra carry');
+    assertNear(blank.netProfit - supplied.netProfit, (767 - 300) * 6, 0.01, 'profit falls by the carry');
+});
+
+test('flip carry: an explicit zero is honoured, not treated as missing', () => {
+    const m = Engine.underwrite({ ...FLIP_BASE, monthlyTaxesIns: 0 });
+    eq(m.baselineMonthlyCarry, 0, 'explicit 0 means 0');
+    eq(m.totalHoldingCarryingCosts, 0, 'cash deal with no carry costs nothing to hold');
+});
+
+test('flip carry: insurance alone also displaces the baseline', () => {
+    const m = Engine.underwrite({ ...FLIP_BASE, monthlyInsurance: 210 });
+    eq(m.baselineMonthlyCarry, 210, 'insurance-only still counts as supplied');
+});
+
+test('selling cost: percent overrides the 8% default; blank is bit-identical', () => {
+    const def = Engine.underwrite(FLIP_BASE);
+    eq(def.sellingCostRatio, Engine.DEFAULTS.flipSellingCostRate, 'blank keeps the constant');
+    assertNear(def.sellingRefiCosts, 320000 * 0.08, 0.01, 'default exit stack');
+    const agent = Engine.underwrite({ ...FLIP_BASE, sellingCostPercent: 5.5 });
+    assertNear(agent.sellingRefiCosts, 320000 * 0.055, 0.01, 'agent exit stack');
+    assertNear(agent.netProfit - def.netProfit, 320000 * 0.025, 0.01, 'the gap is pure profit');
+});
+
+test('selling cost: zero percent is honoured (a private off-market sale)', () => {
+    const m = Engine.underwrite({ ...FLIP_BASE, sellingCostPercent: 0 });
+    eq(m.sellingRefiCosts, 0, 'no exit stack');
+});
+
+test('hard money: the ARV cap binds and reports the shortfall it creates', () => {
+    // 85% of ($260k + $90k) = $297.5k asked, but 75% of a $320k ARV is $240k
+    const capped = Engine.underwrite({
+        ...FLIP_BASE, financingType: 'hard_money',
+        purchasePrice: 260000, rehabBudget: 90000
+    });
+    eq(capped.bindingConstraint, 'ltarv', 'the ARV ceiling is what sized the loan');
+    assertNear(capped.loanAmount, 240000, 1, 'loan sized by ARV cap');
+    assertNear(capped.capShortfall, (260000 + 90000) * 0.85 - 240000, 1, 'shortfall stated');
+    // The same deal where cost is the binding side reports no shortfall
+    const byCost = Engine.underwrite({ ...FLIP_BASE, financingType: 'hard_money' });
+    eq(byCost.bindingConstraint, 'ltc', 'cost binds on a normal deal');
+    eq(byCost.capShortfall, 0, 'nothing withheld');
+});
+
+test('hard money: the ARV cap percentage is overridable', () => {
+    const m = Engine.underwrite({
+        ...FLIP_BASE, financingType: 'hard_money',
+        purchasePrice: 260000, rehabBudget: 90000, arvCapPercent: 70
+    });
+    assertNear(m.loanAmount, 320000 * 0.70, 1, 'a 70% lender lends less');
+});
+
+// ---- DSCR: the analyst ratio and the lender ratio are different numbers ----
+
+test('lender DSCR is gross rent over PITIA, not NOI over debt service', () => {
+    const m = Engine.underwrite({
+        ...RENTAL_BASE, financingType: 'dscr_purchase',
+        monthlyTaxesIns: 400, monthlyInsurance: 150
+    });
+    const pi = Engine.calcAmortizedPayment(200000 * 0.75, 7.5);
+    assertNear(m.pitia, pi + 550, 0.01, 'PITIA = P&I + taxes + insurance');
+    assertNear(m.lenderDscr, 2200 / (pi + 550), 0.0001, 'gross rent over PITIA');
+    // The analyst ratio strips vacancy and opex first, so it is much lower —
+    // this gap is the whole point of reporting both.
+    assert(m.dscrRatio < m.lenderDscr, 'NOI coverage sits below the lender ratio');
+    assertNear(m.dscrRatio, m.netOperatingIncome / m.monthlyDebtService, 0.0001, 'analyst ratio unchanged');
+});
+
+test('lender DSCR is null when there is no note to cover', () => {
+    const m = Engine.underwrite({ ...RENTAL_BASE, financingType: 'cash' });
+    eq(m.lenderDscr, null, 'an all-cash hold has no lender ratio');
+    eq(m.dscrRatio, Infinity, 'analyst coverage is still unbounded');
+});
+
+test('insurance is a real cost: it leaves NOI and cash flow, not just a label', () => {
+    const without = Engine.underwrite(RENTAL_BASE);
+    const withIns = Engine.underwrite({ ...RENTAL_BASE, monthlyInsurance: 175 });
+    assertNear(without.netOperatingIncome - withIns.netOperatingIncome, 175, 0.01, 'NOI drops');
+    assertNear(without.monthlyCashFlow - withIns.monthlyCashFlow, 175, 0.01, 'cash flow drops');
+    eq(withIns.monthlyOwnershipCost, 525, 'taxes + insurance reported together');
+    // Folding it into the old single field gives the identical answer
+    const folded = Engine.underwrite({ ...RENTAL_BASE, monthlyTaxesIns: 525 });
+    assertNear(folded.monthlyCashFlow, withIns.monthlyCashFlow, 0.01, 'split or folded, same total');
+});
+
+// ---- Break-even ----
+
+test('break-even flip: selling the answer nets exactly zero', () => {
+    const b = Engine.breakEven(FLIP_BASE);
+    assert(b.salePrice > 0, 'a break-even price exists');
+    const at = Engine.underwrite({ ...FLIP_BASE, arv: b.salePrice, variancePercent: 0 });
+    assert(at.netProfit >= 0 && at.netProfit < 400, 'nets ~zero at the answer, rounded up to $100');
+    const under = Engine.underwrite({ ...FLIP_BASE, arv: b.salePrice - 2000, variancePercent: 0 });
+    assert(under.netProfit < 0, 'below it the deal loses money');
+});
+
+test('break-even flip: it is NOT total costs — the exit stack is grossed up', () => {
+    const m = Engine.underwrite(FLIP_BASE);
+    const b = Engine.breakEven(FLIP_BASE);
+    // The naive answer everyone reaches for first
+    assert(b.salePrice > m.totalProjectCosts, 'must clear costs AND the cost of selling');
+    assertNear(b.salePrice, m.totalProjectCosts / (1 - 0.08), 150, 'grossed up by the exit rate');
+});
+
+test('break-even flip: a cheaper exit stack lowers the price you must hit', () => {
+    const def = Engine.breakEven(FLIP_BASE);
+    const agent = Engine.breakEven({ ...FLIP_BASE, sellingCostPercent: 5 });
+    assert(agent.salePrice < def.salePrice, 'self-listing lowers the bar');
+});
+
+test('break-even rental: the rent floors for cash flow and for the lender', () => {
+    const inputs = { ...RENTAL_BASE, financingType: 'dscr_purchase', monthlyInsurance: 150 };
+    const b = Engine.breakEven(inputs);
+    assert(b.monthlyRent > 0, 'a cash-flow break-even rent exists');
+    const at = Engine.underwrite({ ...inputs, monthlyRent: b.monthlyRent });
+    assert(at.monthlyCashFlow >= 0, 'flat or better at the answer');
+    const under = Engine.underwrite({ ...inputs, monthlyRent: b.monthlyRent - 25 });
+    assert(under.monthlyCashFlow < 0, 'below it the hold bleeds');
+    eq(b.dscrFloor, 1.25, 'default lender floor');
+    const atDscr = Engine.underwrite({ ...inputs, monthlyRent: b.rentAtDscrFloor });
+    assert(atDscr.lenderDscr >= 1.25, 'the DSCR floor is met at its answer');
+});
+
+test('break-even rental: no note means no DSCR floor to report', () => {
+    const b = Engine.breakEven(RENTAL_BASE);
+    eq(b.rentAtDscrFloor, null, 'nothing to cover');
+    eq(b.dscrFloor, null, 'and no floor is claimed');
+});
+
+// ---- Bracketing ----
+
+test('bracketing: a set that surrounds the subject reports no defect', () => {
+    const subject = { sqft: 1500, beds: 3, lotSqft: 7000, yearBuilt: 1980 };
+    const comps = [
+        { salePrice: 300000, sqft: 1400, beds: 3, lotSqft: 6500, yearBuilt: 1975 },
+        { salePrice: 330000, sqft: 1600, beds: 4, lotSqft: 7500, yearBuilt: 1990 }
+    ];
+    eq(Engine.bracketingDefects(subject, comps).length, 0, 'bracketed on every line');
+});
+
+test('bracketing: comps all smaller than the subject is an extrapolation warning', () => {
+    const subject = { sqft: 2400, beds: 3, lotSqft: 7000, yearBuilt: 1980 };
+    const comps = [
+        { salePrice: 300000, sqft: 1400, beds: 3, lotSqft: 6500, yearBuilt: 1975 },
+        { salePrice: 310000, sqft: 1550, beds: 3, lotSqft: 7500, yearBuilt: 1990 }
+    ];
+    const d = Engine.bracketingDefects(subject, comps);
+    const sqftDefect = d.find(x => x.dimension === 'sqft');
+    assert(sqftDefect, 'the size gap is caught');
+    eq(sqftDefect.side, 'below', 'every comp sits below');
+    eq(sqftDefect.nearest, 1550, 'the closest comp is named');
+    assert(/extrapolated/.test(sqftDefect.message), 'the message says why it matters');
+    assert(!d.find(x => x.dimension === 'lotSqft'), 'lot size IS bracketed and stays quiet');
+});
+
+test('bracketing: unpriced comps and missing fields never manufacture a defect', () => {
+    const subject = { sqft: 2400, beds: 3 };
+    // Only one priced comp — too thin to conclude anything
+    eq(Engine.bracketingDefects(subject, [
+        { salePrice: 300000, sqft: 1400 }, { salePrice: '', sqft: 1200 }
+    ]).length, 0, 'one priced comp proves nothing');
+    // Subject size unknown: nothing to bracket against
+    eq(Engine.bracketingDefects({ beds: 3 }, [
+        { salePrice: 300000, sqft: 1400 }, { salePrice: 310000, sqft: 1500 }
+    ]).length, 0, 'no subject value, no claim');
+    eq(Engine.bracketingDefects(null, null).length, 0, 'garbage in, silence out');
+});
+
+// ---- Neighbourhood effective tax rate ----
+
+test('neighbourhood tax rate: median of the comps\' own bills', () => {
+    const comps = [
+        { taxAnnual: 6000, price: 300000, priceType: 'closed' },  // 2.0%
+        { taxAnnual: 6600, price: 300000, priceType: 'closed' },  // 2.2%
+        { taxAnnual: 9300, price: 300000, priceType: 'closed' }   // 3.1%
+    ];
+    const r = Engine.neighborhoodTaxRate(comps);
+    eq(r.n, 3, 'all three usable');
+    assertNear(r.medianRatePct, 2.2, 0.001, 'median rate');
+});
+
+test('neighbourhood tax rate: refuses to call two houses a market', () => {
+    eq(Engine.neighborhoodTaxRate([
+        { taxAnnual: 6000, price: 300000, priceType: 'closed' },
+        { taxAnnual: 6600, price: 300000, priceType: 'closed' }
+    ]), null, 'under 3 usable comps yields nothing');
+    eq(Engine.neighborhoodTaxRate(null), null, 'garbage in, silence out');
+});
+
+test('neighbourhood tax rate: list-price proxies and impossible rates are dropped', () => {
+    const comps = [
+        { taxAnnual: 6000, price: 300000, priceType: 'closed' },
+        { taxAnnual: 6600, price: 300000, priceType: 'closed' },
+        { taxAnnual: 6300, price: 300000, priceType: 'closed' },
+        // A guess in the denominator would put a guess in the answer
+        { taxAnnual: 30000, price: 300000, priceType: 'list' },
+        // 0.1% and 9% are data errors (partial year, exempt, mismatched row)
+        { taxAnnual: 300, price: 300000, priceType: 'closed' },
+        { taxAnnual: 27000, price: 300000, priceType: 'closed' }
+    ];
+    const r = Engine.neighborhoodTaxRate(comps);
+    eq(r.n, 3, 'only the three sane closed rows count');
+    assertNear(r.medianRatePct, 2.1, 0.001, 'outliers never move the median');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

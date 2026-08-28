@@ -781,7 +781,9 @@ async function handleRent(params, env, cors) {
   let mlsClosedLeases = 0;
   if (mlsConfigured(env)) {
     try {
-      const leases = await mlsLeases(env, lat, lon, 1, zip);
+      const leases = await mlsLeases(env, lat, lon, 1, zip, {
+        sqft: params.get('sqft'), beds: params.get('beds')
+      });
       for (const err of leases.errors || []) providerErrors.push(mlsSystemName(env) + ' ' + err);
       mlsClosedLeases = leases.filter(l => l.status === 'closed').length;
       out.mls = {
@@ -2310,9 +2312,14 @@ function mlsDom(row, f) {
   const published = numOrNull(row[f.dom]);
   if (published) return published;
   const on = Date.parse(mlsFlat(row[f.listDate]) || mlsFlat(row[f.contractDate]) || '');
-  const close = Date.parse(mlsFlat(row[f.closeDate]) || '');
-  if (!Number.isFinite(on) || !Number.isFinite(close) || close < on) return null;
-  return Math.round((close - on) / 86400000) || null;
+  // Days on market means list-to-CONTRACT. Falling back to the close date
+  // silently measures list-to-close instead and overstates it by the whole
+  // financing period — a measured 30-day median lag on this feed. Prefer the
+  // under-contract date, which NTREIS populates on every closed row.
+  const end = Date.parse(
+    mlsFlat(row[f.purchaseContractDate]) || mlsFlat(row[f.closeDate]) || '');
+  if (!Number.isFinite(on) || !Number.isFinite(end) || end < on) return null;
+  return Math.round((end - on) / 86400000) || null;
 }
 
 function mlsPool(row, f) {
@@ -2449,6 +2456,11 @@ function mlsToCandidate(row, env) {
     stories: mlsStories(row, f),
     propType: mlsFlat(row[f.propSubType]) || mlsFlat(row[f.propType]),
     remarks: mlsFlat(row[f.remarks]),
+    // The comp's own annual bill. Paired with its close price this gives the
+    // effective tax RATE on that street, which is how a MUD or PID district
+    // becomes visible — the roll shows a rate the buyer can't explain, and
+    // the neighbours' bills say whether it's the district or the assessment.
+    taxAnnual: numOrNull(row[f.taxAnnual]),
     distanceMi: row._distanceMi != null ? row._distanceMi : null,
     correlation: null,
     source: mlsSystemName(env),
@@ -2481,6 +2493,15 @@ function mlsTypesExplicit(env) { return Boolean((env.MLS_PROPERTY_TYPES || '').t
 
 function mlsSubTypes(env) {
   const raw = (env.MLS_SUBTYPES || '').trim();
+  return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+}
+
+// Deliberately its OWN variable rather than reusing MLS_SUBTYPES. On a coded
+// feed the lease class may publish a different sub-type lookup, and DMQL2
+// answers an unknown code with an empty result set, not an error — so an
+// unset value must mean "don't filter", never "guess".
+function mlsLeaseSubTypes(env) {
+  const raw = (env.MLS_LEASE_SUBTYPES || '').trim();
   return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
 }
 
@@ -2684,9 +2705,12 @@ async function mlsMarket(env, lat, lon, radiusMi, zip) {
  * a rent estimate actually wants. Active rentals ride along as a thinner
  * signal so a quiet lease market still produces something.
  */
-async function mlsLeases(env, lat, lon, radiusMi, zip) {
+async function mlsLeases(env, lat, lon, radiusMi, zip, opts) {
   const f = mlsFields(env);
   const leaseTypes = mlsLeaseTypes(env);
+  const o = opts || {};
+  const sqft = numOrNull(o.sqft);
+  const beds = numOrNull(o.beds);
   // On classic RETS the property type is a DMQL criterion, and it is only
   // safe to emit when the coded value was configured. Without it the "lease"
   // search is just the sale search again — and a $572,500 close price would
@@ -2712,12 +2736,48 @@ async function mlsLeases(env, lat, lon, radiusMi, zip) {
   // silently empty lease market and a broken credential look identical to
   // the user otherwise.
   const errors = [];
+  // Filter the LEASE pool at the source, exactly as mlsComps() does for
+  // sales. The row cap is spent on whatever the server returns first, so an
+  // unbanded 1-mile lease query fills 40 slots with apartments and townhomes
+  // and rentFromComps() medians their $/sqft straight into rent → NOI →
+  // DSCR → cash-on-cash. Sub-type stays behind its OWN variable: the coded
+  // lease value is not guaranteed to be the sale lookup, and a wrong code
+  // silently returns nothing rather than erroring.
+  const bands = (loosen) => ({
+    subTypes: mlsLeaseSubTypes(env),
+    sqftMin: sqft ? sqft * (1 - MLS_SQFT_TOLERANCE * loosen) : 0,
+    sqftMax: sqft ? sqft * (1 + MLS_SQFT_TOLERANCE * loosen) : 0,
+    bedsMin: beds ? Math.max(1, beds - MLS_BEDS_TOLERANCE * loosen) : 0,
+    bedsMax: beds ? beds + MLS_BEDS_TOLERANCE * loosen : 0
+  });
+  const banded = sqft || beds || mlsLeaseSubTypes(env).length;
+  const closedSearch = (loosen) => mlsSearch(env, {
+    statuses: mlsStatuses(env, 'closed'), propertyTypes: leaseTypes, propertyTypesExplicit: true,
+    lat, lon, radiusMi, zip, sinceDays: 366, limit: 40, orderby: 'closeDateDesc',
+    ...bands(loosen)
+  });
   const [closed, active] = await Promise.all([
-    mlsSearch(env, { statuses: mlsStatuses(env, 'closed'), propertyTypes: leaseTypes, propertyTypesExplicit: true, lat, lon, radiusMi, zip, sinceDays: 366, limit: 40, orderby: 'closeDateDesc' })
+    closedSearch(1)
       .catch(e => { errors.push('closed leases: ' + e.message); return []; }),
-    mlsSearch(env, { statuses: mlsStatuses(env, 'active'), propertyTypes: leaseTypes, propertyTypesExplicit: true, lat, lon, radiusMi, zip, limit: 25 })
-      .catch(e => { errors.push('active rentals: ' + e.message); return []; })
+    mlsSearch(env, {
+      statuses: mlsStatuses(env, 'active'), propertyTypes: leaseTypes, propertyTypesExplicit: true,
+      lat, lon, radiusMi, zip, limit: 25, ...bands(1)
+    }).catch(e => { errors.push('active rentals: ' + e.message); return []; })
   ]);
+  // A banded query must never leave the ladder THINNER than the unbanded one
+  // did. If the tight box can't fill the minimum the engine needs, loosen it
+  // and keep whichever pass returned more — a comparable-but-wider read beats
+  // a precise read of two houses.
+  const LEASES_ENOUGH = 3;
+  if (banded && closed.length < LEASES_ENOUGH) {
+    const wider = await closedSearch(2).catch(() => null);
+    if (wider && wider.length > closed.length) {
+      closed.length = 0;
+      for (const r of wider) closed.push(r);
+      errors.push('lease size/bed bands widened — the tight band held fewer than '
+        + LEASES_ENOUGH + ' closed leases');
+    }
+  }
   const rows = [].concat(
     closed.map(r => mapRow(r, 'closed')),
     active.map(r => mapRow(r, 'active'))
@@ -3601,7 +3661,7 @@ export default {
 export {
   MLS_DEFAULT_FIELDS, MLS_STATUS,
   mlsFields, mlsTransport, mlsConfigured, mlsSystemName, mlsStatuses, mlsPrettyStatus,
-  mlsConcessionsReported, mlsDom,
+  mlsConcessionsReported, mlsDom, mlsLeaseSubTypes,
   mlsBbox, mlsCoord, mlsFlat, mlsBool, mlsBaths, mlsStories, mlsLotSqft, mlsTypesExplicit,
   mlsMonthlyHoa, mlsPool, mlsFormattedAddress, mlsStreetAddress,
   mlsToRecord, mlsToCandidate,

@@ -83,6 +83,20 @@
         const vacancyRatio = num(inputs.vacancyPercent) / 100;
         const opExRatio = num(inputs.operatingExpensesPercent) / 100;
         const monthlyTaxesIns = num(inputs.monthlyTaxesIns);
+        // Insurance is broken out so a DSCR lender's PITIA can be assembled
+        // honestly; when it's absent the taxes+insurance field still carries
+        // the whole burden exactly as it always has.
+        const monthlyInsurance = num(inputs.monthlyInsurance);
+        // The exit stack is the investor's, not a national average — a
+        // licensed agent self-listing runs several points under the 8%
+        // default. Blank restores the old constant bit-for-bit.
+        const sellingCostRatio = has(inputs.sellingCostPercent)
+            ? num(inputs.sellingCostPercent) / 100
+            : DEFAULTS.flipSellingCostRate;
+        // What ownership costs every month regardless of debt. Insurance
+        // defaults to 0, so a caller that still folds it into monthlyTaxesIns
+        // gets the identical total it always did.
+        const monthlyOwnershipCost = monthlyTaxesIns + monthlyInsurance;
 
         const holdingPeriod = baseHold + rehabBuffer;
         const arv = rawArv * (1 + variancePercent / 100);
@@ -91,9 +105,21 @@
 
         // 1. Loan sizing & upfront financing costs
         let loanAmount = 0;
+        // Which constraint actually sized the loan. When the ARV ceiling wins,
+        // the loan silently shrinks and the shortfall lands on the investor's
+        // cash — the most common reason a fix&flip loan funds under plan.
+        let bindingConstraint = null;
+        let capShortfall = 0;
+        const arvCapRatio = has(inputs.arvCapPercent)
+            ? num(inputs.arvCapPercent) / 100
+            : DEFAULTS.hardMoneyArvCapRatio;
         if (isHardMoney) {
             // Sized on Loan-to-Cost (purchase + rehab), capped at a % of ARV
-            loanAmount = Math.min((purchasePrice + rehabBudget) * ltvRatio, arv * DEFAULTS.hardMoneyArvCapRatio);
+            const byCost = (purchasePrice + rehabBudget) * ltvRatio;
+            const byArv = arv * arvCapRatio;
+            loanAmount = Math.min(byCost, byArv);
+            bindingConstraint = byArv < byCost ? 'ltarv' : 'ltc';
+            capShortfall = Math.max(0, byCost - byArv);
         } else if (financingType === 'dscr_purchase') {
             loanAmount = purchasePrice * ltvRatio;
         } else if (financingType === 'dscr_refi') {
@@ -104,7 +130,15 @@
         const financeFees = isFinanced ? lenderFees + pointsCost : 0;
 
         // 2. Monthly carrying costs during the hold
-        const baselineMonthlyCarry = strategy === 'flip' ? DEFAULTS.flipBaselineMonthlyCarry : monthlyTaxesIns;
+        // A flip carries taxes and insurance exactly like a rental does, and
+        // projectPropertyTax() already derives the reassessed FLIP-basis bill.
+        // Honour that figure whenever it's supplied; the flat baseline is only
+        // the fallback for a blank field, so a deal that provides nothing is
+        // still costed exactly as it was before.
+        const baselineMonthlyCarry = strategy === 'flip'
+            ? (has(inputs.monthlyTaxesIns) || has(inputs.monthlyInsurance)
+                ? monthlyOwnershipCost : DEFAULTS.flipBaselineMonthlyCarry)
+            : monthlyOwnershipCost;
         // Hard-money rehab funds are a HOLDBACK drawn as work completes
         const rehabHoldback = isHardMoney ? Math.min(rehabBudget, loanAmount) : 0;
         const interestOnDraws = inputs.interestOnDraws === true || inputs.interestOnDraws === 'yes' || inputs.interestOnDraws === 'draws';
@@ -130,7 +164,7 @@
         let sellingRefiCosts = 0;
 
         if (strategy === 'flip') {
-            sellingRefiCosts = arv * DEFAULTS.flipSellingCostRate;
+            sellingRefiCosts = arv * sellingCostRatio;
             cashInvested = Math.max(0, totalProjectCosts - loanAmount);
         } else if (financingType === 'dscr_refi') {
             const refiClosingCosts = loanAmount * DEFAULTS.refiClosingCostRate;
@@ -148,7 +182,9 @@
             loanAmount, pointsCost, financeFees,
             monthlyFinancingCost, monthlyHoldingCost, totalHoldingCarryingCosts,
             totalProjectCosts, cashInvested, sellingRefiCosts,
-            purchasePrice, rehabBudget, buyingCosts
+            purchasePrice, rehabBudget, buyingCosts,
+            baselineMonthlyCarry, sellingCostRatio,
+            bindingConstraint, capShortfall, arvCapRatio
         };
 
         // 4. Strategy-specific return metrics
@@ -166,7 +202,7 @@
         } else {
             const vacancyLoss = monthlyRent * vacancyRatio;
             const maintenanceMgmt = monthlyRent * opExRatio;
-            const netOperatingIncome = monthlyRent - vacancyLoss - maintenanceMgmt - monthlyTaxesIns;
+            const netOperatingIncome = monthlyRent - vacancyLoss - maintenanceMgmt - monthlyOwnershipCost;
 
             let monthlyDebtService = 0;
             if (financingType === 'dscr_purchase') {
@@ -180,13 +216,28 @@
             result.vacancyLoss = vacancyLoss;
             result.maintenanceMgmt = maintenanceMgmt;
             result.monthlyTaxesIns = monthlyTaxesIns;
+            result.monthlyInsurance = monthlyInsurance;
+            result.monthlyOwnershipCost = monthlyOwnershipCost;
             result.netOperatingIncome = netOperatingIncome;
             result.monthlyDebtService = monthlyDebtService;
             result.monthlyCashFlow = monthlyCashFlow;
             result.cocReturn = cashInvested > 0
                 ? (monthlyCashFlow * 12 / cashInvested) * 100
                 : (monthlyCashFlow > 0 ? Infinity : 0);
+            // Two different ratios that both get called "DSCR", kept separate
+            // because they land on opposite sides of a 1.25 cutoff.
+            // dscrRatio is the ANALYST's coverage — NOI (net of vacancy and
+            // opex) over debt service, the commercial 5+ unit convention.
             result.dscrRatio = monthlyDebtService > 0 ? netOperatingIncome / monthlyDebtService : Infinity;
+            // lenderDscr is what a 1–4 unit DSCR lender actually underwrites:
+            // gross scheduled rent over PITIA. No vacancy, no opex, no
+            // management — those are the investor's problem, not the note's.
+            // PITIA is only meaningful once there IS a P&I payment.
+            const pitia = monthlyDebtService + monthlyOwnershipCost;
+            result.pitia = pitia;
+            result.lenderDscr = monthlyDebtService > 0
+                ? (pitia > 0 ? monthlyRent / pitia : Infinity)
+                : null;
         }
 
         return result;
@@ -1064,6 +1115,84 @@
      * underwriter's loss is asymmetric, because over-valuing buys a bad deal
      * while under-valuing only passes on a good one.
      */
+    // ---- Neighbourhood effective tax rate ----
+    // projectPropertyTax() already derives the SUBJECT's rate from its own
+    // bill, so the carry is right either way. What this adds is the peer
+    // comparison that explains a 3.1% rate: in DFW a MUD or PID district
+    // routinely adds a point or more, and it is invisible on the tax roll of
+    // a comp that sits in another district. Without it, a high rate reads as
+    // an assessment error worth protesting when it is simply the address.
+    // Refuses under 3 usable comps rather than calling two houses a market.
+    function neighborhoodTaxRate(comps) {
+        if (!Array.isArray(comps)) return null;
+        const rates = comps
+            .filter(c => c && num(c.taxAnnual) > 0 && num(c.price || c.salePrice) > 0
+                // Only a verified close price makes the ratio meaningful; a
+                // list-price proxy would put a guess in the denominator.
+                && (c.priceType === undefined || c.priceType === 'closed'))
+            .map(c => num(c.taxAnnual) / num(c.price || c.salePrice) * 100)
+            // A bill that implies under 0.5% or over 5% is a data error
+            // (partial-year, exempt, or a mismatched row), not a district.
+            .filter(r => r >= 0.5 && r <= 5)
+            .sort((a, b) => a - b);
+        if (rates.length < 3) return null;
+        const mid = Math.floor(rates.length / 2);
+        const median = rates.length % 2
+            ? rates[mid]
+            : (rates[mid - 1] + rates[mid]) / 2;
+        return { medianRatePct: median, n: rates.length, low: rates[0], high: rates[rates.length - 1] };
+    }
+
+    // ---- Bracketing audit ----
+    // valuationInterval() measures how much the comps disagree with EACH
+    // OTHER, and scoreComp() rates each comp on its own. Neither asks the
+    // question an appraiser asks first: does the set SURROUND the subject?
+    // Four comps that agree closely and are all smaller than the subject
+    // produce a narrow band around an EXTRAPOLATED number — a confident
+    // answer to the wrong question, and the one failure mode the stated
+    // interval structurally cannot see.
+    function bracketingDefects(subject, comps) {
+        const out = [];
+        if (!subject || !Array.isArray(comps)) return out;
+        const priced = comps.filter(c => c && num(c.salePrice) > 0);
+        if (priced.length < 2) return out;
+        const fmtInt = (v) => Math.round(v).toLocaleString('en-US');
+        const DIMS = [
+            { key: 'sqft', label: 'living area', fmt: (v) => fmtInt(v) + ' sqft' },
+            { key: 'yearBuilt', label: 'year built', fmt: (v) => String(Math.round(v)) },
+            { key: 'lotSqft', label: 'lot size', fmt: (v) => fmtInt(v) + ' sqft' },
+            { key: 'beds', label: 'bedroom count', fmt: (v) => String(num(v)) }
+        ];
+        DIMS.forEach(d => {
+            if (!has(subject[d.key])) return;
+            const s = num(subject[d.key]);
+            const vals = priced.filter(c => has(c[d.key])).map(c => num(c[d.key]));
+            if (vals.length < 2) return;
+            const above = vals.filter(v => v > s).length;
+            const below = vals.filter(v => v < s).length;
+            if (above > 0 && below > 0) return;
+            // An EXACT match brackets the feature on its own — that is the
+            // ideal comp, not a gap. Only a set that sits entirely to one
+            // side, with nothing landing on the subject, is extrapolating.
+            if (vals.some(v => v === s)) return;
+            const side = above === 0 ? 'smaller than' : 'larger than';
+            const yearSide = above === 0 ? 'older than' : 'newer than';
+            const nearest = above === 0 ? Math.max(...vals) : Math.min(...vals);
+            out.push({
+                dimension: d.key,
+                side: above === 0 ? 'below' : 'above',
+                subject: s,
+                nearest,
+                message: 'Every comp is ' + (d.key === 'yearBuilt' ? yearSide : side)
+                    + ' the subject on ' + d.label
+                    + ' (subject ' + d.fmt(s) + ', closest comp ' + d.fmt(nearest) + ').'
+                    + ' The value is extrapolated on this line rather than bracketed,'
+                    + ' and the stated range does not widen to account for it.'
+            });
+        });
+        return out;
+    }
+
     function backtestMetrics(pairs) {
         const rows = (pairs || []).filter(p =>
             p && num(p.estimate) > 0 && num(p.actual) > 0);
@@ -1332,6 +1461,66 @@
         };
     }
 
+    // ---- Break-even solver ----
+    // The number the investor negotiates against, and the first one a partner
+    // or lender asks for. Selling costs scale WITH the sale price, so the flip
+    // answer is never "total costs" — it is costs grossed up by the exit
+    // stack. On a hard-money deal the loan is itself a function of ARV, so
+    // this re-runs the whole model by bisection rather than solving a closed
+    // form that would quietly ignore that coupling.
+    // Returns nulls, never guesses, when a leg does not apply.
+    function breakEven(inputs) {
+        const strategy = inputs.strategy === 'rental' ? 'rental' : 'flip';
+        const out = {
+            strategy, salePrice: null, salePriceVsArv: null,
+            monthlyRent: null, rentAtDscrFloor: null, dscrFloor: null
+        };
+        // Finds the LOWEST value in [lo, hi] that satisfies probe(), assuming
+        // probe is monotonic — false below the threshold, true above it.
+        const lowestPassing = (probe, lo, hi) => {
+            if (probe(lo)) return lo;
+            if (!probe(hi)) return null;
+            for (let i = 0; i < 60; i++) {
+                const mid = (lo + hi) / 2;
+                if (probe(mid)) hi = mid; else lo = mid;
+            }
+            return hi;
+        };
+        if (strategy === 'flip') {
+            const rawArv = num(inputs.arv);
+            const ceiling = (rawArv + num(inputs.rehabBudget) + num(inputs.purchasePrice)) * 4 + 500000;
+            // Solve on the RAW sale price: the variance slider is a stress
+            // test on top of a price, not part of the price being solved for.
+            const v = lowestPassing(
+                (price) => underwrite({ ...inputs, arv: price, variancePercent: 0 }).netProfit >= 0,
+                0, ceiling);
+            if (v !== null) {
+                out.salePrice = Math.ceil(v / 100) * 100;
+                if (rawArv > 0) out.salePriceVsArv = (out.salePrice - rawArv) / rawArv * 100;
+            }
+        } else {
+            const ceiling = Math.max(num(inputs.monthlyRent) * 5, 25000);
+            const cf = lowestPassing(
+                (rent) => underwrite({ ...inputs, monthlyRent: rent }).monthlyCashFlow >= 0,
+                0, ceiling);
+            if (cf !== null) out.monthlyRent = Math.ceil(cf);
+            // Only meaningful where a lender ratio exists at all — an all-cash
+            // hold has no note to cover.
+            const floor = has(inputs.minDscr) ? num(inputs.minDscr) : 1.25;
+            const probeDscr = underwrite({ ...inputs, monthlyRent: ceiling });
+            if (probeDscr.lenderDscr !== null && probeDscr.lenderDscr !== undefined) {
+                out.dscrFloor = floor;
+                const r = lowestPassing(
+                    (rent) => {
+                        const d = underwrite({ ...inputs, monthlyRent: rent }).lenderDscr;
+                        return d !== null && d !== undefined && d >= floor;
+                    }, 0, ceiling);
+                if (r !== null) out.rentAtDscrFloor = Math.ceil(r);
+            }
+        }
+        return out;
+    }
+
     // The classic quick screen (MAO = ARV × rule% − rehab) and the flex the
     // pros apply to the rule: hot absorption supports a richer percentage,
     // a cold market demands a thinner one.
@@ -1416,5 +1605,6 @@
     return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory,
         deriveMarketRates, pricePerSqftOutliers, reconcileCondition,
         backtestMetrics, pairedComparison, scoreComp,
-        deriveTimeAdjustment, compMonthsAgo, priceAgreedAt, valuationInterval };
+        deriveTimeAdjustment, compMonthsAgo, priceAgreedAt, valuationInterval,
+        breakEven, bracketingDefects, neighborhoodTaxRate };
 }));

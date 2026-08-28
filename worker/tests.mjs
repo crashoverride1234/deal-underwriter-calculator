@@ -1116,6 +1116,41 @@ test('lookup: the postcode is the LAST five-digit run, not the house number', ()
         'documented limit: a bare five-digit house number still reads as one');
 });
 
+// ---- Lease sub-types and days-on-market ----
+
+test('lease sub-types are their own setting, and unset means do not filter', () => {
+    // MLS_SUBTYPES must NOT leak into the lease query: on a coded feed an
+    // unknown lookup returns an empty set rather than an error, which would
+    // read as "no rentals nearby" and silently fall through to a billed AVM.
+    eq(W.mlsLeaseSubTypes({ MLS_SUBTYPES: 'RES,SFR' }).length, 0,
+        'the sale sub-types never stand in for the lease ones');
+    eq(W.mlsLeaseSubTypes({}).length, 0, 'unset means no filter');
+    eq(W.mlsLeaseSubTypes({ MLS_LEASE_SUBTYPES: '' }).length, 0, 'blank means no filter');
+    const s = W.mlsLeaseSubTypes({ MLS_LEASE_SUBTYPES: ' RESL , CONL ' });
+    eq(s.length, 2, 'configured values are parsed');
+    eq(s[0], 'RESL', 'and trimmed');
+});
+
+test('days on market measures list-to-CONTRACT, not list-to-close', () => {
+    const f = W.MLS_DEFAULT_FIELDS;
+    // A published figure always wins
+    eq(W.mlsDom({ [f.dom]: '21', [f.listDate]: '2026-01-01', [f.closeDate]: '2026-03-01' }, f), 21,
+        'the feed\'s own DaysOnMarket is authoritative');
+    // Falling back to the close date overstates DOM by the whole financing
+    // period — a measured ~30-day lag on this feed.
+    const row = {
+        [f.listDate]: '2026-01-01',
+        [f.purchaseContractDate]: '2026-01-21',
+        [f.closeDate]: '2026-02-20'
+    };
+    eq(W.mlsDom(row, f), 20, 'contract date is what "on the market" ends at');
+    // Without a contract date it still degrades to the close date rather than
+    // returning nothing — a long answer beats no answer.
+    eq(W.mlsDom({ [f.listDate]: '2026-01-01', [f.closeDate]: '2026-02-20' }, f), 50,
+        'close date remains the fallback');
+    eq(W.mlsDom({ [f.listDate]: '2026-01-01' }, f), null, 'no end date, no claim');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);
