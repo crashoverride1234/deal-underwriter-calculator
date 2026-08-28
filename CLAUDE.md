@@ -82,7 +82,7 @@ GitHub Pages from `main`.
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
 - **Test**: `node tests.js` (127 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (93 MLS-transport tests). Both must pass before deploy.
+  (104 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -117,9 +117,10 @@ exist**, so an unconfigured worker behaves exactly as it did before.
 - **Field names default to RESO Data Dictionary 2.0**; `MLS_FIELD_MAP` (JSON)
   overrides any single entry. `/mls/probe` reports the server's actual field
   list so the map is written from evidence, not guesswork.
-- **Routes**: `/lookup` gains an MLS rung that OVERLAYS every rung below it
-  (a listing knows the house; it rarely knows the tax roll or owner) while
-  obeying the same "no tax bill ⇒ don't end the ladder" invariant TAD obeys.
+- **Routes**: `/lookup` LEADS with the MLS rung — see "The subject ladder"
+  under Conventions. A listing knows the house; it rarely knows the tax roll
+  or the owner, so it folds with TAD rather than replacing it the way
+  `/comps` drops its proxies.
   `/comps` returns MLS closed sales and drops the proxies entirely once 3+
   are found — a verified close price and a list-at-sale guess are different
   KINDS of number and must not be ranked in one list. `/market` gets true
@@ -176,9 +177,11 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   request. The nonce is base64 of a server timestamp and ages out;
   `stale=true` means re-digest with the new nonce, NOT re-login (re-login
   on a one-session server can collide with the session already held). The
-  residential class is **`Listing`**, not `RES` — NTREIS's own published
-  example is `CLASS=Listing&searchtype=Property`; resources map
-  Property→Listing/Cross Property, Media→Media, Agent→Agent, Office→Office,
+  residential class probes as **`Property`** (`MLS_RETS_CLASS = "Property"`
+  in wrangler.toml) — the Property resource publishes exactly ONE class. The
+  2015 guide's `CLASS=Listing` and the older `RES` are both wrong for this
+  account; `/mls/probe` lists the real classes, so check it before trusting
+  any of them. Other resources map Media→Media, Agent→Agent, Office→Office,
   OpenHouse→Open House. Matrix accepts RETS/1.5, 1.7.2 and 1.8 and echoes
   the version back, defaulting to 1.7.2 on anything unrecognized. Offset is
   1-based; `<MAXROWS/>` marks a capped result set. Without an explicit
@@ -386,6 +389,42 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   Verified live: 5/5 Dallas addresses return their own record, exact sqft and
   year. `dmqlToken()` strips DMQL2 punctuation from any interpolated value —
   a stray comma or pipe silently rewrites the query rather than erroring.
+- **The subject ladder LEADS with the feed, and exhausts every free rung
+  before a billable one.** `/lookup` is a FOLD over an authority-ordered
+  stack, not a chain of early returns: MLS (address-confirmed) → RentCast →
+  Melissa → TAD → realtor.com → MLS (proximity-only). `mergeRecords()` never
+  overwrites, so the ORDER of that array is the whole specification.
+  Three things it fixes, all measured live 2026-08-28 before the change:
+  (1) TAD + realtor returned FIRST in Tarrant and the MLS rung never ran at
+  all — 3425 Cloer Drive came back 2042 sqft / built 2024 against the feed's
+  1306 / 1948, and the roll's own `DEED_DATE` showed TAD had not seen the
+  2026 sale, so the feed was right and the county was stale.
+  (2) The stop gate was `if (merged.annualTaxes) return`, written twice —
+  HALF the test, because `projectPropertyTax()` and `protestOpportunity()`
+  both compute annual ÷ assessed and bail unless BOTH are > 0. NTREIS
+  publishes no assessed-value field at all (443 fields probed; only
+  `UnexemptTaxes`, `TaxBlock`, `TaxLot`, `TaxLegalDescription`,
+  `SpecialTaxingEntities`, `RoadAssessmentYN`), so every non-Tarrant MLS hit
+  ended the ladder with both tax features dark. The gate is now
+  `recordIsComplete()` over `LADDER_COMPLETE_FIELDS = ['assessedValue',
+  'annualTaxes']`.
+  (3) The keyless realtor.com rung ran AFTER billable RentCast, even though
+  it carries assessed value and the tax bill TOGETHER when it answers
+  (measured 3/3 Dallas). That ordering — not the MLS gate — was the real
+  credit leak. Measured after: 9/9 addresses MLS-led with sqft matching the
+  feed exactly, `assessedValue` missing on 0 (was 5), `lastSalePrice` missing
+  on 0 (was 3), RentCast reached only on the 2 addresses realtor.com has no
+  record for at all.
+  Unlike `/comps`, which DROPS its proxies wholesale once the feed delivers,
+  `/lookup` folds: `mlsToRecord()` hard-nulls `assessedValue`, `ownerNames`,
+  `ownerMailing`, `legal` and `apn`, so the feed and the county roll are
+  complements. "Enough" is therefore a MATCH STANDARD, not a row count —
+  `mlsAnsweredSubject()` requires `matchedBy === 'address'`
+  (`streetMatchStrict`) plus the `hasData()` bar; a `'proximity'` row is
+  demoted to LAST in the stack, where it fills blanks but can never overwrite
+  the roll with a neighbour's square footage. An unconfigured worker folds to
+  a byte-identical result (tested), which keeps the "inert until the secrets
+  exist" invariant.
 - **The time adjustment is DERIVED and anchored on the CONTRACT date.** The
   `/trend` route does a WIDE pull — same geography, deliberately NO size or
   bedroom bands, 18 months — because a banded sample confounds price movement
@@ -452,9 +491,13 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   persist (`underwriter-appraisal-v1` is settings-only now) plus API keys.
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
-  `underwriter-property-cache-v4` (v4: entries carry `_cachedAt`; MLS-sourced
-  records expire after 12 h for licence retention, everything else never
-  does). There is deliberately NO localStorage key for MLS credentials.
+  `underwriter-property-cache-v5` (v4 added `_cachedAt`; v5 evicted records
+  poisoned by the wrong-subject bug). MLS-sourced records expire after 12 h
+  for licence retention, everything else never does; `recordIsMlsSourced()`
+  reads `extra.mlsNumber` OR `extra.mls.matchedBy`, so the clock does not hang
+  on a single field-map entry, and `sweepExpiredMlsRecords()` runs at load so
+  an address never looked up again still ages out. There is deliberately NO
+  localStorage key for MLS credentials.
 - Never commit `worker/.wrangler/` (gitignored) or any secrets; the repo is
   public. The deployed Worker URL is deliberately baked into `app.js` as
   `DEFAULT_WORKER_URL` (zero-setup auto-fill was chosen over URL secrecy;

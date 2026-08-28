@@ -947,6 +947,175 @@ test('address: the postcode regex actually matches five digits', () => {
     eq((/(d{5})/.exec('900 W Rosedale St, Fort Worth, TX 76104') || [, ''])[1], '', 'the old form');
 });
 
+// ---- The /lookup ladder: MLS leads the subject, free rungs beat billable ----
+// The old ladder gated on `if (merged.annualTaxes) return`, written twice, and
+// ran TAD + realtor.com BEFORE the feed. Measured live 2026-08-28: every
+// Tarrant address returned TAD+realtor and the MLS rung never ran at all
+// (3425 Cloer Drive came back 2042 sqft / year 2024 against the feed's
+// 1306 sqft / 1948), while non-Tarrant hits ended the ladder on a record whose
+// assessedValue was null - so both tax features stayed dark AND the free rung
+// carrying the missing half was skipped in favour of a billable one.
+
+// A NTREIS row as the feed actually serves it: a tax bill, and NO assessed
+// value, because the schema has no such field (443 fields probed 2026-08-28;
+// the only tax columns are UnexemptTaxes, TaxBlock, TaxLot,
+// TaxLegalDescription, SpecialTaxingEntities, RoadAssessmentYN).
+const ENV_NTREIS = {
+    MLS_RETS_LOGIN_URL: 'https://x/rets/Login.ashx',
+    MLS_RETS_USERNAME: 'u', MLS_RETS_PASSWORD: 'p',
+    MLS_SYSTEM_NAME: 'NTREIS',
+    MLS_ATTRIBUTION: 'Data provided by NTREIS.',
+    MLS_FIELD_MAP: JSON.stringify({
+        mlsNumber: 'ListingId', sqft: 'LivingArea', beds: 'BedroomsTotal',
+        bathsFull: 'BathroomsFull', year: 'YearBuilt', closePrice: 'ClosePrice',
+        closeDate: 'CloseDate', taxAnnual: 'UnexemptTaxes'
+    })
+};
+const NTREIS_ROW = {
+    ListingId: '20780001', LivingArea: 1306, BedroomsTotal: 3, BathroomsFull: 2,
+    YearBuilt: 1948, ClosePrice: 480000, CloseDate: '2026-04-30',
+    UnexemptTaxes: 5914
+};
+
+test('lookup: recordIsComplete needs BOTH halves of the tax pair', () => {
+    // engine projectPropertyTax() and protestOpportunity() each compute
+    // annual/assessed and bail unless both are > 0. Testing one is testing half.
+    assert(W.recordIsComplete({ assessedValue: 384382, annualTaxes: 5914 }), 'both present');
+    eq(W.recordIsComplete({ assessedValue: 384382, annualTaxes: null }), false, 'no bill');
+    eq(W.recordIsComplete({ assessedValue: null, annualTaxes: 5914 }), false, 'no roll value');
+    eq(W.recordIsComplete({ assessedValue: 0, annualTaxes: 5914 }), false, 'zero is not a value');
+    eq(W.recordIsComplete({ assessedValue: -1, annualTaxes: 5914 }), false, 'negative');
+    eq(W.recordIsComplete({ assessedValue: 'abc', annualTaxes: 5914 }), false, 'garbage');
+    assert(W.recordIsComplete({ assessedValue: '498000', annualTaxes: '5914' }), 'numeric strings coerce');
+    eq(W.recordIsComplete(null), false, 'null record');
+    eq(W.recordIsComplete({}), false, 'empty record');
+});
+
+test('lookup: a NTREIS record can NEVER end the ladder on its own', () => {
+    // THE regression test. NTREIS publishes a tax bill but no assessed value,
+    // so the old annualTaxes-only gate stopped here and left both tax features
+    // dark while skipping the free rung that carries the other half.
+    const rec = W.mlsToRecord(NTREIS_ROW, ENV_NTREIS);
+    assert(rec.annualTaxes > 0, 'the bill IS published: ' + rec.annualTaxes);
+    eq(rec.assessedValue, null, 'the roll value is not, and never will be');
+    eq(W.recordIsComplete(rec), false, 'so the ladder must continue');
+});
+
+test('lookup: only an address-confirmed row may LEAD the record', () => {
+    const rec = W.mlsToRecord(NTREIS_ROW, ENV_NTREIS);
+    assert(W.mlsAnsweredSubject({ record: rec, matchedBy: 'address' }), 'confirmed subject leads');
+    eq(W.mlsAnsweredSubject({ record: rec, matchedBy: 'proximity' }), false,
+        'a row that merely stood within 250 ft does not');
+    eq(W.mlsAnsweredSubject(null), false, 'a miss');
+    eq(W.mlsAnsweredSubject({ record: { sqft: null, beds: null }, matchedBy: 'address' }), false,
+        'confirmed but empty still fails the hasData bar');
+});
+
+test('lookup: a sparse MLS row cannot lead even when the address matches', () => {
+    const sparse = W.mlsToRecord({ ClosePrice: 572500 }, ENV_NTREIS);
+    eq(sparse.sqft, null); eq(sparse.beds, null);
+    eq(W.hasData(sparse), false, 'nothing to describe the house');
+    eq(W.mlsAnsweredSubject({ record: sparse, matchedBy: 'address' }), false);
+});
+
+// Records shaped the way each rung emits them.
+const MLS_LEAD = {
+    sqft: 1306, beds: 3, year: 1948, stories: 1, hoaFee: 45,
+    assessedValue: null, annualTaxes: 5914, ownerNames: null, legal: null, apn: null,
+    lastSalePrice: 480000, source: 'NTREIS', extra: { mlsNumber: '20780001' }
+};
+const TAD_REC = {
+    sqft: 2042, beds: 3, year: 2024, stories: null, hoaFee: null,
+    assessedValue: 384382, annualTaxes: null, ownerNames: 'DOE JOHN', legal: 'LOT 7 BLK 2',
+    apn: '03569403', lastSalePrice: null, source: 'TAD (Tarrant)', extra: { exemptions: 'HS' }
+};
+const REALTOR_REC = {
+    sqft: 1894, beds: 3, year: 1946, assessedValue: 300000, annualTaxes: 7000,
+    ownerNames: null, source: 'realtor.com', extra: {}
+};
+const RENTCAST_REC = {
+    sqft: 1310, beds: 3, year: 1948, assessedValue: 351000, annualTaxes: 6100,
+    ownerNames: 'DOE J', source: 'RentCast', extra: {}
+};
+
+test('lookup: MLS leads, TAD fills the roll and the owner', () => {
+    const out = W.foldRecords([MLS_LEAD, null, null, TAD_REC, REALTOR_REC, null]);
+    eq(out.sqft, 1306, 'the feed measured the house');
+    eq(out.year, 1948, 'and dated it');
+    eq(out.lastSalePrice, 480000, 'only the feed knows what it sold for');
+    eq(out.stories, 1, 'MLS-only field survives');
+    eq(out.assessedValue, 384382, 'TAD supplies what the feed hard-nulls');
+    eq(out.ownerNames, 'DOE JOHN');
+    eq(out.legal, 'LOT 7 BLK 2');
+    eq(out.apn, '03569403');
+    eq(out.annualTaxes, 5914, 'the feed had the bill first');
+    eq(out.extra.mlsNumber, '20780001', 'retention flag rides through the fold');
+    eq(out.extra.exemptions, 'HS', 'and the filler extras union in');
+    assert(out.source.startsWith('NTREIS'), 'source names the leader first: ' + out.source);
+});
+
+test('lookup: a proximity-only row fills blanks but never overwrites the roll', () => {
+    // Same two records, demoted match standard: TAD's measurements win, while
+    // the MLS row still contributes what nothing else carries.
+    const out = W.foldRecords([null, null, null, TAD_REC, REALTOR_REC, MLS_LEAD]);
+    eq(out.sqft, 2042, 'the county roll is not overwritten by a neighbour');
+    eq(out.year, 2024);
+    eq(out.stories, 1, 'but MLS-only fields still fill');
+    eq(out.hoaFee, 45);
+    eq(out.lastSalePrice, 480000);
+    eq(out.extra.mlsNumber, '20780001', 'the retention clock still applies');
+    assert(out.source.startsWith('TAD'), 'source: ' + out.source);
+});
+
+test('lookup: TAD outranks realtor.com everywhere', () => {
+    // Previously TAD was primary on one exit and filler on the other, so the
+    // same two records produced different answers depending on which fired.
+    const out = W.foldRecords([null, null, null, TAD_REC, REALTOR_REC, null]);
+    eq(out.sqft, 2042, 'county roll beats a portal scrape');
+    eq(out.assessedValue, 384382);
+});
+
+test('lookup: RentCast outranks TAD, keeping the tax ratio single-vintage', () => {
+    // The effective rate is annual/assessed; taking each half from a different
+    // vintage would produce a rate neither source ever published.
+    const out = W.foldRecords([null, RENTCAST_REC, null, TAD_REC, null, null]);
+    eq(out.assessedValue, 351000, 'both halves from RentCast');
+    eq(out.annualTaxes, 6100);
+    eq(out.ownerNames, 'DOE J');
+});
+
+test('lookup: with no feed configured the fold matches the old ladder exactly', () => {
+    // The standing invariant: an unconfigured worker must behave exactly as it
+    // did before the MLS rung existed.
+    const folded = W.foldRecords([null, RENTCAST_REC, null, TAD_REC, REALTOR_REC, null]);
+    const legacy = W.mergeRecords(W.mergeRecords(RENTCAST_REC, TAD_REC), REALTOR_REC);
+    eq(JSON.stringify(folded), JSON.stringify(legacy), 'same record, same source string');
+    // And a lone answerer is returned by identity, so its source stays bare.
+    const alone = W.foldRecords([null, null, null, TAD_REC, null, null]);
+    assert(alone === TAD_REC, 'identity, not a needless merge');
+    eq(alone.source, 'TAD (Tarrant)', 'un-concatenated');
+});
+
+test('lookup: an empty stack yields null rather than throwing', () => {
+    eq(W.foldRecords([]), null, 'a bare reduce would throw here');
+    eq(W.foldRecords([null, null, null]), null);
+});
+
+test('lookup: the postcode is the LAST five-digit run, not the house number', () => {
+    // A five-digit house number used to be read as the postcode, which sent
+    // (PostalCode=10120) to the feed: zero rows, no error, and indistinguishable
+    // from a genuinely quiet market.
+    eq(W.postcodeFromAddress('10120 Rolling Hills Dr, Fort Worth, TX 76126'), '76126');
+    eq(W.postcodeFromAddress('3425 Cloer Drive, Fort Worth, TX 76109'), '76109');
+    eq(W.postcodeFromAddress('900 W Rosedale St, Fort Worth, TX 76104-1234'), '76104',
+        'ZIP+4 keeps the five-digit half');
+    eq(W.postcodeFromAddress('3425 Cloer Drive'), '', 'a bare street line has no postcode');
+    eq(W.postcodeFromAddress(''), '');
+    eq(W.postcodeFromAddress(null), '');
+    eq(W.postcodeFromAddress('10120 Rolling Hills Dr'), '10120',
+        'documented limit: a bare five-digit house number still reads as one');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

@@ -970,6 +970,7 @@ const qualSettingsContainer = document.getElementById('qual-settings');
 
 const lookupBtn = document.getElementById('lookup-address-btn');
 const lookupStatus = document.getElementById('lookup-status');
+const subjectAttributionBox = document.getElementById('subject-attribution');
 const rentcastKeyInput = document.getElementById('rentcast-api-key');
 const melissaKeyInput = document.getElementById('melissa-api-key');
 const workerUrlInput = document.getElementById('worker-url');
@@ -2077,16 +2078,20 @@ function renderCandidates(list) {
         });
         compCandidatesPanel.appendChild(row);
     });
-    appendMlsAttribution(compCandidatesPanel);
+    appendMlsAttribution(compCandidatesPanel,
+        (compsMeta.mls && compsMeta.mls.used) ? compsMeta.mls.attribution : null);
 }
 
 // Every MLS data licence requires the compilation to be attributed wherever
 // its data is shown. The worker passes the exact wording through from the
 // MLS_ATTRIBUTION secret so the licence text is whatever the DLA demands,
 // not something this app invented.
-function appendMlsAttribution(container) {
-    const text = compsMeta.mls && compsMeta.mls.attribution;
-    if (!text || !compsMeta.mls.used) return;
+function appendMlsAttribution(container, text) {
+    if (!container) return;
+    // Re-rendering must not stack duplicates - the subject panel is refreshed
+    // on every lookup, unlike the comps panel which is rebuilt wholesale.
+    container.querySelectorAll(':scope > .mls-attribution').forEach(n => n.remove());
+    if (!text) return;
     const note = document.createElement('div');
     note.className = 'mls-attribution';
     note.textContent = text;
@@ -3335,8 +3340,36 @@ function cacheKeyFor(address) {
 // A record carries MLS-licensed content when the feed answered for it. That
 // is the only case with a retention clock, so it is the only case that expires.
 function recordIsMlsSourced(rec) {
-    return Boolean(rec && rec.extra && rec.extra.mlsNumber);
+    if (!rec || !rec.extra) return false;
+    // extra.mlsNumber resolves through MLS_FIELD_MAP (bound to ListingId
+    // today). extra.mls.matchedBy is stamped by the worker whenever the feed
+    // produced a row at all, independent of any field mapping. Now that every
+    // subject lookup can ride on this, one unmapped field would otherwise park
+    // licensed close prices in localStorage permanently. Deliberately NOT keyed
+    // on rec.source - MLS_SYSTEM_NAME is configurable.
+    return Boolean(rec.extra.mlsNumber)
+        || Boolean(rec.extra.mls && rec.extra.mls.matchedBy);
 }
+
+// Eviction was read-triggered only, so an address never looked up again kept
+// its licensed close price forever - the 12 h retention window was aspirational
+// rather than real. Now that the feed leads most subject records, far more
+// entries carry the clock, so sweep the whole cache once at load.
+function sweepExpiredMlsRecords() {
+    try {
+        const cache = JSON.parse(localStorage.getItem(PROPERTY_CACHE_KEY) || '{}');
+        let dropped = 0;
+        for (const key of Object.keys(cache)) {
+            const entry = cache[key];
+            if (recordIsMlsSourced(entry) && Date.now() - ((entry && entry._cachedAt) || 0) > MLS_CACHE_TTL_MS) {
+                delete cache[key];
+                dropped++;
+            }
+        }
+        if (dropped) localStorage.setItem(PROPERTY_CACHE_KEY, JSON.stringify(cache));
+    } catch (e) { /* best-effort: a corrupt cache must not block startup */ }
+}
+sweepExpiredMlsRecords();
 
 function getCachedRecord(address) {
     try {
@@ -3645,6 +3678,8 @@ function applyPropertyRecord(rec, fallbackAddress) {
             : 'Record found, but it had no usable fields — enter details manually.',
         'success'
     );
+    appendMlsAttribution(subjectAttributionBox,
+        recordIsMlsSourced(rec) ? ((rec.extra && rec.extra.mls && rec.extra.mls.attribution) || null) : null);
     recalcAppraisal();
 }
 
@@ -3688,7 +3723,17 @@ async function fetchPropertyRecord(address, opts = {}) {
             problems.push(err instanceof TypeError ? 'Worker: network error' : 'Worker: ' + err.message);
         }
     }
-    if (rec) putCachedRecord(address, rec);
+    if (rec) {
+        // providerErrors are live diagnostics about THIS call. The worker now
+        // returns them on 200 responses too, and putCachedRecord() spreads the
+        // whole object - so without this a transient MLS auth failure replays
+        // out of localStorage as a stale complaint for the next 12 hours.
+        if (Array.isArray(rec.providerErrors)) {
+            for (const msg of rec.providerErrors) problems.push(msg);
+            delete rec.providerErrors;
+        }
+        putCachedRecord(address, rec);
+    }
     return { rec, problems };
 }
 
@@ -3756,6 +3801,19 @@ function applyRecordToComp(comp, rec) {
     set('ownerMailing', rec.ownerMailing);
     if (rec.lat != null && rec.lon != null) { comp.lat = rec.lat; comp.lon = rec.lon; }
     if (rec.lastSalePrice > 0) comp.salePrice = rec.lastSalePrice;
+    // Provenance has to travel with the number here too. A close price that
+    // arrived through the RECORD ladder is exactly as licensed as one that
+    // arrived through /comps, which stamps these fields itself.
+    // mlsSourcedCompLabels() keys on priceType + priceSource and the protest
+    // packet withholds on that - without this an NTREIS sale price prints in
+    // the table handed to an ARB panel, which NTREIS Rule 15.03(b) forbids
+    // and Rule 8.08 Note 2 makes confidential. Latent until the feed started
+    // leading the subject record; now it is the common case.
+    if (rec.lastSalePrice > 0 && recordIsMlsSourced(rec)) {
+        comp.priceType = 'closed';
+        comp.priceSource = rec.source;
+        if (rec.extra && rec.extra.mlsNumber) comp.mlsNumber = rec.extra.mlsNumber;
+    }
     if (rec.lastSaleDate) {
         const months = Math.round((Date.now() - new Date(rec.lastSaleDate).getTime()) / (1000 * 60 * 60 * 24 * 30.44));
         // Only within the comp window — an ancient record sale must not

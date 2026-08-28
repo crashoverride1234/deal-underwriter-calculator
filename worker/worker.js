@@ -461,107 +461,173 @@ async function melissaRecord(ff, env) {
   return hasData(rec) ? rec : null;
 }
 
-// Unified provider ladder: MLS feed (primary, licensed) → RentCast →
-// Melissa → realtor.com (keyless). Providers without a configured secret are
-// skipped. MLS facts overlay whichever rung answers, because a listing knows
-// the house but rarely knows the tax roll or the owner of record.
+// ---- What "the ladder is done" means -------------------------------------
+// The old gate was `if (merged.annualTaxes) return`, written twice. It tested
+// HALF of what the tax features need: engine projectPropertyTax() and
+// protestOpportunity() both compute an effective rate as annual/assessed and
+// both bail unless assessedValue > 0 AND annualTaxes > 0. A tax bill with no
+// roll value behind it is worth nothing to either.
+//
+// That asymmetry is not hypothetical here. NTREIS publishes NO assessed-value
+// field at all - 443 fields probed 2026-08-28, of which the only tax columns
+// are UnexemptTaxes, TaxBlock, TaxLot, TaxLegalDescription,
+// SpecialTaxingEntities and RoadAssessmentYN. So mlsToRecord().assessedValue is
+// structurally null on this feed, and the old gate ended the ladder on every
+// non-Tarrant MLS hit with BOTH tax features dark and the rung carrying the
+// missing half skipped.
+const LADDER_COMPLETE_FIELDS = ['assessedValue', 'annualTaxes'];
+function recordIsComplete(rec) {
+  return Boolean(rec) && LADDER_COMPLETE_FIELDS.every(k => numOrNull(rec[k]) > 0);
+}
+
+// ---- What "the feed answered" means --------------------------------------
+// /comps and /rent gate their proxies on a COUNT (MLS_LEASES_ENOUGH = 3).
+// /lookup returns ONE record, so there is nothing to count: "enough" is a MATCH
+// STANDARD plus the same hasData() bar every other rung clears.
+//   'address'   - streetMatchStrict confirmed house number AND street name.
+//                 This row IS the subject, so it may lead the record.
+//   'proximity' - the row merely fell inside a 0.05 mi box and matched
+//                 fail-open. Enough to fill a blank, never enough to overwrite
+//                 the county roll with a neighbour's square footage.
+const MLS_SUBJECT_MATCH = 'address';
+function mlsAnsweredSubject(hit) {
+  return Boolean(hit) && hit.matchedBy === MLS_SUBJECT_MATCH && hasData(hit.record);
+}
+
+// Fold an authority-ordered stack into one record. mergeRecords() never
+// overwrites a populated field, so this is "first non-null wins" and the ORDER
+// of the array is the entire specification. A single-element stack is returned
+// by identity, so its source string stays un-concatenated exactly as every
+// single-answerer path does today.
+function foldRecords(stack) {
+  const list = stack.filter(Boolean);
+  return list.length ? list.reduce((a, b) => mergeRecords(a, b)) : null;
+}
+
+// Unified provider ladder for the SUBJECT property. Authority order:
+//
+//   1. MLS, address-confirmed   the listing describes THIS house
+//   2. RentCast                 vendor record; carries the tax pair, one vintage
+//   3. Melissa                  (inert unless MELISSA_API_KEY is set)
+//   4. TAD (Tarrant roll)       county-measured: assessed, owner, legal, apn
+//   5. realtor.com              portal scrape, weakest
+//   6. MLS, proximity-only      fills blanks, never leads
+//
+// Two things drive the shape. The feed is the PRIMARY source - it is the only
+// rung that knows what the house actually sold for - but it hard-nulls
+// assessedValue, ownerNames, ownerMailing, legal and apn, so it COMPLEMENTS the
+// county roll rather than replacing it: unlike /comps, which drops its proxies
+// wholesale once the feed delivers, /lookup folds. And every FREE rung is
+// exhausted before the billable one, because realtor.com carries assessedValue
+// and annualTaxes together when it answers (measured 3/3 Dallas addresses,
+// 2026-08-28) and used to run AFTER RentCast - that ordering was the real
+// credit leak, not the MLS gate.
 async function handleLookup(params, env, cors) {
   const address = params.get('address');
   if (!address) return json({ error: 'address is required' }, 400, cors);
   const providerErrors = [];
-
-  // Tarrant County parcels are free from TAD's public FeatureServer — in
-  // the home county this rung replaces a billable RentCast call WHEN the
-  // keyless realtor enrich can supply the tax bill TAD doesn't carry.
-  // A tax-less TAD record must NOT short-circuit the keyed rungs: the
-  // client caches records per address with no TTL, so returning a degraded
-  // record here would starve the tax-reassessment and protest features for
-  // that address permanently. TAD is instead held as a gap-filler for
-  // whichever later rung hits, and only returned bare when everything
-  // else missed (still better than a 404).
   const lat0 = parseFloat(params.get('latitude'));
   const lon0 = parseFloat(params.get('longitude'));
-  let tad = null;
-  if (inTarrant(lat0, lon0)) {
-    try { tad = await tadRecord(lat0, lon0, address); }
-    catch (e) { providerErrors.push('TAD: ' + e.message); }
-  }
-  if (tad) {
+
+  // realtor.com is resolved at most ONCE per lookup. The old ladder could
+  // resolve an mpr_id and fetch the record twice on the Tarrant path - two
+  // wasted subrequests, and a six-comp deal fires seven lookups.
+  let realtorMemo;
+  const realtor = async () => {
+    if (realtorMemo !== undefined) return realtorMemo;
+    realtorMemo = null;
     try {
       let mprId = params.get('mpr_id');
       if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
       if (mprId && /^\d+$/.test(mprId)) {
         const rr = await realtorRecord(mprId);
-        // Same wrong-house guard as the TAD rung itself: an mpr_id resolved
-        // from a bare address string can be a different property entirely
-        if (rr && streetMatch(address, rr.formattedAddress)) {
-          const merged = mergeRecords(tad, rr);
-          if (merged.annualTaxes) return json(merged, 200, cors);
-          tad = merged; // keep the extra fields; still hunting a tax bill
-        }
+        // Wrong-house guard. The old standalone realtor rung had NONE - it
+        // returned realtorRecord() unchecked while the Tarrant enrich block
+        // beside it guarded. Promoting this rung above RentCast without
+        // carrying the guard forward would let an mpr_id resolved from a bare
+        // street line become the subject record.
+        if (rr && streetMatch(address, rr.formattedAddress)) realtorMemo = rr;
       }
-    } catch (e) { providerErrors.push('realtor enrich: ' + e.message); }
-  }
-
-  // ---- MLS rung (primary) ----
-  // A licensed feed is the only source that knows what the house actually
-  // SOLD for — every rung below it is a proxy. It rarely carries the tax roll
-  // or an owner record though, so it does NOT end the ladder on its own: it
-  // overlays whatever fills those gaps, the mirror image of how TAD fills
-  // from underneath.
-  let mlsRec = null;
-  if (mlsConfigured(env)) {
-    try { mlsRec = await mlsRecord(env, address, lat0, lon0); }
-    catch (e) { providerErrors.push(mlsSystemName(env) + ': ' + e.message); }
-  }
-  if (mlsRec) {
-    const merged = tad ? mergeRecords(mlsRec, tad) : mlsRec;
-    // Same invariant the TAD rung obeys: a record with no tax bill must never
-    // end the ladder — the client caches per address with no TTL, so a
-    // degraded record would starve tax reassessment and the protest packet
-    // for that address permanently. With a tax bill in hand there is nothing
-    // left to hunt, and skipping the rest saves a billable RentCast call.
-    if (merged.annualTaxes) return json(merged, 200, cors);
-  }
-  // MLS facts win, the answering provider fills, TAD fills last.
-  const respond = (rec) => {
-    let out = rec;
-    if (mlsRec) out = out ? mergeRecords(mlsRec, out) : mlsRec;
-    if (tad && out && out !== tad) out = mergeRecords(out, tad);
-    return json(out || tad, 200, cors);
+    } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
+    return realtorMemo;
   };
 
+  // ---- Rungs 1 and 2: the two free sources, concurrently ----
+  // Independent by construction: mlsRecord() reads only address/lat/lon,
+  // tadRecord() only lat/lon. retsSerial() still serializes RETS work inside
+  // the isolate, so this overlaps MLS with TAD, not MLS with itself.
+  const [tadS, mlsS] = await Promise.allSettled([
+    inTarrant(lat0, lon0) ? tadRecord(lat0, lon0, address) : Promise.resolve(null),
+    mlsConfigured(env) ? mlsRecord(env, address, lat0, lon0) : Promise.resolve(null)
+  ]);
+  if (tadS.status === 'rejected') providerErrors.push('TAD: ' + tadS.reason.message);
+  if (mlsS.status === 'rejected') providerErrors.push(mlsSystemName(env) + ': ' + mlsS.reason.message);
+  const tad = tadS.status === 'fulfilled' ? tadS.value : null;
+  const mlsHit = mlsS.status === 'fulfilled' ? mlsS.value : null;
+  const mlsRow = mlsHit ? mlsHit.record : null;
+  const mlsLeads = mlsAnsweredSubject(mlsHit);
+
+  const stackWith = (...rungs) => [
+    mlsLeads ? mlsRow : null,
+    ...rungs,
+    tad,
+    realtorMemo || null,
+    mlsLeads ? null : mlsRow
+  ];
+
+  const finish = (...rungs) => {
+    const out = foldRecords(stackWith(...rungs));
+    if (!out) return json({ error: 'no record', providerErrors }, 404, cors);
+    return json({
+      ...out,
+      // Inside extra, not as a sibling key: the /lookup body IS the object the
+      // client caches, and attribution has to persist with the data it
+      // attributes.
+      extra: {
+        ...out.extra,
+        mls: {
+          configured: mlsConfigured(env),
+          name: mlsSystemName(env),
+          used: mlsLeads,
+          matchedBy: mlsHit ? mlsHit.matchedBy : null,
+          attribution: env.MLS_ATTRIBUTION || null
+        }
+      },
+      // Top level, and stripped by the client before caching: an MLS auth
+      // failure during an MLS-led lookup is invisible today, because every
+      // 200 path dropped these.
+      providerErrors
+    }, 200, cors);
+  };
+
+  if (recordIsComplete(foldRecords(stackWith()))) return finish();
+
+  // ---- Rung 3: realtor.com. KEYLESS, so it runs before anything billable. ----
+  await realtor();
+  if (recordIsComplete(foldRecords(stackWith()))) return finish();
+
+  // ---- Rung 4: RentCast. BILLABLE - only once every free source has failed. --
+  let rcRec = null;
   if (env.RENTCAST_API_KEY) {
     try {
-      let rec = await rentcastRecord(new URLSearchParams({ address }), env);
-      if (!rec && params.get('latitude') && params.get('longitude')) {
-        rec = await rentcastRecord(new URLSearchParams({
+      rcRec = await rentcastRecord(new URLSearchParams({ address }), env);
+      if (!rcRec && params.get('latitude') && params.get('longitude')) {
+        rcRec = await rentcastRecord(new URLSearchParams({
           latitude: params.get('latitude'), longitude: params.get('longitude'),
           radius: '0.05', limit: '1'
         }), env);
       }
-      if (rec) return respond(rec);
     } catch (e) { providerErrors.push('RentCast: ' + e.message); }
   }
+  if (recordIsComplete(foldRecords(stackWith(rcRec)))) return finish(rcRec);
 
+  // ---- Rung 5: Melissa ----
+  let mdRec = null;
   if (env.MELISSA_API_KEY) {
-    try {
-      const rec = await melissaRecord(address, env);
-      if (rec) return respond(rec);
-    } catch (e) { providerErrors.push('Melissa: ' + e.message); }
+    try { mdRec = await melissaRecord(address, env); }
+    catch (e) { providerErrors.push('Melissa: ' + e.message); }
   }
-
-  try {
-    let mprId = params.get('mpr_id');
-    if (!mprId || !/^\d+$/.test(mprId)) mprId = await resolveMprId(address);
-    if (mprId && /^\d+$/.test(mprId)) {
-      const rec = await realtorRecord(mprId);
-      if (rec) return respond(rec);
-    }
-  } catch (e) { providerErrors.push('realtor.com: ' + e.message); }
-
-  if (mlsRec || tad) return respond(null); // listing/parcel truth beats a 404
-  return json({ error: 'no record', providerErrors }, 404, cors);
+  return finish(rcRec, mdRec); // 404 only when nothing answered at all
 }
 
 // Separate query for /market and /rent so an unproven field can never break
@@ -860,6 +926,18 @@ function streetMatchStrict(reqAddress, candAddress) {
   if (a.no !== b.no) return false;
   if ((a.frac || b.frac) && a.frac !== b.frac) return false;
   return Boolean(a.name) && a.name === b.name;
+}
+
+// The LAST five-digit run in an address line, never the first. Reading the
+// first one sent (PostalCode=<house number>) to the feed for any five-digit
+// house number - zero rows, no error, and indistinguishable from a thin
+// market. While the feed was only a filler that was a quiet miss; now that it
+// leads the subject record it would mean every 10120-style address
+// systematically gets the worse answer while its 943-style neighbours get the
+// better one, which reads as flakiness rather than as a bug.
+function postcodeFromAddress(address) {
+  const all = String(address || '').match(/\b\d{5}\b/g) || [];
+  return all.length ? all[all.length - 1] : '';
 }
 
 async function tadRecord(lat, lon, address) {
@@ -2415,13 +2493,14 @@ function mlsLeaseTypes(env) {
  * Subject-property record from the feed. Address-first (an exact listing beats
  * a nearby one), falling back to the nearest listing within ~250 ft when the
  * address string doesn't match the MLS's own formatting.
- * Returns null on a miss so the caller falls through the ladder.
+ * Returns { record, matchedBy: 'address' | 'proximity' } so the ladder can tell a
+ * confirmed subject from a row that merely stood nearby; null on a miss.
  */
 async function mlsRecord(env, address, lat, lon) {
   const f = mlsFields(env);
   const anyStatus = [].concat(mlsStatuses(env, 'closed'), mlsStatuses(env, 'active'), mlsStatuses(env, 'pending'));
   const isRets = mlsTransport(env) === 'rets';
-  const zip = (/\b(\d{5})\b/.exec(address || '') || [, ''])[1];
+  const zip = postcodeFromAddress(address);
   // The row's street line has to be COMPOSED. Reading f.address raw returns
   // undefined on any feed without UnparsedAddress (NTREIS is one), and an
   // empty candidate used to sail through the fail-open guard below — which
@@ -2437,12 +2516,16 @@ async function mlsRecord(env, address, lat, lon) {
       // directional prefixes, "Rd" vs "Road") rarely matches a typed string
       const filter = `contains(${f.address},${odataStr(street.split(/\s+/)[0])}) and startswith(${f.address},${odataStr(houseNum)})`;
       // RETS has no such functions, so it filters on the parsed components.
-      // Two passes: the narrow one, then house number alone — DMQL2 string
-      // comparison is case-sensitive on some servers, and a StreetName that
-      // fails to match must cost a second round trip, not the whole lookup.
+      // Pass 1 is the narrow one. Pass 2 drops StreetName because DMQL2 string
+      // comparison is case-sensitive on some servers, and a name that fails to
+      // match should cost a second round trip rather than the whole lookup -
+      // but pass 2 is also geographically UNBOUNDED (mlsSearch's bound-guard
+      // only fires when radiusMi is set), so it asks for every listing
+      // feed-wide with this house number. That is only worth a serialized RETS
+      // round trip when there are no coordinates to fall back on.
       const passes = isRets
         ? [{ streetNumber: houseNum, streetName: parsed.name, zip },
-           { streetNumber: houseNum }]
+           ...(Number.isFinite(lat) && Number.isFinite(lon) ? [] : [{ streetNumber: houseNum }])]
         : [{ extraFilter: filter }];
       for (const pass of passes) {
         try {
@@ -2456,7 +2539,7 @@ async function mlsRecord(env, address, lat, lon) {
           // a search that came back wider than intended is exactly the case
           // this has to catch. A row it cannot confirm is not the subject.
           const hit = rows.find(r => streetMatchStrict(address, lineOf(r)));
-          if (hit) return mlsToRecord(hit, env);
+          if (hit) return { record: mlsToRecord(hit, env), matchedBy: 'address' };
         } catch (e) {
           // contains/startswith are optional OData functions; a feed that
           // rejects them still answers the coordinate query below
@@ -2477,7 +2560,7 @@ async function mlsRecord(env, address, lat, lon) {
     const hit = address
       ? rows.find(r => streetMatch(address, lineOf(r)))
       : rows[0];
-    if (hit) return mlsToRecord(hit, env);
+    if (hit) return { record: mlsToRecord(hit, env), matchedBy: 'proximity' };
   }
   return null;
 }
@@ -3527,5 +3610,7 @@ export {
   parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie, retsReplyText,
   suggestFieldMapFromMetadata, MLS_FIELD_CANDIDATES,
   odataStr, odataDay, mlsOrFilter,
-  mergeRecords, milesBetween, streetMatch, streetMatchStrict, parseStreetLine, dmqlToken
+  mergeRecords, milesBetween, streetMatch, streetMatchStrict, parseStreetLine, dmqlToken,
+  recordIsComplete, LADDER_COMPLETE_FIELDS, mlsAnsweredSubject, MLS_SUBJECT_MATCH,
+  foldRecords, postcodeFromAddress, hasData
 };
