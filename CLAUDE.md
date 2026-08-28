@@ -388,8 +388,14 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   single house is weirdest), comp count, unverified-condition share, and
   whether a market trend was measurable at all. Every contributor is NAMED in
   the UI, because "low confidence" is a shrug and "local $/sqft varies by 33%"
-  is actionable. The multipliers are deliberate, not fitted — `backtest.mjs`
-  reports the band's actual coverage and they should be re-tuned from that.
+  is actionable. MEASURED n=84: the band WIDTH is about right — 77.4% coverage
+  against a 68% target — but the high/medium/low TIERS RANK BACKWARDS (deals
+  labelled low came in at 7.4% MdAPE against 10.4% for high and medium).
+  Something in the width drivers correlates with dense, data-rich
+  neighbourhoods where the engine does well. So `tierIsCalibrated: false` and
+  the UI shows the ± width rather than a word: a label that misranks is worse
+  than no label. Re-tune the multipliers from `backtest.mjs` coverage before
+  presenting a tier again.
 - **The GLA adjustment is DERIVED from the comps** (`deriveMarketRates()`),
   not a static default. The old fixed $50/sqft was a national rule of thumb;
   in a $317/sqft Fort Worth street the derived rate is $142, and the gap
