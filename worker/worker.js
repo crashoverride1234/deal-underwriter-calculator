@@ -992,6 +992,11 @@ const MLS_DEFAULT_FIELDS = {
   closeDate: 'CloseDate',
   listDate: 'OnMarketDate',
   contractDate: 'ListingContractDate',
+  // The date the PURCHASE contract was signed — the moment the price was
+  // agreed. A time adjustment anchored on the close date is wrong by the
+  // contract-to-close lag on every comp, which at DFW's growth rate is
+  // roughly 0.5-1.0% of price per comp, always in the same direction.
+  purchaseContractDate: 'PurchaseContractDate',
   dom: 'DaysOnMarket',
   cdom: 'CumulativeDaysOnMarket',
   status: 'StandardStatus',
@@ -1778,7 +1783,8 @@ const MLS_FIELD_CANDIDATES = {
   closePrice: ['ClosePrice', 'SellingPrice', 'SoldPrice', 'SalePrice', 'L_SoldPrice'],
   closeDate: ['CloseDate', 'SellingDate', 'SoldDate', 'SaleDate', 'ClosedDate'],
   listDate: ['OnMarketDate', 'ListingDate', 'ListDate'],
-  contractDate: ['ListingContractDate', 'ContractDate'],
+  contractDate: ['ListingContractDate'],
+  purchaseContractDate: ['PurchaseContractDate', 'ContractDate', 'UnderContractDate'],
   dom: ['DaysOnMarket', 'DOM', 'MarketTime'],
   cdom: ['CumulativeDaysOnMarket', 'CDOM'],
   status: ['StandardStatus', 'Status', 'ListingStatus'],
@@ -2333,6 +2339,7 @@ function mlsToCandidate(row, env) {
     concessionsComments: mlsFlat(row[f.concessionsComments]),
     dom: mlsDom(row, f),
     cdom: numOrNull(row[f.cdom]),
+    contractDate: mlsFlat(row[f.purchaseContractDate]),
     listingStatus: mlsPrettyStatus(row[f.status]) || mlsFlat(row[f.mlsStatus]),
     propertyCondition: mlsFlat(row[f.condition])
   };
@@ -2568,6 +2575,78 @@ async function mlsLeases(env, lat, lon, radiusMi, zip) {
   ).filter(x => x.rent > 0);
   rows.errors = errors;
   return rows;
+}
+
+/**
+ * /trend — the WIDE pull that a time adjustment has to be fitted on.
+ *
+ * Deliberately drops the size and bedroom bands that /comps applies. Those
+ * exist to find comparables; here they would be actively harmful, because a
+ * banded sample confounds price movement with composition drift — if the
+ * houses selling this quarter happen to be bigger, a banded series reads that
+ * as appreciation. Fitting on $/sqft across ALL local sales separates the two.
+ *
+ * Returns the series rather than a fitted rate: the fitting is math, so it
+ * belongs in the engine where it is unit-tested, and the client can show the
+ * scatter behind the number.
+ */
+async function handleTrend(params, env, cors) {
+  let lat = parseFloat(params.get('latitude'));
+  let lon = parseFloat(params.get('longitude'));
+  const address = params.get('address') || '';
+  if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && address) {
+    const geo = await resolveGeo(address);
+    if (geo && geo.lat != null) { lat = geo.lat; lon = geo.lon; }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'latitude/longitude or a resolvable address is required' }, 400, cors);
+  }
+  if (!mlsConfigured(env)) {
+    return json({ error: 'no MLS feed configured', sales: [] }, 501, cors);
+  }
+
+  const radius = Math.min(8, parseFloat(params.get('radius')) || 3);
+  // Fannie B4-1.3-09 requires a minimum 12-month window for a supportable
+  // time adjustment; 18 gives the fit some room without reaching back into a
+  // different rate environment.
+  const months = Math.min(36, parseInt(params.get('months'), 10) || 18);
+  const f = mlsFields(env);
+  const asOf = params.get('asOf') ? Date.parse(params.get('asOf')) : undefined;
+  const providerErrors = [];
+
+  try {
+    const rows = await mlsSearch(env, {
+      statuses: mlsStatuses(env, 'closed'),
+      propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
+      subTypes: mlsSubTypes(env),
+      lat, lon, radiusMi: radius, zip: params.get('zip') || '',
+      sinceDays: Math.round(months * 30.44),
+      asOf,
+      // A trend needs MONTHS of coverage, not just rows. The row cap is spent
+      // newest-first, so 300 rows in a busy submarket only reached back nine
+      // months — short of the twelve Fannie requires for a supportable time
+      // adjustment.
+      limit: 500, orderby: 'closeDateDesc'
+    });
+    const sales = rows.map(r => ({
+      price: numOrNull(r[f.closePrice]),
+      sqft: numOrNull(r[f.sqft]) || numOrNull(r[f.sqftAlt]),
+      closeDate: mlsFlat(r[f.closeDate]),
+      // The date that actually matters: when the price was agreed
+      contractDate: mlsFlat(r[f.purchaseContractDate])
+    })).filter(x => x.price > 0 && x.sqft > 0 && x.closeDate);
+
+    return json({
+      subject: { latitude: lat, longitude: lon, radiusMi: radius, months },
+      count: sales.length,
+      withContractDate: sales.filter(s => s.contractDate).length,
+      source: mlsSystemName(env),
+      sales,
+      providerErrors
+    }, 200, cors);
+  } catch (e) {
+    return json({ error: mlsSystemName(env) + ': ' + e.message, sales: [] }, 200, cors);
+  }
 }
 
 /**
@@ -3320,6 +3399,8 @@ export default {
               attribution: env.MLS_ATTRIBUTION || null
             } : null
           }, 200, cors);
+        case '/trend':
+          return await handleTrend(url.searchParams, env, cors);
         case '/backtest/sample':
           return await handleBacktestSample(url.searchParams, env, cors);
         case '/mls/probe':

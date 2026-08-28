@@ -109,6 +109,46 @@ async function api(path) {
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 /**
+ * How disagreed is the MIDDLE of the local market about price per foot?
+ * Interquartile rather than max-minus-min, because a single teardown or new
+ * build sets the extremes and tells you nothing about how hard the typical
+ * house here is to price.
+ */
+function iqrSpreadPct(sortedPpsf) {
+  if (!sortedPpsf || sortedPpsf.length < 4) return 0;
+  const at = (f) => sortedPpsf[Math.min(sortedPpsf.length - 1, Math.floor(f * sortedPpsf.length))];
+  const q1 = at(0.25), q3 = at(0.75), med = at(0.5);
+  return med > 0 ? 100 * (q3 - q1) / med : 0;
+}
+
+
+/**
+ * Local market trend, cached per (area, calendar month).
+ *
+ * Anchored at the START of the test sale's month, never its close date, so a
+ * trend shared by several sales in the same month cannot contain data from
+ * after any of them. Caching at the sale level would double the MLS calls;
+ * caching at the area level would leak future months into earlier sales.
+ */
+const trendCache = new Map();
+async function localTrend(sale) {
+  const monthStart = String(sale.closeDate).slice(0, 7) + '-01';
+  const key = (sale.area || 'custom') + '|' + monthStart;
+  if (trendCache.has(key)) return trendCache.get(key);
+  let fitted = null;
+  try {
+    const t = await api('/trend?' + new URLSearchParams({
+      latitude: String(sale.lat), longitude: String(sale.lon),
+      radius: '3', months: '18', asOf: monthStart
+    }));
+    fitted = Engine.deriveTimeAdjustment(t.sales || [], monthStart);
+    await sleep(CFG.pace);
+  } catch (e) { /* a missing trend means flat, not a failed test sale */ }
+  trendCache.set(key, fitted);
+  return fitted;
+}
+
+/**
  * Score one test sale. Returns null when the reconstructed comp set is too
  * thin to appraise from — those are reported as coverage, not folded into the
  * error, because "declined to price" is a different outcome from "priced
@@ -163,10 +203,17 @@ async function scoreSale(sale, variant) {
 
   if (ranked.length < 3) return { skipped: 'thin ranked set' };
 
+  // Time handling. The old behaviour aged comps from their CLOSE date and
+  // applied a flat user-entered rate; the new one ages from the date the
+  // price was agreed and uses a rate fitted to the local market.
+  const trend = variant.legacyTime ? null : await localTrend(sale);
+
   let unverified = 0;
   const comps = ranked.map(c => {
-    const months = Math.max(0, Math.round(
-      (Date.parse(sale.closeDate) - Date.parse(c.soldDate || sale.closeDate)) / (86400000 * 30.44)));
+    const months = variant.legacyTime
+      ? Math.max(0, Math.round(
+          (Date.parse(sale.closeDate) - Date.parse(c.soldDate || sale.closeDate)) / (86400000 * 30.44)))
+      : Engine.compMonthsAgo({ closeDate: c.soldDate, contractDate: c.contractDate }, sale.closeDate);
     const textRead = variant.noCondition
       ? null
       : Engine.classifyCondition(c.remarks, c.propertyCondition);
@@ -188,11 +235,26 @@ async function scoreSale(sale, variant) {
     ...SETTINGS,
     pricePerSqftAdj: variant.fixedPpsf != null
       ? variant.fixedPpsf
-      : (derived ? derived.pricePerSqftAdj : 50)
+      : (derived ? derived.pricePerSqftAdj : 50),
+    annualAppreciationPct: variant.legacyTime
+      ? SETTINGS.annualAppreciationPct
+      : (trend ? trend.annualPct : 0)
   };
 
   const a = Engine.appraise({ subject, comps, settings });
   if (!(a.arv > 0)) return { skipped: 'no ARV' };
+
+  // The stated uncertainty, so the harness can check whether the band means
+  // anything. An interval nobody has measured coverage on is decoration.
+  const ppsfs = priced.map(x => x.salePrice / x.sqft).sort((x, y) => x - y);
+  const ppsfSpreadPct = ppsfs.length >= 3
+    ? iqrSpreadPct(ppsfs)
+    : 0;
+  const interval = Engine.valuationInterval(a, {
+    pricePerSqftSpreadPct: ppsfSpreadPct,
+    unverifiedComps: unverified,
+    trendUnusable: Boolean(trend && !trend.usable) || (!variant.legacyTime && !trend)
+  });
 
   // Does the test sale read as a retail transaction, or as a distressed /
   // investor one? Its own remarks and days-on-market are the only signals
@@ -222,7 +284,14 @@ async function scoreSale(sale, variant) {
     confidence: a.confidence,
     subjectLooksDistressed: looksDistressed,
     subjectVeryFast: veryFast,
-    subjectDom: sale.dom
+    subjectDom: sale.dom,
+    trendPct: trend ? trend.annualPct : null,
+    trendUsable: trend ? trend.usable : null,
+    bandLow: interval ? interval.low : null,
+    bandHigh: interval ? interval.high : null,
+    sigmaPct: interval ? interval.sigmaPct : null,
+    statedConfidence: interval ? interval.confidence : null,
+    inBand: interval ? (sale.closePrice >= interval.low && sale.closePrice <= interval.high) : null
   };
 }
 
@@ -274,6 +343,11 @@ const VARIANTS = flag('compare-comps')
   ? [
       { name: 'A: condition adjustment ON', topN: 4 },
       { name: 'B: condition adjustment OFF', topN: 4, noCondition: true }
+    ]
+  : flag('compare-time')
+  ? [
+      { name: 'A: flat 2%/yr from close date (old)', topN: 4, legacyTime: true },
+      { name: 'B: derived rate from contract date', topN: 4 }
     ]
   : flag('compare-rate')
   ? [
@@ -379,6 +453,27 @@ if (primary.length >= 10) {
       + ('  MdAPE ' + s.mdape + '%').padStart(16)
       + ('  PE10 ' + s.pe10 + '%').padStart(14)
       + ('  over20 ' + s.overBy20Pct + '%').padStart(16));
+  }
+}
+
+const withBand = primary.filter(r => r.inBand !== null);
+if (withBand.length >= 10) {
+  console.log('\n' + '-'.repeat(66));
+  console.log('INTERVAL CALIBRATION — does the stated band mean anything?');
+  console.log('-'.repeat(66));
+  const cov = 100 * withBand.filter(r => r.inBand).length / withBand.length;
+  const avgSigma = withBand.reduce((s2, r) => s2 + r.sigmaPct, 0) / withBand.length;
+  console.log('  coverage of the +/-1 sigma band   ' + cov.toFixed(1) + '%   (target ~68%)');
+  console.log('  mean stated sigma                 ' + avgSigma.toFixed(1) + '%');
+  console.log('  ' + (cov < 60 ? 'BAND IS TOO NARROW — it is claiming more precision than it has'
+    : cov > 80 ? 'band is wider than it needs to be' : 'reasonably calibrated'));
+  for (const tier of ['high', 'medium', 'low']) {
+    const g = withBand.filter(r => r.statedConfidence === tier);
+    if (g.length < 5) continue;
+    const m = Engine.backtestMetrics(g);
+    console.log('  stated ' + tier.padEnd(7) + ('n=' + g.length).padStart(6)
+      + ('  MdAPE ' + m.mdape + '%').padStart(16)
+      + ('  coverage ' + (100 * g.filter(r => r.inBand).length / g.length).toFixed(0) + '%').padStart(17));
   }
 }
 

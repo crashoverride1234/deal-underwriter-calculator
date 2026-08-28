@@ -715,6 +715,151 @@
         return { ...read, trusted: true };
     }
 
+    // ---- Time adjustment, derived ----
+    /**
+     * When was this sale's PRICE agreed? Not the close date — the contract
+     * date. The lag between them runs about a month in DFW (measured: median
+     * 30 days across 298 NTREIS sales), and anchoring the time adjustment on
+     * the close date is therefore late by that much on every comp, in the same
+     * direction, which is how a small bias becomes a systematic one.
+     *
+     * Falls back to close date minus a typical lag when the feed has no
+     * contract date, and ignores implausible lags — a contract signed two
+     * years before closing is pre-construction, not a market observation.
+     */
+    var TYPICAL_CONTRACT_LAG_DAYS = 30;
+    var MAX_PLAUSIBLE_LAG_DAYS = 180;
+
+    function priceAgreedAt(sale) {
+        const close = Date.parse(sale && (sale.closeDate || sale.soldDate) || '');
+        if (!Number.isFinite(close)) return null;
+        const contract = Date.parse((sale && sale.contractDate) || '');
+        if (Number.isFinite(contract)) {
+            const lagDays = (close - contract) / 86400000;
+            if (lagDays >= 0 && lagDays <= MAX_PLAUSIBLE_LAG_DAYS) return contract;
+        }
+        return close - TYPICAL_CONTRACT_LAG_DAYS * 86400000;
+    }
+
+    /** Months between a comp's agreed price and the valuation date. */
+    function compMonthsAgo(sale, asOf) {
+        const agreed = priceAgreedAt(sale);
+        if (agreed === null) return 0;
+        const at = asOf ? new Date(asOf).getTime() : Date.now();
+        const months = (at - agreed) / (86400000 * 30.44);
+        return months > 0 ? months : 0;
+    }
+
+    /**
+     * Fit the market's own rate of change from a WIDE local sample.
+     *
+     * Two deliberate choices. It regresses on price PER SQUARE FOOT, because a
+     * series of raw prices confounds appreciation with composition drift — if
+     * the houses that sold this quarter were bigger, raw prices rise without
+     * the market moving. And it trusts the slope only when it is
+     * statistically distinguishable from zero (|t| > 2), because a flat market
+     * fitted on noisy data will always produce SOME slope, and applying it to
+     * a twelve-month-old comp turns noise into dollars.
+     *
+     * Returns null when it cannot support a number, so the caller keeps its
+     * own setting rather than adopting a fabricated one.
+     */
+    function deriveTimeAdjustment(sales, asOf) {
+        const at = asOf ? new Date(asOf).getTime() : Date.now();
+        const pts = [];
+        for (const s of sales || []) {
+            const price = num(s && s.price);
+            const sqft = num(s && s.sqft);
+            if (!(price > 0) || !(sqft > 0)) continue;
+            const agreed = priceAgreedAt(s);
+            if (agreed === null) continue;
+            const monthsAgo = (at - agreed) / (86400000 * 30.44);
+            if (monthsAgo < 0 || monthsAgo > 36) continue;
+            pts.push({ x: monthsAgo, y: Math.log(price / sqft) });
+        }
+        if (pts.length < 20) return null;
+
+        // Aggregate to MONTHLY MEDIANS before fitting. Fitting the raw scatter
+        // lets a handful of unusual houses set the slope: on a real 300-sale
+        // Fort Worth pull that produced -25%/yr at an R-squared of 0.019 — a
+        // number the t-test waved through purely because n was large. Time
+        // explains very little of any single house's price, so the signal only
+        // emerges once house-to-house variation is averaged away.
+        const buckets = new Map();
+        for (const p of pts) {
+            const m = Math.floor(p.x);
+            if (!buckets.has(m)) buckets.set(m, []);
+            buckets.get(m).push(p.y);
+        }
+        const monthly = [];
+        for (const [m, ys] of buckets) {
+            if (ys.length < 3) continue;   // a month with two sales is not a datum
+            const sorted = [...ys].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            monthly.push({
+                x: m + 0.5,
+                y: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+                w: ys.length
+            });
+        }
+        if (monthly.length < 6) return null;   // fewer than six months is not a trend
+
+        const totalW = monthly.reduce((a, p) => a + p.w, 0);
+        const n = monthly.length;
+        const mx = monthly.reduce((a, p) => a + p.w * p.x, 0) / totalW;
+        const my = monthly.reduce((a, p) => a + p.w * p.y, 0) / totalW;
+        let sxy = 0, sxx = 0, syy = 0;
+        for (const p of monthly) {
+            sxy += p.w * (p.x - mx) * (p.y - my);
+            sxx += p.w * (p.x - mx) * (p.x - mx);
+            syy += p.w * (p.y - my) * (p.y - my);
+        }
+        if (!(sxx > 0) || !(syy > 0)) return null;
+
+        const slope = sxy / sxx;                 // log($/sqft) per month BACK
+        const rSquared = (sxy * sxy) / (sxx * syy);
+        const residualVar = Math.max(0, (syy - slope * sxy) / Math.max(1, n - 2));
+        const seSlope = Math.sqrt(residualVar / sxx);
+
+        // x counts months BACKWARD, so a rising market has a negative slope
+        const toAnnual = (s) => (Math.exp(-s * 12) - 1) * 100;
+        const annualPct = toAnnual(slope);
+
+        // Judge on the CONFIDENCE INTERVAL, not a bare t-statistic. What
+        // matters is not "is the slope exactly zero" — with enough points it
+        // never is — but "is the range of rates this data supports narrow
+        // enough to spend money on". A CI running from -18% to +4% is an
+        // honest shrug, and applying its midpoint to a year-old comp would
+        // turn that shrug into dollars.
+        const ciLo = toAnnual(slope + 1.96 * seSlope);
+        const ciHi = toAnnual(slope - 1.96 * seSlope);
+        const lo = Math.min(ciLo, ciHi);
+        const hi = Math.max(ciLo, ciHi);
+        const excludesZero = lo > 0 || hi < 0;
+        const tightEnough = (hi - lo) <= 12;      // percentage points per year
+        const plausible = annualPct >= -20 && annualPct <= 30;
+        const usable = excludesZero && tightEnough && plausible;
+
+        return {
+            annualPct: Math.round((usable ? annualPct : 0) * 10) / 10,
+            rawAnnualPct: Math.round(annualPct * 10) / 10,
+            ci95: [Math.round(lo * 10) / 10, Math.round(hi * 10) / 10],
+            usable,
+            rSquared: Math.round(rSquared * 1000) / 1000,
+            months: n,
+            used: pts.length,
+            // A flat reading is a real answer, and a common one — say so
+            // rather than letting the caller mistake it for a failure
+            verdict: usable
+                ? (annualPct > 0 ? 'rising' : 'falling')
+                : !plausible
+                    ? 'fitted rate is implausible — treated as flat'
+                    : !excludesZero
+                        ? 'trend not distinguishable from flat'
+                        : 'trend too uncertain to apply — treated as flat'
+        };
+    }
+
     // ---- Comp similarity ----
     /**
      * Score one candidate 0–100 against the subject.
@@ -795,6 +940,99 @@
         if (c.ppsfOutlier) gate *= 0.5;
 
         return Math.max(0, Math.round(score * gate));
+    }
+
+    // ---- Valuation interval ----
+    /**
+     * How wide is the uncertainty on this particular ARV?
+     *
+     * The old confidence label read only the spread of the adjusted comp
+     * values, so Pleasant Grove and Fort Worth southeast presented identically
+     * while their measured errors differed six-fold (31% vs 5.6% MdAPE). The
+     * engine can see why: the dispersion of the local price per square foot,
+     * how hard the comps had to be adjusted, how many there are, and how many
+     * carry a condition nobody could verify.
+     *
+     * This produces a RANGE rather than a decoration on a point estimate.
+     * That is the honest home for everything the model cannot explain — a comp
+     * set 35% apart in $/sqft should widen the band, not nudge the number.
+     *
+     * The multipliers below are deliberate, not fitted: the back-test measures
+     * the coverage they actually deliver, and they should be re-tuned from
+     * that rather than from intuition.
+     */
+    function valuationInterval(appraisal, context) {
+        const a = appraisal || {};
+        const ctx = context || {};
+        const arv = num(a.arv);
+        if (!(arv > 0)) return null;
+
+        const comps = Array.isArray(a.comps) ? a.comps : [];
+        const drivers = [];
+
+        // 1. Disagreement between the adjusted comps — the base signal
+        let sigma = num(a.spreadPct);
+        if (sigma > 0) drivers.push(`comps disagree by ${sigma.toFixed(1)}%`);
+
+        // 2. How hard the grid had to work. A set needing 25% gross adjustment
+        //    is being argued into place, and every adjustment carries its own
+        //    error on top of the comp's.
+        const grossAdjs = comps.map(c => num(c.grossAdjPct)).filter(g => g > 0);
+        if (grossAdjs.length) {
+            const meanGross = grossAdjs.reduce((x, y) => x + y, 0) / grossAdjs.length;
+            const penalty = Math.max(0, meanGross - 10) * 0.35;
+            if (penalty > 0.5) {
+                sigma += penalty;
+                drivers.push(`comps needed ${meanGross.toFixed(0)}% gross adjustment`);
+            }
+        }
+
+        // 3. Local price dispersion. A street trading between $190 and $500 a
+        //    foot is telling you it is several markets wearing one postcode.
+        const ppsfSpread = num(ctx.pricePerSqftSpreadPct);
+        if (ppsfSpread > 25) {
+            const penalty = (ppsfSpread - 25) * 0.12;
+            sigma += penalty;
+            drivers.push(`local $/sqft varies by ${ppsfSpread.toFixed(0)}%`);
+        }
+
+        // 4. Thin evidence
+        const n = comps.length;
+        if (n > 0 && n < 5) {
+            sigma += (5 - n) * 1.6;
+            drivers.push(`only ${n} comp${n === 1 ? '' : 's'} in the blend`);
+        }
+
+        // 5. Condition nobody could verify — the honest place for it
+        const unverified = num(ctx.unverifiedComps);
+        if (unverified > 0 && n > 0) {
+            const penalty = 2.2 * (unverified / n) * 6;
+            sigma += penalty;
+            drivers.push(`${unverified} of ${n} comps have unverified condition`);
+        }
+
+        // 6. No supportable time adjustment means every older comp carries an
+        //    unknown amount of market movement
+        if (ctx.trendUnusable) {
+            sigma += 2.5;
+            drivers.push('no measurable market trend to age comps by');
+        }
+
+        // Floor: even a flawless comp set cannot pin a house to the dollar.
+        // Published appraiser performance is ~60% within 10%, so a band
+        // narrower than this would be claiming more than the profession does.
+        sigma = Math.max(6, Math.min(35, sigma));
+
+        const band = arv * sigma / 100;
+        return {
+            arv,
+            low: Math.round((arv - band) / 1000) * 1000,
+            high: Math.round((arv + band) / 1000) * 1000,
+            sigmaPct: Math.round(sigma * 10) / 10,
+            // Tiers follow Freddie's HVE convention for forecast deviation
+            confidence: sigma <= 13 ? 'high' : sigma <= 20 ? 'medium' : 'low',
+            drivers
+        };
     }
 
     // ---- Back-test scoring ----
@@ -1168,5 +1406,6 @@
 
     return { DEFAULTS, num, calcAmortizedPayment, calcInterestOnlyPayment, underwrite, appraise, marketAbsorption, classifyCondition, projectPropertyTax, maxOffer, ruleOfThumbOffer, suggestedRulePct, estimateRehab, capexFlags, marketTrend, rentFromComps, readFloodZone, readShrinkSwell, protestOpportunity, readHailHistory,
         deriveMarketRates, pricePerSqftOutliers, reconcileCondition,
-        backtestMetrics, pairedComparison, scoreComp };
+        backtestMetrics, pairedComparison, scoreComp,
+        deriveTimeAdjustment, compMonthsAgo, priceAgreedAt, valuationInterval };
 }));

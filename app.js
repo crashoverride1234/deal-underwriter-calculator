@@ -1598,7 +1598,8 @@ let preResetComps = null;
 // keeps the last word: touching the field marks it overridden and the
 // derivation stops writing to it for the rest of the session.
 const derivedRateInputs = {
-    pricePerSqftAdj: { el: adjPriceSqftInput, overridden: false, note: null }
+    pricePerSqftAdj: { el: adjPriceSqftInput, overridden: false, note: null },
+    annualAppreciationPct: { el: adjAppreciationInput, overridden: false, note: null }
 };
 
 function markRateOverridden(key) {
@@ -1618,6 +1619,58 @@ function derivedNoteFor(slot) {
     row.appendChild(note);
     slot.note = note;
     return note;
+}
+
+/**
+ * Fit the market's own rate of change and put it in the appreciation field.
+ *
+ * The default was a flat 2%/yr that nobody had checked. Measured across three
+ * DFW submarkets the actual reading is roughly flat to slightly soft, so that
+ * default was adding several points of upward adjustment to every older comp
+ * — a systematic over-valuation, in the one direction that costs money.
+ *
+ * When the data cannot support a rate the answer is zero, not the midpoint of
+ * a wide interval; the uncertainty shows up in the confidence band instead.
+ */
+async function fetchLocalTrend() {
+    const slot = derivedRateInputs.annualAppreciationPct;
+    if (!slot || !slot.el || !lastSelectedCoords) return;
+    const q = new URLSearchParams({
+        latitude: String(lastSelectedCoords.lat),
+        longitude: String(lastSelectedCoords.lon),
+        radius: '3', months: '18'
+    });
+    const res = await fetch(`${workerBase()}/trend?${q}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return;
+    const data = await res.json();
+    const trend = Engine.deriveTimeAdjustment(data.sales || []);
+    compsMeta.trend = trend;
+
+    const note = derivedNoteFor(slot);
+    if (!note) return;
+    if (!trend) {
+        note.textContent = 'Not enough local sales history to fit a market trend — using your setting.';
+        note.className = 'derived-rate-note';
+        note.classList.remove('hidden');
+        recalcAppraisal();
+        return;
+    }
+    const how = trend.usable
+        ? `fitted across ${trend.used} sales over ${trend.months} months (95% CI ${trend.ci95[0]}% to ${trend.ci95[1]}%)`
+        : `${trend.used} sales over ${trend.months} months put it between ${trend.ci95[0]}% and ${trend.ci95[1]}% — too wide to apply, so comps are not aged`;
+
+    if (slot.overridden) {
+        note.textContent = `Your override. The market reads ${trend.annualPct}%/yr — ${how}.`;
+        note.className = 'derived-rate-note overridden';
+    } else {
+        slot.el.value = String(trend.annualPct);
+        syncWeightSliders();
+        note.textContent = `Auto-derived: ${trend.annualPct}%/yr — ${how}. Type here to override.`;
+        note.className = 'derived-rate-note';
+        saveAppraisalState();
+    }
+    note.classList.remove('hidden');
+    recalcAppraisal();
 }
 
 function applyDerivedRates(derived, compCount) {
@@ -1660,7 +1713,20 @@ function applyDerivedRates(derived, compCount) {
 // Set-level provenance from the last /comps response: { priceTruth, mls }.
 // priceTruth is 'closed' | 'mixed' | 'proxy' | 'none' and decides whether the
 // panel hedges about Texas non-disclosure or states the prices as fact.
-let compsMeta = { priceTruth: null, mls: null };
+/**
+ * How disagreed is the MIDDLE of the local market about price per foot?
+ * Interquartile rather than max-minus-min, because a single teardown or new
+ * build sets the extremes and tells you nothing about how hard the typical
+ * house here is to price.
+ */
+function iqrSpreadPct(sortedPpsf) {
+  if (!sortedPpsf || sortedPpsf.length < 4) return 0;
+  const at = (f) => sortedPpsf[Math.min(sortedPpsf.length - 1, Math.floor(f * sortedPpsf.length))];
+  const q1 = at(0.25), q3 = at(0.75), med = at(0.5);
+  return med > 0 ? 100 * (q3 - q1) / med : 0;
+}
+
+let compsMeta = { priceTruth: null, mls: null, trend: null, ppsfSpreadPct: 0 };
 
 // Proximity-first ranking (0–100): location and sale recency carry 70 of
 // 100 points — the closest, freshest solds lead. Material similarity earns
@@ -1718,7 +1784,12 @@ async function suggestComps() {
         if (runId !== suggestRunId) return; // superseded by a newer search
         // priceTruth / mls describe the SET, not one comp: whether every
         // price came back a recorded closing, some did, or none did
-        compsMeta = { priceTruth: data.priceTruth || null, mls: data.mls || null };
+        // A new search invalidates the old trend and dispersion — they belong
+        // to the previous subject's neighbourhood, not this one
+        compsMeta = {
+            priceTruth: data.priceTruth || null, mls: data.mls || null,
+            trend: null, ppsfSpreadPct: 0
+        };
         const pool = data.candidates || [];
         // Read the market's own numbers off the set BEFORE ranking: the
         // segment flag feeds the ranking gates, and the GLA rate replaces a
@@ -1729,6 +1800,17 @@ async function suggestComps() {
         const outliers = new Map(
             Engine.pricePerSqftOutliers(priced).map(o => [o.label, o]));
         applyDerivedRates(Engine.deriveMarketRates(priced), priced.length);
+
+        // Local price dispersion feeds the confidence band
+        const ppsfs = priced.map(c => c.salePrice / c.sqft).sort((a, b) => a - b);
+        compsMeta.ppsfSpreadPct = ppsfs.length >= 3
+            ? iqrSpreadPct(ppsfs)
+            : 0;
+
+        // The time adjustment, fitted to a WIDE local pull rather than left at
+        // a user-entered guess. Fire-and-forget: a missing trend means flat,
+        // and must never hold up the comps.
+        fetchLocalTrend().catch(() => {});
 
         const ranked = pool
             .map(c => {
@@ -1854,7 +1936,11 @@ function applyCandidateData(c) {
     if (c.propType) comp.propType = c.propType;
     if (c.soldDate) {
         comp.lastSaleDate = String(c.soldDate).slice(0, 10);
-        const months = Math.round((Date.now() - new Date(c.soldDate).getTime()) / (86400000 * 30.44));
+        // Age from the CONTRACT date — when the price was actually agreed,
+        // about a month before closing. Anchoring on the close date is late
+        // by that much on every comp, always in the same direction.
+        const months = Math.round(
+            Engine.compMonthsAgo({ closeDate: c.soldDate, contractDate: c.contractDate }));
         if (months >= 0 && months <= 24) comp.monthsAgo = months;
     }
     if (c.price > 0) comp.lastSalePrice = c.price;
@@ -3062,14 +3148,35 @@ function recalcAppraisal() {
     arvEstimateValue.textContent = formatCurrency(a.arv);
     arvPpsfNote.textContent = a.subjectPricePerSqft > 0
         ? `$${a.subjectPricePerSqft.toFixed(0)}/sqft on subject` : 'Weighted comp value';
-    arvRangeValue.textContent = `${formatCurrency(a.low)} – ${formatCurrency(a.high)}`;
+    // The range and the confidence now come from a stated uncertainty rather
+    // than from the min/max of the adjusted comps. Measured error varies
+    // six-fold across DFW submarkets (Pleasant Grove 31% MdAPE vs Fort Worth
+    // southeast 5.6%) and the old label could not tell them apart.
+    const band = Engine.valuationInterval(a, {
+        pricePerSqftSpreadPct: compsMeta.ppsfSpreadPct || 0,
+        unverifiedComps: appraisalComps.filter(c =>
+            c.conditionUnverified && Engine.num(c.salePrice) > 0).length,
+        trendUnusable: compsMeta.trend ? !compsMeta.trend.usable : false
+    });
 
-    const conf = CONFIDENCE_STYLES[a.confidence];
+    arvRangeValue.textContent = band
+        ? `${formatCurrency(band.low)} – ${formatCurrency(band.high)}`
+        : `${formatCurrency(a.low)} – ${formatCurrency(a.high)}`;
+
+    const conf = CONFIDENCE_STYLES[band ? band.confidence : a.confidence];
     arvConfidenceValue.textContent = conf.label;
     arvConfidenceCard.className = `metric-card ${conf.card}`;
-    arvSpreadNote.textContent = a.comps.length
-        ? `${a.spreadPct.toFixed(1)}% spread across ${a.comps.length} comp${a.comps.length !== 1 ? 's' : ''}`
-        : 'Add at least one comp';
+    if (band && a.comps.length) {
+        // Name what is driving the width. "Low confidence" on its own is a
+        // shrug; "local $/sqft varies by 62%" is something you can act on.
+        arvSpreadNote.textContent = `±${band.sigmaPct}% — ` + (band.drivers[0] || 'comps agree closely');
+        arvSpreadNote.title = band.drivers.join('\n');
+    } else {
+        arvSpreadNote.textContent = a.comps.length
+            ? `${a.spreadPct.toFixed(1)}% spread across ${a.comps.length} comp${a.comps.length !== 1 ? 's' : ''}`
+            : 'Add at least one comp';
+        arvSpreadNote.title = '';
+    }
 
     compResultsBody.innerHTML = '';
     a.comps.forEach((c, i) => {
@@ -3984,6 +4091,7 @@ addCompBtn.addEventListener('click', () => {
 // search reports what it would have suggested instead of overwriting the
 // number under the user's cursor.
 adjPriceSqftInput.addEventListener('input', () => markRateOverridden('pricePerSqftAdj'));
+adjAppreciationInput.addEventListener('input', () => markRateOverridden('annualAppreciationPct'));
 
 [subjectStoriesInput, subjectPoolInput, subjectHoaInput, subjectOwnerOccupiedInput]
     .forEach(sel => sel.addEventListener('change', recalcAppraisal));

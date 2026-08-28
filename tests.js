@@ -758,6 +758,127 @@ test('derive: the rate is always inside a defensible band of the median', () => 
     assert(r.pricePerSqftAdj <= r.medianPricePerSqft * 0.90, 'not above the ceiling');
 });
 
+// ---- Time adjustment: derived, and anchored where the price was agreed ----
+
+test('time: the price was agreed at CONTRACT, about a month before closing', () => {
+    // Measured across 298 NTREIS sales: median contract-to-close lag 30 days.
+    // Anchoring on the close date is late by that much on every comp, always
+    // in the same direction.
+    const agreed = Engine.priceAgreedAt({ closeDate: '2026-06-30', contractDate: '2026-05-30' });
+    eq(new Date(agreed).toISOString().slice(0, 10), '2026-05-30');
+});
+
+test('time: a missing contract date falls back to close minus a typical lag', () => {
+    const agreed = Engine.priceAgreedAt({ closeDate: '2026-06-30' });
+    eq(new Date(agreed).toISOString().slice(0, 10), '2026-05-31', '30 days before closing');
+});
+
+test('time: an implausible lag is pre-construction, not a market observation', () => {
+    // Real row from the feed: contracted 2023-10-17, closed 2026-07-31
+    const agreed = Engine.priceAgreedAt({ closeDate: '2026-07-31', contractDate: '2023-10-17' });
+    eq(new Date(agreed).toISOString().slice(0, 10), '2026-07-01', 'ignored, typical lag used');
+});
+
+test('time: comp age is measured to the valuation date, never negative', () => {
+    assertNear(Engine.compMonthsAgo({ closeDate: '2026-02-27', contractDate: '2026-01-28' }, '2026-07-28'),
+        6, 0.2, 'six months since the price was agreed');
+    eq(Engine.compMonthsAgo({ closeDate: '2027-01-01' }, '2026-01-01'), 0, 'a future comp is not negative');
+});
+
+test('time: a clean 8%/yr market is recovered from noisy sales', () => {
+    const asOf = '2026-08-27';
+    const g = Math.log(1.08) / 12;
+    const sales = [];
+    for (let i = 0; i < 300; i++) {
+        const monthsAgo = (i % 18) + 0.5;
+        const sqft = 1400 + ((i * 37) % 900);
+        const ppsf = 200 * Math.exp(-g * monthsAgo) * (1 + (((i * 7919) % 100) - 50) / 500);
+        const close = new Date(Date.parse(asOf) - monthsAgo * 30.44 * 86400000).toISOString().slice(0, 10);
+        sales.push({ price: Math.round(ppsf * sqft), sqft, closeDate: close, contractDate: close });
+    }
+    const t = Engine.deriveTimeAdjustment(sales, asOf);
+    assert(t.usable === true, 'a real trend is usable: ' + JSON.stringify(t));
+    assertNear(t.annualPct, 8, 1.5, 'rate recovered');
+    assert(t.ci95[0] < 8 && t.ci95[1] > 8, 'interval brackets the truth');
+});
+
+test('time: a wide confidence interval is reported FLAT, not as its midpoint', () => {
+    // The failure this guards against, seen live: 300 real Fort Worth sales
+    // fitted -25%/yr at an R-squared of 0.019 because the raw scatter let a
+    // few unusual houses set the slope. Applying that midpoint to a year-old
+    // comp would have turned pure noise into tens of thousands of dollars.
+    const asOf = '2026-08-27';
+    const sales = [];
+    for (let i = 0; i < 300; i++) {
+        const monthsAgo = (i % 18) + 0.5;
+        const sqft = 1400 + ((i * 37) % 900);
+        // price per foot swings wildly and independently of time
+        const ppsf = 200 * (1 + (((i * 104729) % 100) - 50) / 60);
+        const close = new Date(Date.parse(asOf) - monthsAgo * 30.44 * 86400000).toISOString().slice(0, 10);
+        sales.push({ price: Math.round(ppsf * sqft), sqft, closeDate: close, contractDate: close });
+    }
+    const t = Engine.deriveTimeAdjustment(sales, asOf);
+    assert(t.usable === false, 'must not be trusted: ' + JSON.stringify(t));
+    eq(t.annualPct, 0, 'applied rate is zero');
+    assert(t.rawAnnualPct !== 0, 'while still reporting what it fitted, for the record');
+});
+
+test('time: too little history returns null rather than a rate', () => {
+    assert(Engine.deriveTimeAdjustment([], '2026-08-27') === null);
+    const twoMonths = [];
+    for (let i = 0; i < 40; i++) {
+        twoMonths.push({ price: 300000, sqft: 1500, closeDate: '2026-08-0' + (1 + i % 9) });
+    }
+    assert(Engine.deriveTimeAdjustment(twoMonths, '2026-08-27') === null, 'one month is not a trend');
+});
+
+// ---- valuationInterval: the uncertainty gets stated, not hidden ----
+
+test('interval: a tight comp set earns a narrow band and high confidence', () => {
+    const r = Engine.valuationInterval(
+        { arv: 400000, spreadPct: 3.2, comps: [6, 8, 5, 9, 7].map(g => ({ grossAdjPct: g })) },
+        { pricePerSqftSpreadPct: 18, unverifiedComps: 0 });
+    eq(r.confidence, 'high');
+    assert(r.sigmaPct <= 8, 'narrow: ' + r.sigmaPct);
+    assert(r.low < 400000 && r.high > 400000, 'brackets the estimate');
+});
+
+test('interval: a messy set widens and NAMES every reason', () => {
+    // Pleasant Grove measured 31% MdAPE against Fort Worth southeast at 5.6%.
+    // The engine can see why; it should say so instead of presenting both the
+    // same way.
+    const r = Engine.valuationInterval(
+        { arv: 400000, spreadPct: 14, comps: [28, 31, 22].map(g => ({ grossAdjPct: g })) },
+        { pricePerSqftSpreadPct: 62, unverifiedComps: 2, trendUnusable: true });
+    eq(r.confidence, 'low');
+    assert(r.sigmaPct >= 25, 'wide: ' + r.sigmaPct);
+    assert(r.drivers.length >= 4, 'reasons given: ' + JSON.stringify(r.drivers));
+    assert(r.drivers.some(d => /\$\/sqft varies/.test(d)), 'local dispersion named');
+    assert(r.drivers.some(d => /unverified condition/.test(d)), 'condition named');
+});
+
+test('interval: the band never claims more precision than an appraiser does', () => {
+    // A flawless-looking comp set is still a house, not a share price
+    const r = Engine.valuationInterval(
+        { arv: 500000, spreadPct: 0, comps: [{ grossAdjPct: 1 }, { grossAdjPct: 1 }, { grossAdjPct: 1 },
+            { grossAdjPct: 1 }, { grossAdjPct: 1 }, { grossAdjPct: 1 }] },
+        { pricePerSqftSpreadPct: 5, unverifiedComps: 0 });
+    assert(r.sigmaPct >= 6, 'floored at 6%: ' + r.sigmaPct);
+});
+
+test('interval: thin evidence widens the band on its own', () => {
+    const base = { arv: 400000, spreadPct: 5 };
+    const many = Engine.valuationInterval({ ...base, comps: Array.from({ length: 6 }, () => ({ grossAdjPct: 8 })) }, {});
+    const few = Engine.valuationInterval({ ...base, comps: [{ grossAdjPct: 8 }, { grossAdjPct: 8 }, { grossAdjPct: 8 }] }, {});
+    assert(few.sigmaPct > many.sigmaPct, 'three comps is less certain than six');
+    assert(few.drivers.some(d => /only 3 comps/.test(d)));
+});
+
+test('interval: no ARV means no interval, not a band around zero', () => {
+    assert(Engine.valuationInterval({ arv: 0, comps: [] }, {}) === null);
+    assert(Engine.valuationInterval(null, {}) === null);
+});
+
 // ---- backtestMetrics: the panel, because MdAPE alone hides failures ----
 
 test('backtest: a perfect estimator scores perfectly on every statistic', () => {

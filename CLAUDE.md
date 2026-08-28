@@ -81,7 +81,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (114 tests as of 2026-08-27) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (126 tests as of 2026-08-27) AND `node worker/tests.mjs`
   (83 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
@@ -364,6 +364,32 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   returns first — an unfiltered query fills it with a studio condo and a
   mansion and the best comps are never fetched at all. `mlsComps()` widens
   geography before it loosens the material bands.
+- **The time adjustment is DERIVED and anchored on the CONTRACT date.** The
+  `/trend` route does a WIDE pull — same geography, deliberately NO size or
+  bedroom bands, 18 months — because a banded sample confounds price movement
+  with composition drift. `deriveTimeAdjustment()` aggregates to MONTHLY
+  MEDIANS of $/sqft before fitting: on a real 300-sale Fort Worth pull the raw
+  scatter fitted −25%/yr at R² 0.019, which the t-test waved through purely
+  because n was large. It then judges the CONFIDENCE INTERVAL, not a bare
+  t-statistic — a CI from −26% to +51% is an honest shrug, and applying its
+  midpoint to a year-old comp turns that shrug into dollars. Measured across
+  three DFW submarkets the reading is flat to slightly soft, so the old
+  hard-coded +2%/yr default was adding several points of upward adjustment to
+  every older comp. `compMonthsAgo()` ages comps from `PurchaseContractDate`
+  (100% populated on NTREIS; measured median lag to close is 30 days), because
+  close-date anchoring is late by that much on every comp in the same
+  direction. Measured effect: small but consistently favourable —
+  over-by-20% fell 27.3% → 23.9%, paired z=1.68, not significant on n=88.
+- **Confidence is a STATED INTERVAL, not a label** (`valuationInterval()`).
+  Measured error varies six-fold across DFW submarkets (Pleasant Grove 31%
+  MdAPE vs Fort Worth southeast 5.6%) and the old spread-only label could not
+  tell them apart. Width comes from comp disagreement, mean gross adjustment,
+  local $/sqft dispersion (INTERQUARTILE — max-minus-min is set by whichever
+  single house is weirdest), comp count, unverified-condition share, and
+  whether a market trend was measurable at all. Every contributor is NAMED in
+  the UI, because "low confidence" is a shrug and "local $/sqft varies by 33%"
+  is actionable. The multipliers are deliberate, not fitted — `backtest.mjs`
+  reports the band's actual coverage and they should be re-tuned from that.
 - **The GLA adjustment is DERIVED from the comps** (`deriveMarketRates()`),
   not a static default. The old fixed $50/sqft was a national rule of thumb;
   in a $317/sqft Fort Worth street the derived rate is $142, and the gap
