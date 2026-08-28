@@ -48,6 +48,29 @@ const arg = (name, fallback) => {
 };
 const flag = (name) => argv.includes('--' + name);
 
+/**
+ * Submarkets across the metroplex, not one affluent Fort Worth circle.
+ * The first measurement of this engine looked respectable because it was
+ * taken in 76109 at $317/sqft — which is neither where the volume is nor a
+ * fair test of a model that has to work in Pleasant Grove and Saginaw too.
+ * Comp density, price level and housing heterogeneity all differ enormously
+ * across these, and an average that hides that is not worth having.
+ */
+const DFW_AREAS = [
+  { name: 'FW east/Handley',   lat: 32.7460, lon: -97.2100 },
+  { name: 'FW north/Saginaw',  lat: 32.8600, lon: -97.3600 },
+  { name: 'FW southeast',      lat: 32.6700, lon: -97.2700 },
+  { name: 'Arlington',         lat: 32.7350, lon: -97.1080 },
+  { name: 'Grand Prairie',     lat: 32.7200, lon: -97.0000 },
+  { name: 'Irving',            lat: 32.8300, lon: -96.9500 },
+  { name: 'Dallas/Oak Cliff',  lat: 32.7300, lon: -96.8400 },
+  { name: 'Dallas/Pleasant Gr',lat: 32.7350, lon: -96.6800 },
+  { name: 'Mesquite',          lat: 32.7700, lon: -96.6000 },
+  { name: 'Garland',           lat: 32.9100, lon: -96.6300 },
+  { name: 'DeSoto/Duncanville',lat: 32.6200, lon: -96.8700 },
+  { name: 'Denton',            lat: 33.2100, lon: -97.1300 }
+];
+
 const CFG = {
   lat: parseFloat(arg('lat', '32.7085')),
   lon: parseFloat(arg('lon', '-97.3706')),
@@ -57,7 +80,12 @@ const CFG = {
   compRadius: parseFloat(arg('comp-radius', '1')),
   compMonths: parseInt(arg('comp-months', '12'), 10),
   pace: parseInt(arg('pace', '1500'), 10),     // ms between MLS calls
-  label: arg('label', 'baseline')
+  label: arg('label', 'baseline'),
+  // The buy box actually underwritten, so the measurement is of the deals
+  // that get done rather than of whatever happened to close nearby
+  priceMin: parseFloat(arg('price-min', '0')),
+  priceMax: parseFloat(arg('price-max', '0')),
+  metro: flag('metro')
 };
 
 // The settings the app itself defaults to, so the harness scores the model
@@ -182,6 +210,7 @@ async function scoreSale(sale, variant) {
     sqft: sale.sqft,
     yearBuilt: sale.yearBuilt,
     subdivision: sale.subdivision,
+    area: sale.area,
     spreadPct: Math.round(a.spreadPct * 10) / 10,
     confidence: a.confidence
   };
@@ -255,19 +284,38 @@ if (!health.mls) {
 }
 console.log('feed: ' + health.mls.name + ' (' + health.mls.transport + ')\n');
 
-const sample = await api('/backtest/sample?' + new URLSearchParams({
-  latitude: String(CFG.lat), longitude: String(CFG.lon),
-  radius: String(CFG.radius), months: String(CFG.months), limit: '300'
-}));
-console.log('drew ' + sample.count + ' closed sales' + (sample.truncated ? ' (server capped the result set)' : ''));
+const areas = CFG.metro ? DFW_AREAS : [{ name: 'custom', lat: CFG.lat, lon: CFG.lon }];
+const perArea = Math.max(1, Math.ceil(CFG.n / areas.length));
+const universe = [];
 
-// Spread the test sales across the window rather than taking the most recent
-// N — a block of same-month closings would measure one moment, not a market.
-const universe = sample.sales.slice();
-const stride = Math.max(1, Math.floor(universe.length / CFG.n));
-const chosen = [];
-for (let i = 0; i < universe.length && chosen.length < CFG.n; i += stride) chosen.push(universe[i]);
-console.log('scoring ' + chosen.length + ' of them\n');
+for (const area of areas) {
+  const q = new URLSearchParams({
+    latitude: String(area.lat), longitude: String(area.lon),
+    radius: String(CFG.radius), months: String(CFG.months), limit: '300'
+  });
+  if (CFG.priceMin) q.set('priceMin', String(CFG.priceMin));
+  if (CFG.priceMax) q.set('priceMax', String(CFG.priceMax));
+  try {
+    const s2 = await api('/backtest/sample?' + q);
+    // Spread within the area rather than taking its most recent closings — a
+    // block of same-month sales measures one moment, not a market
+    const pool = s2.sales || [];
+    const stride = Math.max(1, Math.floor(pool.length / perArea));
+    let taken = 0;
+    for (let i = 0; i < pool.length && taken < perArea; i += stride) {
+      universe.push({ ...pool[i], area: area.name });
+      taken++;
+    }
+    console.log('  ' + area.name.padEnd(22) + String(pool.length).padStart(4) + ' available, took ' + taken);
+  } catch (e) {
+    console.log('  ' + area.name.padEnd(22) + 'sample failed: ' + e.message);
+  }
+  await sleep(CFG.pace);
+}
+
+const chosen = universe.slice(0, CFG.n);
+console.log('\nscoring ' + chosen.length + ' sales across ' + areas.length
+  + ' submarket' + (areas.length === 1 ? '' : 's') + '\n');
 
 const byVariant = new Map(VARIANTS.map(v => [v.name, []]));
 const skipped = [];
@@ -310,7 +358,8 @@ if (primary.length >= 10) {
     ...stratify(primary, 'condition', r => r.anyUnverified ? 'some unverified' : 'all verified'),
     ...stratify(primary, 'price', r => r.actual < 400000 ? 'under 400k' : r.actual < 700000 ? '400-700k' : 'over 700k'),
     ...stratify(primary, 'size', r => r.sqft < 1600 ? 'under 1600sf' : r.sqft < 2200 ? '1600-2200sf' : 'over 2200sf'),
-    ...stratify(primary, 'pool', r => r.poolSize < 8 ? 'thin pool' : 'full pool')
+    ...stratify(primary, 'pool', r => r.poolSize < 8 ? 'thin pool' : 'full pool'),
+    ...stratify(primary, 'area', r => r.area || null)
   ];
   for (const s of strata) {
     console.log('  ' + s.stratum.padEnd(30)

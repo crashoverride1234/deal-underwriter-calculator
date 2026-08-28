@@ -1957,6 +1957,15 @@ function retsDmql(env, opts, f) {
   if (opts.bedsMin > 0 && opts.bedsMax > 0) {
     parts.push(`(${f.beds}=${Math.round(opts.bedsMin)}-${Math.round(opts.bedsMax)})`);
   }
+  // Price band. Only the back-test sampler uses this — a COMP search must
+  // never filter on price, which would be sales chasing. Here it selects the
+  // test universe, which is a different thing: measuring the engine on the
+  // deals actually underwritten rather than on whatever the street sold.
+  if (opts.priceMin > 0 || opts.priceMax > 0) {
+    const lo = Math.round(opts.priceMin || 1);
+    const hi = Math.round(opts.priceMax || 100000000);
+    parts.push(`(${f.closePrice}=${lo}-${hi})`);
+  }
   // GEOGRAPHY. DMQL2 has no radius operator, but Latitude and Longitude are
   // ordinary numeric fields and the "or greater" / "or less" suffixes work on
   // them — including on negative longitudes. Four criteria give a true
@@ -2582,6 +2591,8 @@ async function handleBacktestSample(params, env, cors) {
   const radius = Math.min(10, parseFloat(params.get('radius')) || 3);
   const months = Math.min(36, parseInt(params.get('months'), 10) || 24);
   const limit = Math.min(300, parseInt(params.get('limit'), 10) || 200);
+  const priceMin = parseFloat(params.get('priceMin')) || 0;
+  const priceMax = parseFloat(params.get('priceMax')) || 0;
   const f = mlsFields(env);
 
   try {
@@ -2591,6 +2602,7 @@ async function handleBacktestSample(params, env, cors) {
       subTypes: mlsSubTypes(env),
       lat, lon, radiusMi: radius, zip: params.get('zip') || '',
       sinceDays: Math.round(months * 30.44),
+      priceMin, priceMax,
       limit, orderby: 'closeDateDesc'
     });
     const sales = rows.map(r => ({
