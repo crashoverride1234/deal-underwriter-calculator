@@ -81,7 +81,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (126 tests as of 2026-08-27) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (127 tests as of 2026-08-27) AND `node worker/tests.mjs`
   (83 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.

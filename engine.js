@@ -1029,8 +1029,17 @@
             low: Math.round((arv - band) / 1000) * 1000,
             high: Math.round((arv + band) / 1000) * 1000,
             sigmaPct: Math.round(sigma * 10) / 10,
-            // Tiers follow Freddie's HVE convention for forecast deviation
+            // Tiers follow Freddie's HVE convention for forecast deviation.
+            // MEASURED 2026-08-27, n=84: the BAND WIDTH is roughly right
+            // (77.4% coverage against a 68% target) but these TIERS RANK
+            // BACKWARDS — deals labelled 'low' came in at 7.4% MdAPE against
+            // 10.4% for 'high' and 'medium'. Something in the width drivers
+            // correlates with data-rich neighbourhoods where the engine does
+            // WELL, so the word is presently worse than no word. It is kept
+            // here for the back-test to keep scoring, and the UI deliberately
+            // shows the ± width instead until the ranking is earned.
             confidence: sigma <= 13 ? 'high' : sigma <= 20 ? 'medium' : 'low',
+            tierIsCalibrated: false,
             drivers
         };
     }

@@ -3163,9 +3163,20 @@ function recalcAppraisal() {
         ? `${formatCurrency(band.low)} – ${formatCurrency(band.high)}`
         : `${formatCurrency(a.low)} – ${formatCurrency(a.high)}`;
 
-    const conf = CONFIDENCE_STYLES[band ? band.confidence : a.confidence];
-    arvConfidenceValue.textContent = conf.label;
-    arvConfidenceCard.className = `metric-card ${conf.card}`;
+    // The card states the WIDTH, not a confidence word. Measured on 84 closed
+    // sales, the band width is about right (77% coverage against a 68%
+    // target) but the high/medium/low tiering ranks backwards — deals it
+    // called "low" came in at 7.4% MdAPE against 10.4% for "high". A label
+    // that misranks is worse than no label, so until the ranking is earned
+    // the card shows a fact instead of a claim.
+    if (band) {
+        arvConfidenceValue.textContent = `±${band.sigmaPct}%`;
+        arvConfidenceCard.className = 'metric-card';
+    } else {
+        const conf = CONFIDENCE_STYLES[a.confidence];
+        arvConfidenceValue.textContent = conf.label;
+        arvConfidenceCard.className = `metric-card ${conf.card}`;
+    }
     if (band && a.comps.length) {
         // Name what is driving the width. "Low confidence" on its own is a
         // shrug; "local $/sqft varies by 62%" is something you can act on.

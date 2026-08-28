@@ -874,6 +874,16 @@ test('interval: thin evidence widens the band on its own', () => {
     assert(few.drivers.some(d => /only 3 comps/.test(d)));
 });
 
+test('interval: the tier is flagged uncalibrated until it earns its ranking', () => {
+    // Measured on 84 closed sales: the band WIDTH is about right (77.4%
+    // coverage against a 68% target) but the tiers rank backwards — deals
+    // labelled low came in at 7.4% MdAPE against 10.4% for high. The engine
+    // says so rather than letting the UI present a misleading word.
+    const r = Engine.valuationInterval({ arv: 400000, spreadPct: 5, comps: [{ grossAdjPct: 8 }] }, {});
+    eq(r.tierIsCalibrated, false, 'the tier must not be presented as trustworthy');
+    assert(typeof r.sigmaPct === 'number', 'the width itself is measured and usable');
+});
+
 test('interval: no ARV means no interval, not a band around zero', () => {
     assert(Engine.valuationInterval({ arv: 0, comps: [] }, {}) === null);
     assert(Engine.valuationInterval(null, {}) === null);
