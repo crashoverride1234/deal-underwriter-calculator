@@ -194,6 +194,13 @@ async function scoreSale(sale, variant) {
   const a = Engine.appraise({ subject, comps, settings });
   if (!(a.arv > 0)) return { skipped: 'no ARV' };
 
+  // Does the test sale read as a retail transaction, or as a distressed /
+  // investor one? Its own remarks and days-on-market are the only signals
+  // available, and both are already in hand from the sample.
+  const own = Engine.classifyCondition(sale.remarks, sale.propertyCondition);
+  const looksDistressed = Boolean(own && own.condition === 'dated');
+  const veryFast = Number.isFinite(sale.dom) && sale.dom >= 0 && sale.dom <= 7;
+
   return {
     id: sale.mlsNumber || sale.address,
     address: sale.address,
@@ -212,7 +219,10 @@ async function scoreSale(sale, variant) {
     subdivision: sale.subdivision,
     area: sale.area,
     spreadPct: Math.round(a.spreadPct * 10) / 10,
-    confidence: a.confidence
+    confidence: a.confidence,
+    subjectLooksDistressed: looksDistressed,
+    subjectVeryFast: veryFast,
+    subjectDom: sale.dom
   };
 }
 
@@ -359,7 +369,9 @@ if (primary.length >= 10) {
     ...stratify(primary, 'price', r => r.actual < 400000 ? 'under 400k' : r.actual < 700000 ? '400-700k' : 'over 700k'),
     ...stratify(primary, 'size', r => r.sqft < 1600 ? 'under 1600sf' : r.sqft < 2200 ? '1600-2200sf' : 'over 2200sf'),
     ...stratify(primary, 'pool', r => r.poolSize < 8 ? 'thin pool' : 'full pool'),
-    ...stratify(primary, 'area', r => r.area || null)
+    ...stratify(primary, 'area', r => r.area || null),
+    ...stratify(primary, 'test sale', r => r.subjectLooksDistressed ? 'reads distressed' : 'reads retail'),
+    ...stratify(primary, 'test DOM', r => r.subjectVeryFast ? 'sold in <=7 days' : 'normal marketing time')
   ];
   for (const s of strata) {
     console.log('  ' + s.stratum.padEnd(30)
