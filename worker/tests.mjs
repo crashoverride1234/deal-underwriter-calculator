@@ -855,6 +855,98 @@ test('mls + TAD: the land/improvement split arrives only from the parcel roll', 
     eq(merged.assessedLand, 95000);
 });
 
+// ---- Address lookup: the subject must be the house that was asked for ----
+// Regression suite for the bug where /lookup returned the SAME NTREIS listing
+// (3101 Long Prairie Road) for every address typed. Three defects stacked:
+// the RETS record query carried no address criteria at all, the wrong-house
+// guard read UnparsedAddress (which NTREIS does not publish, so it was always
+// empty), and the guard failed OPEN on an empty candidate — so "first row of
+// an unfiltered search" was accepted as the subject property.
+
+test('address: strict match rejects a candidate that will not parse', () => {
+    // The exact shape of the bug: NTREIS rows have no UnparsedAddress, so the
+    // candidate arrived empty and the open guard waved it through.
+    eq(W.streetMatchStrict('900 W Rosedale St, Fort Worth, TX 76104', ''), false, 'empty');
+    eq(W.streetMatchStrict('900 W Rosedale St', undefined), false, 'undefined');
+    eq(W.streetMatchStrict('900 W Rosedale St', 'Rosedale St'), false, 'no house number');
+});
+
+test('address: strict match still accepts the same house written differently', () => {
+    assert(W.streetMatchStrict('900 W Rosedale St, Fort Worth, TX 76104',
+        '900 Rosedale Street, Fort Worth, Texas 76104'), 'suffix + directional differ');
+    assert(W.streetMatchStrict('3529 W Rogers Ave S', '3529 Rogers Ave'), 'directionals stripped');
+});
+
+test('address: strict match rejects a different house', () => {
+    eq(W.streetMatchStrict('900 W Rosedale St, Fort Worth, TX 76104',
+        '3101 Long Prairie Road, Flower Mound, Texas 75022'), false, 'the bug, verbatim');
+    eq(W.streetMatchStrict('900 Rosedale St', '902 Rosedale St'), false, 'neighbour');
+    eq(W.streetMatchStrict('900 Rosedale St', '900 Magnolia Ave'), false, 'same number, other street');
+});
+
+test('address: the open matcher stays open — its callers rely on it', () => {
+    // TAD and the realtor enrich rung have already established the property
+    // by geometry or by a resolved mpr_id; an unparseable line there means
+    // "cannot disprove", and tightening it would discard good records.
+    eq(W.streetMatch('900 W Rosedale St', ''), true, 'still fails open');
+    eq(W.streetMatch('900 Rosedale St', '902 Rosedale St'), false, 'but still catches a real mismatch');
+});
+
+test('address: a NTREIS-shaped row composes a line the strict matcher accepts', () => {
+    // The composed line is the ONLY usable street line on this feed. Reading
+    // the raw address field instead is what produced the empty candidate.
+    const f = W.mlsFields({});
+    const row = {
+        StreetNumber: '900', StreetDirPrefix: 'W', StreetName: 'Rosedale',
+        StreetSuffix: 'St', City: 'Fort Worth', StateOrProvince: 'TX', PostalCode: '76104'
+    };
+    eq(W.mlsFlat(row[f.address]), null, 'no UnparsedAddress on this feed');
+    eq(W.mlsStreetAddress(row, f), '900 W Rosedale St', 'composed line');
+    assert(W.streetMatchStrict('900 W Rosedale St, Fort Worth, TX 76104',
+        W.mlsStreetAddress(row, f)), 'composed line confirms the subject');
+});
+
+test('rets: a record lookup filters on the address, not just status', () => {
+    const q = W.retsDmql({}, {
+        statuses: ['CLS', 'ACT'], streetNumber: '900', streetName: 'ROSEDALE', zip: '76104'
+    }, W.mlsFields({}));
+    assert(q.includes('(StreetNumber=900)'), 'exact house number: ' + q);
+    assert(q.includes('(StreetName=ROSEDALE*)'), 'street name prefix: ' + q);
+    assert(q.includes('(PostalCode=76104)'), 'postcode narrows it further: ' + q);
+});
+
+test('rets: without address criteria a record query would scan the whole feed', () => {
+    // Documents why the criteria above are not optional: this is exactly the
+    // query the old code sent, and its first row is an arbitrary listing.
+    const q = W.retsDmql({}, { statuses: ['CLS', 'ACT', 'PND'] }, W.mlsFields({}));
+    eq(q, '(StandardStatus=|CLS,ACT,PND)', 'status alone bounds nothing');
+});
+
+test('rets: address values are stripped of DMQL2 punctuation', () => {
+    // A value carrying a comma, pipe or paren does not fail — it silently
+    // changes the query into a different one, which is far worse.
+    eq(W.dmqlToken('O\'Connor'), 'OCONNOR');
+    eq(W.dmqlToken('Foo,Bar|(Baz)'), 'FOOBARBAZ');
+    eq(W.dmqlToken('rosedale'), 'ROSEDALE', 'upper-cased');
+    eq(W.dmqlToken(null), '', 'null is not the string "null"');
+    const q = W.retsDmql({}, { statuses: ['CLS'], streetName: 'A,B)|(C' }, W.mlsFields({}));
+    assert(q.includes('(StreetName=ABC*)'), 'sanitized into one criterion: ' + q);
+});
+
+test('address: a typed line yields the house number and street the query needs', () => {
+    const p = W.parseStreetLine('900 W Rosedale St, Fort Worth, TX 76104');
+    eq(p.no, 900, 'house number');
+    eq(p.name, 'ROSEDALE', 'directional dropped, suffix not reached');
+    eq(W.parseStreetLine('Rosedale St'), null, 'no house number = not an address line');
+});
+
+test('address: the postcode regex actually matches five digits', () => {
+    // It read /(d{5})/ — five literal letter d's — so the coordinate rung
+    // never narrowed by postcode and the typo was invisible.
+    eq((/\b(\d{5})\b/.exec('900 W Rosedale St, Fort Worth, TX 76104') || [, ''])[1], '76104');
+    eq((/(d{5})/.exec('900 W Rosedale St, Fort Worth, TX 76104') || [, ''])[1], '', 'the old form');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

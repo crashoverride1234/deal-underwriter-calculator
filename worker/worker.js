@@ -827,21 +827,39 @@ function inTarrant(lat, lon) {
 // input doesn't block — this is a wrong-house guard, not a validator.
 const DIRECTIONALS = ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW', 'NORTH', 'SOUTH', 'EAST', 'WEST'];
 
+function parseStreetLine(line) {
+  const m = /^(\d+)\s*(\d+\/\d+)?\s+(.+)$/.exec(String(line || '').toUpperCase().trim());
+  if (!m) return null;
+  const toks = m[3].replace(/[^A-Z0-9/ ]/g, ' ').split(/\s+/)
+    .filter(t => t && DIRECTIONALS.indexOf(t) === -1);
+  return { no: parseInt(m[1], 10), frac: m[2] || null, name: toks[0] || '' };
+}
+
+// Fails OPEN, deliberately. Every caller of this form has ALREADY established
+// the property by other means — a parcel the geometry landed inside, an
+// mpr_id resolved for the address — so an unparseable line means "cannot
+// disprove", not "wrong house", and rejecting it would discard good data.
 function streetMatch(reqAddress, candAddress) {
-  const parse = (s) => {
-    const m = /^(\d+)\s*(\d+\/\d+)?\s+(.+)$/.exec(String(s || '').toUpperCase().trim());
-    if (!m) return null;
-    const toks = m[3].replace(/[^A-Z0-9/ ]/g, ' ').split(/\s+/)
-      .filter(t => t && DIRECTIONALS.indexOf(t) === -1);
-    return { no: parseInt(m[1], 10), frac: m[2] || null, name: toks[0] || '' };
-  };
-  const a = parse(reqAddress);
-  const b = parse(candAddress);
+  const a = parseStreetLine(reqAddress);
+  const b = parseStreetLine(candAddress);
   if (!a || !b) return true;
   if (a.no !== b.no) return false;
   if ((a.frac || b.frac) && a.frac !== b.frac) return false;
   if (a.name && b.name && a.name !== b.name) return false;
   return true;
+}
+
+// Fails CLOSED. Use this wherever the address match is the ONLY thing tying a
+// row to the subject — picking one row out of a search result, say. There an
+// unparseable or empty candidate means "cannot confirm", and admitting it
+// hands the subject an unrelated property's record.
+function streetMatchStrict(reqAddress, candAddress) {
+  const a = parseStreetLine(reqAddress);
+  const b = parseStreetLine(candAddress);
+  if (!a || !b) return false;
+  if (a.no !== b.no) return false;
+  if ((a.frac || b.frac) && a.frac !== b.frac) return false;
+  return Boolean(a.name) && a.name === b.name;
 }
 
 async function tadRecord(lat, lon, address) {
@@ -1900,6 +1918,16 @@ function retsSelectList(env) {
 
 // DMQL2 has no geography. Date and status are expressible; the spatial cut is
 // done here from the returned Latitude/Longitude columns (see mlsSearch).
+// DMQL2 punctuation is load-bearing in every direction: parentheses delimit
+// criteria, a comma is AND between them and OR inside a value list, the pipe
+// marks a lookup list, the tilde negates, +/- are the range suffixes and the
+// asterisk is the wildcard. A value interpolated into a query therefore has
+// to be reduced to characters that cannot be read as syntax — anything else
+// silently changes what was asked rather than failing loudly.
+function dmqlToken(v) {
+  return String(v == null ? '' : v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 function retsDmql(env, opts, f) {
   if (opts._rawQuery) return opts._rawQuery; // /mls/probe?dmql= diagnostic
   const parts = [];
@@ -1948,6 +1976,22 @@ function retsDmql(env, opts, f) {
   // different market. Lookup value list, so the pipe prefix applies.
   if (opts.subTypes && opts.subTypes.length) {
     parts.push(`(${f.propSubType}=|${opts.subTypes.join(',')})`);
+  }
+  // ADDRESS. A record lookup is not a geographic search — it wants one known
+  // house — and DMQL2 has no contains()/startswith() to point at a one-line
+  // address. NTREIS publishes the parsed components instead, so an exact
+  // StreetNumber plus a prefix match on StreetName cuts the whole feed to a
+  // handful of rows. WITHOUT these the query is bounded only by status and
+  // property type, i.e. the entire residential MLS, and the caller's "first
+  // matching row" is simply whatever the server happened to return first.
+  if (opts.streetNumber) {
+    parts.push(`(${f.streetNumber}=${dmqlToken(opts.streetNumber)})`);
+  }
+  // Prefix, not exact: StreetName holds "Rosedale" while a typed line carries
+  // the directional and the suffix too. The precise test is the client-side
+  // streetMatchStrict — this criterion only has to shrink the result set.
+  if (opts.streetName) {
+    parts.push(`(${f.streetName}=${dmqlToken(opts.streetName)}*)`);
   }
   // MATERIAL BANDS. The single biggest reason the old comp sets were junk:
   // the query asked only "closed, nearby, recent" and left every size and
@@ -2376,40 +2420,62 @@ function mlsLeaseTypes(env) {
 async function mlsRecord(env, address, lat, lon) {
   const f = mlsFields(env);
   const anyStatus = [].concat(mlsStatuses(env, 'closed'), mlsStatuses(env, 'active'), mlsStatuses(env, 'pending'));
+  const isRets = mlsTransport(env) === 'rets';
+  const zip = (/\b(\d{5})\b/.exec(address || '') || [, ''])[1];
+  // The row's street line has to be COMPOSED. Reading f.address raw returns
+  // undefined on any feed without UnparsedAddress (NTREIS is one), and an
+  // empty candidate used to sail through the fail-open guard below — which
+  // meant the first row of the result set was accepted as the subject.
+  const lineOf = (r) => mlsStreetAddress(r, f);
 
   if (address) {
-    const houseNum = (/\b(\d+)\b/.exec(address) || [, ''])[1];
+    const parsed = parseStreetLine(address);
+    const houseNum = parsed ? String(parsed.no) : '';
     const street = address.replace(/^\s*\d+\s+/, '').split(',')[0].trim();
     if (houseNum && street) {
       // contains() rather than eq: UnparsedAddress formatting (unit numbers,
       // directional prefixes, "Rd" vs "Road") rarely matches a typed string
       const filter = `contains(${f.address},${odataStr(street.split(/\s+/)[0])}) and startswith(${f.address},${odataStr(houseNum)})`;
-      try {
-        const rows = await mlsSearch(env, {
-          statuses: anyStatus, propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
-          extraFilter: mlsTransport(env) === 'rets' ? null : filter,
-          limit: 25, orderby: 'closeDateDesc'
-        });
-        const hit = rows.find(r => streetMatch(address, mlsFlat(r[f.address])));
-        if (hit) return mlsToRecord(hit, env);
-      } catch (e) {
-        // contains/startswith are optional OData functions; a feed that
-        // rejects them still answers the coordinate query below
-        if (!/HTTP 400/.test(e.message)) throw e;
+      // RETS has no such functions, so it filters on the parsed components.
+      // Two passes: the narrow one, then house number alone — DMQL2 string
+      // comparison is case-sensitive on some servers, and a StreetName that
+      // fails to match must cost a second round trip, not the whole lookup.
+      const passes = isRets
+        ? [{ streetNumber: houseNum, streetName: parsed.name, zip },
+           { streetNumber: houseNum }]
+        : [{ extraFilter: filter }];
+      for (const pass of passes) {
+        try {
+          const rows = await mlsSearch(env, {
+            statuses: anyStatus, propertyTypes: mlsPropertyTypes(env),
+            propertyTypesExplicit: mlsTypesExplicit(env),
+            limit: 25, orderby: 'closeDateDesc', ...pass
+          });
+          // STRICT. Nothing else here ties a row to the subject: no parcel
+          // geometry, no resolved listing id, just the search criteria — and
+          // a search that came back wider than intended is exactly the case
+          // this has to catch. A row it cannot confirm is not the subject.
+          const hit = rows.find(r => streetMatchStrict(address, lineOf(r)));
+          if (hit) return mlsToRecord(hit, env);
+        } catch (e) {
+          // contains/startswith are optional OData functions; a feed that
+          // rejects them still answers the coordinate query below
+          if (!/HTTP 400/.test(e.message)) throw e;
+        }
       }
     }
   }
 
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    const zip = (/(d{5})/.exec(address || '') || [, ''])[1];
     const rows = await mlsSearch(env, {
       statuses: anyStatus, propertyTypes: mlsPropertyTypes(env), propertyTypesExplicit: mlsTypesExplicit(env),
       lat, lon, radiusMi: 0.05, zip, limit: 10, orderby: 'closeDateDesc'
     });
     // Same wrong-house guard the TAD rung uses: a geocode landing on the
-    // neighbour's roof must not fill this property's data
+    // neighbour's roof must not fill this property's data. Fail-open is
+    // right here and only here — the 0.05 mi box has already placed the row.
     const hit = address
-      ? rows.find(r => streetMatch(address, mlsFlat(r[f.address])))
+      ? rows.find(r => streetMatch(address, lineOf(r)))
       : rows[0];
     if (hit) return mlsToRecord(hit, env);
   }
@@ -3461,5 +3527,5 @@ export {
   parseDigestChallenge, digestAuthHeader, digestUri, md5Hex, mergeCookies, retsCookie, retsReplyText,
   suggestFieldMapFromMetadata, MLS_FIELD_CANDIDATES,
   odataStr, odataDay, mlsOrFilter,
-  mergeRecords, milesBetween, streetMatch
+  mergeRecords, milesBetween, streetMatch, streetMatchStrict, parseStreetLine, dmqlToken
 };

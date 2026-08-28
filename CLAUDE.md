@@ -82,7 +82,7 @@ GitHub Pages from `main`.
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
 - **Test**: `node tests.js` (127 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (83 MLS-transport tests). Both must pass before deploy.
+  (93 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -364,6 +364,28 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   returns first — an unfiltered query fills it with a studio condo and a
   mansion and the best comps are never fetched at all. `mlsComps()` widens
   geography before it loosens the material bands.
+- **The subject lookup is filtered at the source too, and its address guard
+  fails CLOSED.** `mlsRecord()` shipped asking RETS for nothing but status +
+  property type — the OData `contains()/startswith()` filter was skipped for
+  RETS (correctly, DMQL2 has neither) and nothing replaced it — then picked
+  the first row whose address matched. That guard read `f.address`
+  (`UnparsedAddress`), which NTREIS does not publish, so the candidate was
+  always empty; `streetMatch()` fails OPEN on an unparseable side, so row 0 of
+  an unfiltered whole-MLS query was accepted as the subject. Net effect: every
+  address returned the same listing, and because the MLS rung carries
+  `UnexemptTaxes` it satisfied the "has a tax bill" test and ended the ladder
+  before any other provider could correct it. Three rules fall out. DMQL2
+  filters on the PARSED components (`(StreetNumber=900),(StreetName=ROSEDALE*)`
+  — prefix, since StreetName holds neither the directional nor the suffix),
+  with a second pass on house number alone because DMQL2 string comparison is
+  case-sensitive on some servers. Any row's street line must come from
+  `mlsStreetAddress()`, never the raw field. And `streetMatchStrict()` is used
+  wherever the address is the ONLY thing tying a row to the subject —
+  `streetMatch()`'s fail-open is correct ONLY where parcel geometry or a
+  resolved `mpr_id` already established the property (TAD, realtor enrich).
+  Verified live: 5/5 Dallas addresses return their own record, exact sqft and
+  year. `dmqlToken()` strips DMQL2 punctuation from any interpolated value —
+  a stray comma or pipe silently rewrites the query rather than erroring.
 - **The time adjustment is DERIVED and anchored on the CONTRACT date.** The
   `/trend` route does a WIDE pull — same geography, deliberately NO size or
   bedroom bands, 18 months — because a banded sample confounds price movement

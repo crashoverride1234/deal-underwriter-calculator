@@ -3296,7 +3296,11 @@ function setLookupStatus(message, kind) {
 // Bump the version whenever records gain fields — older cached entries
 // would otherwise silently auto-fill without the new fields forever
 // (v2: subdivision/hoa; v3: facts/construction/financial/owner details)
-const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v4';
+// v5 is a POISON eviction, not a shape change: the worker's MLS rung briefly
+// answered EVERY address with the same listing, and those records cached under
+// each address that was tried. A wrong record keyed to a right address is the
+// one thing this cache cannot heal on its own — non-MLS entries never expire.
+const PROPERTY_CACHE_KEY = 'underwriter-property-cache-v5';
 
 // MLS licences cap how long a licensee may hold the compilation locally and
 // require refreshing against the source. Public-record and portal data carry
