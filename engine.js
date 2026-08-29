@@ -1193,6 +1193,216 @@
         return out;
     }
 
+    // ---- Comp-selection / adjustment asymmetry ----
+    /**
+     * Is the grid treating expensive comps and cheap comps the same way?
+     *
+     * The question comes from CoreLogic (Mayer & Nothaft, 2015-16 purchase
+     * appraisals): 69% of appraiser-selected comps were priced ABOVE the
+     * subject, and a comp above got only 0.36% of downward adjustment per 1%
+     * of price gap against 0.77% upward for one below. A grid that behaves the
+     * same way over-values, which is the worst direction for an underwriter.
+     *
+     * NOTHING HERE RAISES A WARNING, AND THE FUNCTION IS NOT WIRED TO THE UI.
+     * A per-deal warning was built on the sign structure below and withdrawn
+     * after measurement: "every comp in this blend was adjusted upward"
+     * separated by +4.3 points of median signed error on one 156-sale sample
+     * and by +0.3 on an independent 132-sale one. Two draws from the same feed
+     * disagreeing that far is sampling noise, not a signal, and it fired on a
+     * third of all deals. This is the tierIsCalibrated lesson applied BEFORE
+     * shipping rather than after.
+     *
+     * This returns TWO things with very different evidentiary standing.
+     *
+     * 1. THE SIGN STRUCTURE — always computed, needs no reference. How many
+     *    comps were adjusted up, how many down, and whether the conclusion
+     *    clears every comp outright. These are arithmetic facts about the
+     *    blend, true without calibration, and backtest.mjs stratifies on them.
+     *    They are NOT evidence about a particular deal's error.
+     *
+     * 2. THE RETENTION SLOPES — the CoreLogic measurement proper, and they are
+     *    computed ONLY against an exogenous `opts.reference`. There is no
+     *    fallback, so the app cannot obtain them and `backtest.mjs`, which
+     *    knows the actual close price, can. That refusal is load-bearing:
+     *
+     *    - The appraisal's OWN conclusion is disqualified: the ARV is the
+     *      weighted mean of the adjusted comps, so `sum(w*(A - ARV)) = 0`
+     *      identically. MEASURED, that reference put 29% of comps above the
+     *      subject where the truth was 46% — a 17-point misread.
+     *    - Median $/sqft x subject sqft is disqualified too, which is less
+     *      obvious and worse. `deriveMarketRates()` builds the GLA rate from
+     *      that SAME median for 127 of 180 real comp sets (70.6%), so on
+     *      7 deals in 10 the statistic would regress a constant against
+     *      itself. Fed a market where every house trades at exactly $200/sqft
+     *      — where asymmetry is impossible by construction — that pairing
+     *      returns retentionAbove 0.634, against CoreLogic's published 0.64.
+     *      It would have looked like a replication of the literature and been
+     *      an artefact of GLA_FRACTION_OF_PPSF. That case is pinned in tests.
+     *    - A median of raw prices is disqualified for splitting its own
+     *      sample: half the comps sit above it by construction.
+     *
+     * ZERO IS NOT THE NULL FOR `retentionGap`. A self-consistent grid traces
+     * y = -x/(1+x), which is convex, so a straight line through the origin
+     * reads shallower than -1 above the subject and steeper below it. At the
+     * +/-15% gaps typical of a real comp set a PERFECT grid still shows a
+     * retentionGap near +0.33 (pinned in tests.js). Read the statistic against
+     * that floor, never against zero.
+     *
+     * AND THE SLOPES DO NOT GRADE A DEAL. MEASURED on 156 DFW retail sales,
+     * every slope-based rule tried either ranked BACKWARDS or did nothing: a
+     * retention gap over 0.40 fired on deals averaging 3.5% error against 5.8%
+     * for the rest (-2.2 points, the wrong way), and retentionAbove > 1.10
+     * separated by 0.8 points on an 8.7 vs 9.4 MdAPE. Four comps cannot
+     * support a two-sided regression; pool them across many sales with
+     * pooledRetention() instead. `slopesAreCalibrated: false` says so in the
+     * return value, following the tierIsCalibrated precedent.
+     *
+     * NO SKEW WARNING IS RAISED, against the hypothesis that prompted this.
+     * MEASURED against the known close price, the median comp set is 50% above
+     * the subject and the mean 46% — CoreLogic's 69% does not replicate here,
+     * and it has no mechanism to: scoreComp() ranks on size, distance, age and
+     * rooms, and never looks at price at all.
+     */
+    function compAdjustmentAsymmetry(appraisal, opts) {
+        const a = appraisal || {};
+        const o = opts || {};
+        const blended = Array.isArray(a.comps) ? a.comps.filter(c => num(c.salePrice) > 0) : [];
+        if (!blended.length) return null;
+
+        // A net adjustment is negative every time a comp is superior to the
+        // subject, and the SIGN is the entire subject of this function —
+        // num() clamps at zero (deliberately, for the money inputs it was
+        // written for), so reading a net adjustment through it would report
+        // that no comp is ever adjusted down. Same reason storyAdj and
+        // annualAppreciationPct are read with parseFloat in appraise().
+        const signed = (v) => {
+            const n = typeof v === 'number' ? v : parseFloat(v);
+            return Number.isFinite(n) ? n : 0;
+        };
+        const rows = blended.map(c => ({
+            price: num(c.salePrice),
+            net: signed(c.netAdjustment),
+            y: signed(c.netAdjustment) / num(c.salePrice),
+            w: num(c.weight)
+        }));
+
+        const weightSum = rows.reduce((s, p) => s + p.w, 0);
+        const compsAdjustedUp = rows.filter(p => p.net > 0).length;
+        const compsAdjustedDown = rows.filter(p => p.net < 0).length;
+        const allCompsAdjustedUp = rows.every(p => p.net > 0);
+        const arv = num(a.arv);
+        const arvAboveEveryComp = arv > 0 && rows.every(p => arv > p.price);
+
+        const out = {
+            n: rows.length,
+            compsAdjustedUp,
+            compsAdjustedDown,
+            weightedMeanAdjPct: weightSum > 0
+                ? Math.round(1000 * rows.reduce((s, p) => s + p.w * p.y, 0) / weightSum) / 10
+                : 0,
+            allCompsAdjustedUp,
+            arvAboveEveryComp,
+            // Reference-dependent, and null unless an exogenous one was given
+            reference: null, nAbove: null, nBelow: null, shareAbovePct: null,
+            meanGapPct: null, above: null, below: null, retentionGap: null,
+            slopesAreCalibrated: false
+        };
+
+        const reference = num(o.reference);
+        if (!(reference > 0) || rows.length < 3) return out;
+
+        const fit = twoSidedRetention(rows.map(p => ({
+            price: p.price, net: p.net, reference
+        })));
+        out.reference = Math.round(reference);
+        out.nAbove = fit.nAbove;
+        out.nBelow = fit.nBelow;
+        out.shareAbovePct = fit.shareAbovePct;
+        out.meanGapPct = fit.meanGapPct;
+        out.above = fit.above;
+        out.below = fit.below;
+        out.retentionGap = fit.retentionGap;
+        return out;
+    }
+
+    // A comp within half a percent of the reference is neither above nor
+    // below it — counting it as either would put a near-zero denominator into
+    // a slope and let rounding pick the side.
+    const RETENTION_DEAD_BAND = 0.005;
+
+    /**
+     * The two-sided through-origin fit itself, over any set of comps that
+     * carry their own reference. Shared by the per-appraisal function and by
+     * pooledRetention().
+     *
+     * Through the origin because a comp priced AT the subject needs no net
+     * adjustment, so the fit is not free to buy agreement with an intercept.
+     * Sum-of-squares weighting also makes a near-zero gap contribute
+     * near-zero, where a mean of per-comp ratios would explode.
+     */
+    function twoSidedRetention(points) {
+        const pts = (points || [])
+            .filter(p => p && num(p.price) > 0 && num(p.reference) > 0)
+            .map(p => {
+                const n = typeof p.net === 'number' ? p.net : parseFloat(p.net);
+                return {
+                    x: (num(p.price) - num(p.reference)) / num(p.reference),
+                    y: (Number.isFinite(n) ? n : 0) / num(p.price)
+                };
+            });
+        const above = pts.filter(p => p.x > RETENTION_DEAD_BAND);
+        const below = pts.filter(p => p.x < -RETENTION_DEAD_BAND);
+        const side = (arr) => {
+            if (!arr.length) return null;
+            let sxy = 0, sxx = 0;
+            arr.forEach(p => { sxy += p.x * p.y; sxx += p.x * p.x; });
+            if (!(sxx > 1e-12)) return null;
+            const slope = sxy / sxx;
+            return {
+                n: arr.length,
+                slope: Math.round(slope * 1000) / 1000,
+                retention: Math.round((1 + slope) * 1000) / 1000,
+                meanGapPct: Math.round(1000 * arr.reduce((s, p) => s + p.x, 0) / arr.length) / 10,
+                // One comp far from the reference can set the whole slope.
+                // 1.0 means a single comp IS the slope.
+                leverage: Math.round(100 * Math.max.apply(null, arr.map(p => p.x * p.x)) / sxx) / 100
+            };
+        };
+        const aboveFit = side(above);
+        const belowFit = side(below);
+        return {
+            n: pts.length,
+            nAbove: above.length,
+            nBelow: below.length,
+            shareAbovePct: pts.length ? Math.round(1000 * above.length / pts.length) / 10 : null,
+            meanGapPct: pts.length
+                ? Math.round(1000 * pts.reduce((s, p) => s + p.x, 0) / pts.length) / 10 : null,
+            above: aboveFit,
+            below: belowFit,
+            retentionGap: (aboveFit && belowFit)
+                ? Math.round((aboveFit.retention - belowFit.retention) * 1000) / 1000
+                : null
+        };
+    }
+
+    /**
+     * The same measurement POOLED across many appraisals — which is the only
+     * scale at which it means anything.
+     *
+     * A single blend offers four comps and perhaps two a side, which cannot
+     * support a two-sided regression: measured, the per-deal statistic fires
+     * on roughly a fifth of symmetric grids and a fifth of asymmetric ones.
+     * Several hundred comps drawn from several hundred sales, each carrying
+     * its own known close price as the reference, is a different question and
+     * an answerable one. This is what backtest.mjs calls.
+     *
+     * points: [{ price, net, reference }] — one entry per comp per sale.
+     */
+    function pooledRetention(points) {
+        const fit = twoSidedRetention(points);
+        return fit.n >= 20 ? fit : null;
+    }
+
     function backtestMetrics(pairs) {
         const rows = (pairs || []).filter(p =>
             p && num(p.estimate) > 0 && num(p.actual) > 0);
@@ -1606,5 +1816,6 @@
         deriveMarketRates, pricePerSqftOutliers, reconcileCondition,
         backtestMetrics, pairedComparison, scoreComp,
         deriveTimeAdjustment, compMonthsAgo, priceAgreedAt, valuationInterval,
-        breakEven, bracketingDefects, neighborhoodTaxRate };
+        breakEven, bracketingDefects, neighborhoodTaxRate,
+        compAdjustmentAsymmetry, pooledRetention, twoSidedRetention };
 }));

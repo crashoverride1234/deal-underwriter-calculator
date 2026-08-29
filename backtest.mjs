@@ -263,6 +263,13 @@ async function scoreSale(sale, variant) {
   const looksDistressed = Boolean(own && own.condition === 'dated');
   const veryFast = Number.isFinite(sale.dom) && sale.dom >= 0 && sale.dom <= 7;
 
+  // Comp-adjustment asymmetry. The reference is the sale's ACTUAL close price,
+  // which is the one place that is legitimate: the engine never sees it, and
+  // it is the only exogenous anchor available — a reference derived from the
+  // comps returns CoreLogic's published 0.64 on a market with no asymmetry in
+  // it at all (see compAdjustmentAsymmetry's notes and the null test).
+  const asym = Engine.compAdjustmentAsymmetry(a, { reference: sale.closePrice });
+
   return {
     id: sale.mlsNumber || sale.address,
     address: sale.address,
@@ -291,7 +298,17 @@ async function scoreSale(sale, variant) {
     bandHigh: interval ? interval.high : null,
     sigmaPct: interval ? interval.sigmaPct : null,
     statedConfidence: interval ? interval.confidence : null,
-    inBand: interval ? (sale.closePrice >= interval.low && sale.closePrice <= interval.high) : null
+    inBand: interval ? (sale.closePrice >= interval.low && sale.closePrice <= interval.high) : null,
+    // adjustment asymmetry
+    allCompsAdjustedUp: asym ? asym.allCompsAdjustedUp : null,
+    arvAboveEveryComp: asym ? asym.arvAboveEveryComp : null,
+    weightedMeanAdjPct: asym ? asym.weightedMeanAdjPct : null,
+    shareAbovePct: asym ? asym.shareAbovePct : null,
+    // one entry per comp, pooled across every sale in the report below —
+    // four comps cannot support a two-sided fit, several hundred can
+    retentionPoints: a.comps.map(c => ({
+      price: c.salePrice, net: c.netAdjustment, reference: sale.closePrice
+    }))
   };
 }
 
@@ -445,7 +462,9 @@ if (primary.length >= 10) {
     ...stratify(primary, 'pool', r => r.poolSize < 8 ? 'thin pool' : 'full pool'),
     ...stratify(primary, 'area', r => r.area || null),
     ...stratify(primary, 'test sale', r => r.subjectLooksDistressed ? 'reads distressed' : 'reads retail'),
-    ...stratify(primary, 'test DOM', r => r.subjectVeryFast ? 'sold in <=7 days' : 'normal marketing time')
+    ...stratify(primary, 'test DOM', r => r.subjectVeryFast ? 'sold in <=7 days' : 'normal marketing time'),
+    ...stratify(primary, 'blend', r => r.allCompsAdjustedUp == null ? null
+      : (r.allCompsAdjustedUp ? 'every comp adjusted UP' : 'mixed adjustment'))
   ];
   for (const s of strata) {
     console.log('  ' + s.stratum.padEnd(30)
@@ -474,6 +493,54 @@ if (withBand.length >= 10) {
     console.log('  stated ' + tier.padEnd(7) + ('n=' + g.length).padStart(6)
       + ('  MdAPE ' + m.mdape + '%').padStart(16)
       + ('  coverage ' + (100 * g.filter(r => r.inBand).length / g.length).toFixed(0) + '%').padStart(17));
+  }
+}
+
+// ---- Comp-adjustment asymmetry, pooled ----
+// The CoreLogic question (Mayer & Nothaft): does a comp priced ABOVE the
+// subject get adjusted down as hard as one below gets adjusted up? Pooled over
+// every comp of every sale, anchored on each sale's known close price. A
+// single blend of four comps cannot answer this — measured, the per-deal
+// statistic fires on about a fifth of symmetric grids and a fifth of
+// asymmetric ones — which is why nothing below is computed per deal.
+{
+  const retail = primary.filter(r => !r.subjectLooksDistressed);
+  for (const [label, rows] of [['ALL SALES', primary], ['RETAIL ONLY', retail]]) {
+    const pts = rows.flatMap(r => r.retentionPoints || []);
+    const fit = Engine.pooledRetention(pts);
+    if (!fit) continue;
+    console.log('\n' + '-'.repeat(66));
+    console.log('ADJUSTMENT ASYMMETRY (pooled) — ' + label + ', ' + fit.n + ' comps from ' + rows.length + ' sales');
+    console.log('-'.repeat(66));
+    console.log('  comps priced ABOVE the subject   ' + fit.shareAbovePct + '%'
+      + '   (CoreLogic found 69%)');
+    console.log('  mean price gap of the pool       ' + fit.meanGapPct + '%');
+    if (fit.above) console.log('  retention ABOVE  n=' + String(fit.above.n).padStart(4)
+      + '   slope ' + String(fit.above.slope).padStart(7)
+      + '   retention ' + String(fit.above.retention).padStart(6) + '   (CoreLogic 0.64)');
+    if (fit.below) console.log('  retention BELOW  n=' + String(fit.below.n).padStart(4)
+      + '   slope ' + String(fit.below.slope).padStart(7)
+      + '   retention ' + String(fit.below.retention).padStart(6) + '   (CoreLogic 0.23)');
+    console.log('  retention gap                    ' + fit.retentionGap
+      + '   (a PERFECT grid still reads about +0.33 here — convexity, not bias)');
+  }
+  // The sign structure, split BOTH ways. This was briefly a warning on the ARV
+  // page and was withdrawn: it separated by +4.3 points of median signed error
+  // on one 156-sale sample and +0.3 on an independent 132-sale one. Keep the
+  // readout — it is how that gets re-checked — and note that the split must be
+  // taken on RETAIL, since distressed sales dominate any all-sales comparison.
+  for (const [label, set] of [['all sales', primary], ['retail only', retail]]) {
+    const up = set.filter(r => r.allCompsAdjustedUp === true);
+    const mixed = set.filter(r => r.allCompsAdjustedUp === false);
+    if (up.length < 5 || mixed.length < 5) continue;
+    const mu = Engine.backtestMetrics(up), mm = Engine.backtestMetrics(mixed);
+    console.log('\n  blends where EVERY comp was adjusted up — ' + label + ':');
+    console.log('    occurs on ' + up.length + ' of ' + set.length + ' sales');
+    console.log('    median signed error   ' + mu.medianSignedError + '%  vs  '
+      + mm.medianSignedError + '%  when mixed   (separation '
+      + (Math.round((mu.medianSignedError - mm.medianSignedError) * 10) / 10) + ' points)');
+    console.log('    MdAPE                 ' + mu.mdape + '%  vs  ' + mm.mdape + '%');
+    console.log('    over by >20%          ' + mu.overBy20Pct + '%  vs  ' + mm.overBy20Pct + '%');
   }
 }
 
@@ -512,7 +579,10 @@ history.runs.push({
   config: CFG,
   variants: VARIANTS.map(v => v.name),
   headline,
-  results: Object.fromEntries([...byVariant]),
+  // retentionPoints is one row per comp and only exists to be pooled in the
+  // report above — it would quadruple this file for nothing
+  results: Object.fromEntries([...byVariant].map(([k, rows]) =>
+    [k, rows.map(({ retentionPoints, ...rest }) => rest)])),
   skipped
 });
 writeFileSync(RESULTS_FILE, JSON.stringify(history, null, 1));

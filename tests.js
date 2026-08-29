@@ -1441,6 +1441,210 @@ test('bracketing: unpriced comps and missing fields never manufacture a defect',
     eq(Engine.bracketingDefects(null, null).length, 0, 'garbage in, silence out');
 });
 
+// ---- Comp adjustment asymmetry ----
+
+const ASYM_SETTINGS = {
+    pricePerSqftAdj: 100, bedAdj: 5000, bathAdj: 5000, lotAdjPerSqft: 3,
+    garageAdjPerSpace: 10000, poolAdj: 20000, yearAdjPerYear: 500, storyAdj: 0,
+    conditionAdjPct: { renovated: 0, average: 10, dated: 20 },
+    annualAppreciationPct: 0, qualitativeAdjPct: {}
+};
+const asym = (subject, comps, opts, settings) => Engine.compAdjustmentAsymmetry(
+    Engine.appraise({ subject, comps, settings: settings || ASYM_SETTINGS }), opts);
+
+test('asymmetry: the sign structure needs no reference and is always reported', () => {
+    const subject = { sqft: 1500, beds: 3, baths: 2 };
+    const comps = [
+        { label: 'a', salePrice: 300000, sqft: 1500, beds: 3, baths: 2 },
+        { label: 'b', salePrice: 360000, sqft: 1800, beds: 3, baths: 2 },
+        { label: 'c', salePrice: 250000, sqft: 1250, beds: 3, baths: 2 }
+    ];
+    const r = asym(subject, comps);
+    eq(r.n, 3, 'every priced comp counted');
+    eq(r.compsAdjustedUp, 1, 'the small comp is adjusted up');
+    eq(r.compsAdjustedDown, 1, 'the large comp is adjusted down');
+    eq(r.allCompsAdjustedUp, false, 'so the blend is not one-directional');
+    eq(r.warnings, undefined, 'the function raises no warnings at all');
+    // The CoreLogic measurement proper is withheld without an exogenous anchor
+    eq(r.reference, null, 'no reference was supplied');
+    eq(r.above, null, 'so no above-side slope is claimed');
+    eq(r.below, null, 'nor a below-side one');
+    eq(r.retentionGap, null, 'nor a divergence between them');
+});
+
+test('asymmetry: a DOWNWARD adjustment stays negative (num() clamps at zero)', () => {
+    // Regression test. num() is Math.max(0, n) by design, so reading a net
+    // adjustment through it would report that no comp is ever adjusted down,
+    // inverting the entire diagnostic. Every comp here is superior to the
+    // subject, so the whole blend must read negative.
+    const subject = { sqft: 1000 };
+    const comps = [
+        { label: 'a', salePrice: 300000, sqft: 1500 },
+        { label: 'b', salePrice: 320000, sqft: 1600 },
+        { label: 'c', salePrice: 340000, sqft: 1700 }
+    ];
+    const r = asym(subject, comps);
+    assert(r.weightedMeanAdjPct < 0, 'adjusted DOWN on net, not clamped to 0');
+    eq(r.compsAdjustedDown, 3, 'all three counted as downward');
+    eq(r.allCompsAdjustedUp, false, 'and nothing reported as adjusted up');
+});
+
+test('asymmetry: a blend adjusted entirely upward is reported, never graded', () => {
+    const subject = { sqft: 2000 };
+    const comps = [
+        { label: 'a', salePrice: 300000, sqft: 1500 },
+        { label: 'b', salePrice: 310000, sqft: 1550 },
+        { label: 'c', salePrice: 290000, sqft: 1450 }
+    ];
+    const r = asym(subject, comps);
+    eq(r.allCompsAdjustedUp, true, 'every comp adjusted up');
+    eq(r.arvAboveEveryComp, true, 'and the ARV clears every raw sale price');
+    eq(r.compsAdjustedUp, 3, 'all three counted upward');
+    eq(r.compsAdjustedDown, 0, 'none the other way');
+    // MEASURED and withdrawn: as a per-deal warning this separated by +4.3
+    // points of median signed error on one 156-sale sample and by +0.3 on an
+    // independent 132-sale one. It stays an arithmetic fact for backtest.mjs
+    // to stratify on, and never a verdict on the deal in front of you.
+    eq(r.warnings, undefined, 'but the blend is never graded on it');
+});
+
+test('asymmetry: no skew warning is raised, because the skew did not replicate', () => {
+    // Every comp priced far above the subject reference. CoreLogic found 69%
+    // of comps above; MEASURED here against the known close price the median
+    // set is 50% above and the mean 46%, and scoreComp() never reads price at
+    // all. The share is reported; nothing is claimed from it.
+    const subject = { sqft: 1500 };
+    const comps = [
+        { label: 'a', salePrice: 400000, sqft: 1500 },
+        { label: 'b', salePrice: 420000, sqft: 1500 },
+        { label: 'c', salePrice: 440000, sqft: 1500 }
+    ];
+    const r = asym(subject, comps, { reference: 300000 });
+    eq(r.shareAbovePct, 100, 'every comp sits above the reference');
+    eq(r.warnings, undefined, 'and that on its own claims nothing');
+});
+
+test('asymmetry: retention slopes match the hand-computed through-origin fit', () => {
+    const subject = { sqft: 1500, beds: 3, baths: 2 };
+    const comps = [
+        { label: 'a', salePrice: 300000, sqft: 1500, beds: 3, baths: 2 },
+        { label: 'b', salePrice: 360000, sqft: 1800, beds: 3, baths: 2 },
+        { label: 'c', salePrice: 250000, sqft: 1250, beds: 3, baths: 2 },
+        { label: 'd', salePrice: 330000, sqft: 1650, beds: 3, baths: 2 }
+    ];
+    const r = asym(subject, comps, { reference: 300000 });
+    eq(r.reference, 300000, 'the supplied reference is used verbatim');
+    // b: x=+0.2  y=-30000/360000   d: x=+0.1  y=-15000/330000
+    // slope = (0.2*-0.08333 + 0.1*-0.045454) / (0.04 + 0.01) = -0.4242
+    assertNear(r.above.slope, -0.424, 0.001, 'above-side slope');
+    assertNear(r.above.retention, 0.576, 0.001, 'retention = 1 + slope');
+    // c alone: slope = (-0.16667*0.1)/(0.027778) = -0.6
+    assertNear(r.below.slope, -0.6, 0.001, 'below-side slope');
+    eq(r.below.n, 1, 'one comp below the reference');
+    eq(r.below.leverage, 1, 'a single comp IS the slope, and says so');
+    eq(r.slopesAreCalibrated, false, 'and they never grade a single deal');
+});
+
+test('asymmetry: a comp priced at the reference counts, but takes no side', () => {
+    const subject = { sqft: 1500 };
+    const comps = [
+        { label: 'a', salePrice: 300000, sqft: 1500 },  // exactly the reference
+        { label: 'b', salePrice: 360000, sqft: 1800 },
+        { label: 'c', salePrice: 250000, sqft: 1250 }
+    ];
+    const r = asym(subject, comps, { reference: 300000 });
+    eq(r.n, 3, 'all three are in the measurement');
+    eq(r.nAbove, 1, 'one above');
+    eq(r.nBelow, 1, 'one below');
+});
+
+test('asymmetry: NULL MARKET — uniform $/sqft must not read as CoreLogic', () => {
+    // The failure mode this function was nearly shipped with. Every house
+    // trades at exactly $200/sqft and the grid applies one honest rate, so
+    // asymmetry is impossible by construction. Paired with a reference built
+    // from the comps' own median $/sqft — which is where deriveMarketRates()
+    // gets the GLA rate for 70.6% of real comp sets — the statistic returns
+    // retentionAbove 0.634 against CoreLogic's published 0.64, and would read
+    // as a replication of the literature while measuring nothing but
+    // GLA_FRACTION_OF_PPSF. Pinned so the artefact can never be mistaken for
+    // a finding, and so no future change reinstates a derived reference.
+    const subject = { sqft: 1500 };
+    const comps = [1100, 1250, 1400, 1600, 1750, 1900].map((sf, i) =>
+        ({ label: 'c' + i, salePrice: sf * 200, sqft: sf }));
+    const derived = Engine.deriveMarketRates(comps);
+    eq(derived.method, 'fraction', 'the fraction branch, as on 7 real sets in 10');
+    eq(derived.pricePerSqftAdj, 90, '0.45 x $200/sqft');
+    const a = Engine.appraise({ subject, comps,
+        settings: { ...ASYM_SETTINGS, pricePerSqftAdj: derived.pricePerSqftAdj } });
+
+    // The artefact, reproduced exactly, ONLY because the reference is derived
+    const derivedRef = derived.medianPricePerSqft * 1500;
+    const bad = Engine.compAdjustmentAsymmetry(a, { reference: derivedRef });
+    assertNear(bad.above.retention, 0.634, 0.005, 'a null market reads as CoreLogic');
+
+    // ...and the function refuses to produce it on its own initiative
+    const safe = Engine.compAdjustmentAsymmetry(a);
+    eq(safe.above, null, 'no reference is derived from the comps, ever');
+    eq(safe.reference, null, 'and none is invented');
+});
+
+test('asymmetry: retentionGap has a convexity floor, not a zero null', () => {
+    // A self-consistent grid traces y = -x/(1+x), which is convex, so a
+    // straight line through the origin reads shallower than -1 above and
+    // steeper below. Every comp here reconciles to the identical $300,000 —
+    // a flawless grid — and it STILL shows a positive gap. Pinned so the
+    // real-data gap is never read against zero.
+    const subject = { sqft: 1500 };
+    const comps = [
+        { label: 'a', salePrice: 360000, sqft: 1800 },
+        { label: 'b', salePrice: 330000, sqft: 1650 },
+        { label: 'c', salePrice: 250000, sqft: 1250 },
+        { label: 'd', salePrice: 270000, sqft: 1350 }
+    ];
+    const a = Engine.appraise({ subject, comps,
+        settings: { ...ASYM_SETTINGS, pricePerSqftAdj: 200 } });
+    a.comps.forEach(c => eq(Math.round(c.adjustedValue), 300000, 'every comp lands on one value'));
+    const r = Engine.compAdjustmentAsymmetry(a, { reference: 300000 });
+    assert(Math.abs(r.above.retention) < 0.25, 'above side retains almost nothing');
+    assert(Math.abs(r.below.retention) < 0.25, 'below side retains almost nothing');
+    assertNear(r.retentionGap, 0.328, 0.01, 'yet the gap is +0.33 on a perfect grid');
+});
+
+test('asymmetry: thin sets and garbage produce no claim', () => {
+    eq(Engine.compAdjustmentAsymmetry(null, null), null, 'garbage in, silence out');
+    eq(Engine.compAdjustmentAsymmetry({ comps: [] }, {}), null, 'no comps, no claim');
+    // Two comps: the sign structure is honest, the regression is withheld
+    const r = asym({ sqft: 1500 }, [
+        { label: 'a', salePrice: 300000, sqft: 1400 },
+        { label: 'b', salePrice: 310000, sqft: 1450 }
+    ], { reference: 300000 });
+    eq(r.n, 2, 'both comps counted in the sign structure');
+    eq(r.above, null, 'but two comps do not support a two-sided fit');
+});
+
+test('asymmetry: pooling is what makes the regression answerable', () => {
+    // Four comps cannot support a two-sided fit; several hundred can. Planted
+    // asymmetry: comps above the reference keep ALL of their premium, comps
+    // below are pulled fully onto it.
+    // Planted in the estimator's own coordinates so the answer is exact:
+    // above-side y = 0 (slope 0, retention 1), below-side y = -x (slope -1,
+    // retention 0). Building the below leg as "adjust onto the reference"
+    // instead would land at -0.21, which is the convexity floor above, not 0.
+    const points = [];
+    const ref = 300000;
+    for (let i = 0; i < 60; i++) {
+        points.push({ price: ref * (1 + 0.1 + i * 0.002), net: 0, reference: ref });
+        const price = ref * (1 - 0.1 - i * 0.002);
+        const x = (price - ref) / ref;
+        points.push({ price, net: -x * price, reference: ref });
+    }
+    const p = Engine.pooledRetention(points);
+    assertNear(p.above.retention, 1, 0.001, 'premium comps keep their premium');
+    assertNear(p.below.retention, 0, 0.001, 'discount comps are pulled all the way up');
+    eq(p.n, 120, 'every comp pooled');
+    eq(Engine.pooledRetention(points.slice(0, 10)), null, 'under 20 comps it refuses');
+});
+
 // ---- Neighbourhood effective tax rate ----
 
 test('neighbourhood tax rate: median of the comps\' own bills', () => {

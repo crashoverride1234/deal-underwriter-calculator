@@ -3582,6 +3582,14 @@ function recalcAppraisal() {
         warn.textContent = '⚠ Not bracketed — ' + d.message;
         appraisalWarnings.appendChild(warn);
     });
+    // NOTHING is rendered from compAdjustmentAsymmetry(). A "every comp in this
+    // blend was adjusted upward" warning was built and then withdrawn: it
+    // separated by +4.3 points of median signed error on one 156-sale sample
+    // and by +0.3 on an independent 132-sale one, which is sampling noise
+    // rather than a signal, and it fired on a third of all deals. The
+    // statistic lives in engine.js for backtest.mjs to pool across hundreds of
+    // sales, which is the only scale at which it resolves anything. Do not
+    // wire it to the UI again without a paired measurement behind it.
     a.comps.filter(c => c.overlaps.length).forEach((c, i) => {
         const warn = document.createElement('div');
         warn.className = 'appraisal-warning';

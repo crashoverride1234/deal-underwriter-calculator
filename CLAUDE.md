@@ -51,6 +51,10 @@ GitHub Pages from `main`.
   rejected because MLS rows mutate after closing, and the subject is removed
   from its own comps by id, parcel AND street line). Reports the IAAO panel,
   not MdAPE alone — COD under 5 is a sales-chasing red flag, not a win.
+  Also reports comp-adjustment asymmetry POOLED across every comp of every
+  sale, anchored on each sale's known close price — the only exogenous
+  reference there is, and the only scale at which four-comp blends resolve
+  anything.
   `--compare-condition` / `--compare-comps` / `--compare-rate` run a PAIRED
   test: the same sales through both variants, sign test plus a deterministic
   bootstrap. Paired is the point — between-property variance dominates two
@@ -513,6 +517,56 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   close-date anchoring is late by that much on every comp in the same
   direction. Measured effect: small but consistently favourable —
   over-by-20% fell 27.3% → 23.9%, paired z=1.68, not significant on n=88.
+- **The retail over-valuation is the CONDITION LINE, not comp selection**
+  (`compAdjustmentAsymmetry()`, `pooledRetention()`, added 2026-08-28). The
+  hypothesis under test was CoreLogic's (Mayer & Nothaft): 69% of
+  appraiser-picked comps sit ABOVE the subject and premium comps get adjusted
+  down more gently than discount comps get adjusted up. Measured on the live
+  feed, **the selection half does not replicate and cannot** — 47.7% of retail
+  comps sit above the known close price against CoreLogic's 69%, because
+  `scoreComp()` ranks on size, distance, age and rooms and never reads price
+  at all. The adjustment half is real (retail pooled, 528 comps: retention
+  1.022 above against 0.498 below) but it is **one line's doing**.
+  `conditionAdjPct` is `{renovated: 0, average: 10, dated: 20}` — a RATCHET
+  with no negative arm, so a comp inferior to the subject is lifted while a
+  comp SUPERIOR to it can never be marked down. 42% of blended comps read
+  average or dated. Paired `--compare-condition` at n=110: turning it off moves
+  median ratio 1.081 → 1.034 and median signed error 8.11% → 3.42%, sign test
+  **z=2.4, B better**. On the retail stratum alone (n=97) ratio 1.068 → 1.015
+  and signed error 6.78% → 1.49%, but z=1.8 — **the level shift is large and
+  consistent; the per-deal accuracy gain is not significant.** Read that as a
+  UNITS MISMATCH before reading it as a bug: the engine emits ARV with the
+  subject assumed renovated (`index.html` says so out loud) and the back-test
+  scores it against as-is close prices, so the gap IS the after-repair premium.
+  The open item is that `appraise()` has no `subject.condition` input at all,
+  so a user underwriting as-is value has no way to say so.
+- **That diagnostic must never derive its own reference, and its null is not
+  zero.** Two traps, both measured, both pinned in `tests.js`. (1) A reference
+  built from the comps is circular: `deriveMarketRates()` takes the GLA rate
+  from the same median $/sqft on **127 of 180 real comp sets (70.6%)**, so fed
+  a market where every house trades at exactly $200/sqft — asymmetry
+  impossible by construction — the statistic returns retentionAbove **0.634**
+  against CoreLogic's published **0.64**. It would have read as a replication
+  of the literature while measuring `GLA_FRACTION_OF_PPSF`. The ARV is
+  disqualified too (`sum(w*(A-ARV)) = 0` identically; it put 29% of comps above
+  the subject where the truth was 46%). So `opts.reference` is REQUIRED with no
+  fallback, which is what confines the slopes to `backtest.mjs`. (2) A
+  self-consistent grid traces `y = -x/(1+x)`, which is convex, so a perfect
+  grid still reads a retentionGap near **+0.33** — read the number against that
+  floor, never against zero.
+- **A per-deal asymmetry warning was built, measured and WITHDRAWN.** "Every
+  comp in this blend was adjusted upward" separated by +4.3 points of median
+  signed error on one 156-sale sample and by **+0.3 on an independent
+  132-sale one**, while firing on a third of all deals. Two draws from the same
+  feed disagreeing that far is sampling noise. Slope-based rules were worse —
+  a retention gap over 0.40 fired on deals averaging 3.5% error against 5.8%
+  for the rest, i.e. BACKWARDS. `slopesAreCalibrated: false` and nothing is
+  rendered; four comps cannot support a two-sided regression, so pool them
+  with `pooledRetention()` across hundreds of sales instead. This is the
+  `tierIsCalibrated` lesson applied before shipping rather than after.
+  Also checked and eliminated: the `1 - grossAdjPct/50` weight function does
+  tilt toward expensive comps (within-sale corr(price, weight) = +0.48) but
+  moves the conclusion by a median of −0.01%, so it is not the cause.
 - **Confidence is a STATED INTERVAL, not a label** (`valuationInterval()`).
   Measured error varies six-fold across DFW submarkets (Pleasant Grove 31%
   MdAPE vs Fort Worth southeast 5.6%) and the old spread-only label could not
