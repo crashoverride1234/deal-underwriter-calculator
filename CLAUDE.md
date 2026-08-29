@@ -16,7 +16,13 @@ GitHub Pages from `main`.
   rental basis = max(purchase, ARV); homesteaded seller ⇒ floor),
   `maxOffer()` (binary-search inversion of underwrite(): flip target =
   net profit $, rental targets = cash flow / DSCR / CoC, rounds DOWN to
-  $100; reports unachievable and price-independent-unbounded cases) +
+  $100; reports unachievable and price-independent-unbounded cases),
+  `breakEven()` (same bisection, solving for the sale price / rent that nets
+  zero, plus the rent a 1.25 lender DSCR needs; rounds UP so the answer never
+  undershoots), `bracketingDefects()` (does the comp set SURROUND the subject),
+  `neighborhoodTaxRate()` (median effective rate off the comps' own bills —
+  closed prices only, null under 3, so a MUD/PID district is distinguishable
+  from a bad assessment) +
   `ruleOfThumbOffer()`/`suggestedRulePct()` (70%-rule flexed 65–75 by
   absorption score), `estimateRehab()`/`capexFlags()` (tiered $/sqft scope
   + DFW year-built era advisories), `marketTrend()` (1004MC-style
@@ -81,8 +87,8 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (127 tests as of 2026-08-27) AND `node worker/tests.mjs`
-  (104 MLS-transport tests). Both must pass before deploy.
+- **Test**: `node tests.js` (148 tests as of 2026-08-28) AND `node worker/tests.mjs`
+  (106 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
 - **Deploy worker**: `npx wrangler deploy` from `worker/`.
@@ -361,12 +367,78 @@ exist**, so an unconfigured worker behaves exactly as it did before.
 
 - Percent inputs are whole numbers (80 = 80%); the engine divides by 100.
 - Missing comp data must produce NO adjustment, not a phantom one.
+- **A blank input restores the OLD constant, bit-for-bit.** Three flip numbers
+  became overridable on 2026-08-28 (`monthlyTaxesIns` on the flip leg,
+  `sellingCostPercent`, `arvCapPercent`), and each is guarded by `has()` rather
+  than `||` so an explicit **0 is honoured as an answer** while blank falls back
+  to `DEFAULTS`. That is what let 127 existing tests pass untouched, and it is
+  the pattern any future defaulted input must follow. Do NOT "simplify" these
+  to `num(x) || DEFAULT` — that silently turns a deliberate zero into the
+  default.
+- **The flip pro-forma pays taxes and insurance.** `engine.js` used to read
+  `strategy === 'flip' ? flipBaselineMonthlyCarry : monthlyTaxesIns`, discarding
+  the user's figure on the flip leg for a flat $300/mo, while
+  `updateTaxProjection()` was already deriving the correct FLIP-basis reassessed
+  bill and rendering an adopt button into a container `switchStrategy()` hid on
+  flip. A $400k DFW flip at 2.3% effective is ~$767/mo of tax alone. The
+  carrying-cost section is deliberately visible for BOTH strategies now — if you
+  ever re-hide it, the engine silently reverts to the placeholder.
+- **"DSCR" is two different numbers and they land on opposite sides of 1.25.**
+  `dscrRatio` is NOI (net of vacancy and the opex slider) over debt service —
+  the commercial 5+ unit convention, useful as the analyst's coverage.
+  `lenderDscr` is gross scheduled rent over PITIA, which is what a 1–4 unit
+  DSCR lender actually underwrites, and it is `null` when there is no note.
+  On the default rental these read 0.57 and 1.38: the card that claims lender
+  approval MUST use `lenderDscr`. Insurance has its own input for the same
+  reason — PITIA needs it, and the tax adopt-button writes taxes+HOA only, so
+  folding insurance into that field let one click zero it out of the deal.
+- **`breakEven()` bisects the real model; it is not `costs / (1 - rate)`.**
+  Selling costs scale WITH the sale price, so the answer is costs grossed up by
+  the exit rate — and on a hard-money deal the loan is itself a function of ARV,
+  so a closed form would quietly ignore that coupling. It solves on the RAW
+  price with `variancePercent: 0`, because the stress slider is a test applied
+  to a price, not part of the price being solved for. The chart's grey segment
+  is `arv − netProfit` (costs recovered at sale) and has never been this number
+  — it is labelled accordingly, so don't "fix" it back.
+- **Bracketing is a separate question from comp agreement.**
+  `valuationInterval()` measures how much comps disagree with each other and
+  `scoreComp()` rates them one at a time; neither can see a set that agrees
+  closely and sits entirely on one side of the subject, which is a narrow band
+  around an EXTRAPOLATION. `bracketingDefects()` fills that gap, and an EXACT
+  match brackets a feature on its own (that is the ideal comp, not a gap). Read
+  `appraisalComps`, never `lastAppraisal.comps` — `appraise()` emits no
+  sqft/beds/yearBuilt.
+- **Cite live rules, and date them.** Fannie ELIMINATED the 15%/25% net/gross
+  adjustment guidelines in Selling Guide B4-1.3-09 (2025-06-04), so the >25%
+  warning is framed as a hint ("being argued into place"), not policy. Fannie
+  B4-1.1-04 names crime-rate references an Unacceptable Appraisal Practice, so
+  the crime and ACS chips carry `.no-print` — private underwriting input is
+  fine, but a licensed agent putting them in a document handed to a third party
+  is fair-housing exposure. FHA's day-91 / 2× resale rules are printed with
+  their date because FHA is publicly pursuing repeal.
 - **Comp selection is filtered at the SOURCE, not sorted out afterwards.**
   The MLS query carries sub-type, a ±35% size band and ±1 bedroom alongside
   the geographic box, because the row cap is spent on whatever the server
   returns first — an unfiltered query fills it with a studio condo and a
   mansion and the best comps are never fetched at all. `mlsComps()` widens
   geography before it loosens the material bands.
+- **That rule applies to LEASES too — `mlsLeases()` was the one call site that
+  never got it** (fixed 2026-08-28). It passed neither sub-type nor size/bed
+  bands, so a 1-mile 40-row newest-first pull could fill with apartments and
+  townhomes and `rentFromComps()` would median their $/sqft into rent → NOI →
+  DSCR → cash-on-cash. It now carries the same bands and **widens once** if the
+  tight box holds fewer than 3 closed leases, so a thin market never ends up
+  worse than it was before the filter existed. Lease sub-types live in their own
+  `MLS_LEASE_SUBTYPES` var, NOT `MLS_SUBTYPES`: the lease class may publish a
+  different lookup, and DMQL2 answers an unknown code with an empty result set
+  rather than an error — a wrong guess would look like a quiet rental market and
+  fall through to a billed RentCast AVM. Unset means "don't filter", never
+  "guess". Confirm the coded value with `/mls/probe` before setting it.
+- **`mlsDom()` measures list-to-CONTRACT.** Its fallback used to run to the
+  CLOSE date, which overstates marketing time by the whole financing period
+  (measured ~30-day median lag on this feed) — while the UI copy described time
+  to go under contract. It now prefers `PurchaseContractDate` (100% populated on
+  NTREIS) and only falls back to close date when that is absent.
 - **The subject lookup is filtered at the source too, and its address guard
   fails CLOSED.** `mlsRecord()` shipped asking RETS for nothing but status +
   property type — the OData `contains()/startswith()` filter was skipped for
