@@ -91,7 +91,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (148 tests as of 2026-08-28) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (158 tests as of 2026-08-28) AND `node worker/tests.mjs`
   (106 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
@@ -366,6 +366,25 @@ exist**, so an unconfigured worker behaves exactly as it did before.
 - **Dead ends — do not retry**: Zillow & Redfin unofficial APIs
   (TLS-fingerprint WAF blocks even server-side); realtor.com detail endpoints
   are CORS-blocked from browsers (that's why the Worker exists).
+
+- **Photos: shipped to the HUMAN, never to a model** (`/mls/photo`,
+  `openPhotoViewer()` in app.js). RETS GetObject serves photos for CLOSED
+  listings on NTREIS (verified live on a July-2026 close — unlike realtor.com,
+  which nulls them). The research settled the direction: CV condition scoring
+  measures 0.3–0.4 MAPE points at ~60% accuracy while human labels beat CV,
+  so the viewer shows the roll and three buttons; a press becomes the comp's
+  condition with evidence "photos — your read", outranking the remarks
+  classifier and clearing `conditionUnverified` (which narrows the
+  `valuationInterval()` band). Facts that cost a round each: GetObject
+  addresses by `ListingKeyNumeric` (the MLS number is rejected); object 0 is
+  an alias of 1, so the viewer pages 1..PhotosCount; METADATA-OBJECT
+  (`/mls/probe?objects=1`) says the real types are Photo/LargePhoto/XXLarge/
+  HighRes but only **HighRes returns full resolution** (~93 KB, 1024px) — the
+  other three all serve the same ~11 KB small image, and an UNKNOWN Type is
+  silently substituted rather than rejected, hence the whitelist. Matrix can
+  return its error XML with HTTP 200, so the body's content type decides.
+  Licence: on-screen only, browser-private cache 12 h, never in the protest
+  packet, no localStorage.
 
 ## Conventions
 

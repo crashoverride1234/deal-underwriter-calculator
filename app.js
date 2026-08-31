@@ -1298,6 +1298,7 @@ function compTemplate() {
         // the price before the time adjustment). Only an MLS feed publishes
         // the number; a proxy source leaves it blank and nothing changes.
         concessions: '', mlsNumber: '', priceType: '',
+        listingKey: '', photosCount: '',
         // Informational detail fields (auto-filled from the comp's address,
         // not used by the engine math)
         subdivision: '', propType: '', county: '', zoning: '', apn: '',
@@ -1506,7 +1507,10 @@ function renderComps() {
         card.innerHTML = `
             <div class="comp-card-header">
                 <span>Comp ${idx + 1}${Engine.num(comp.salePrice) > 0 ? '' : ' <em class="comp-unpriced">unpriced · not in blend</em>'}</span>
-                <button class="comp-remove" title="Remove comp" ${appraisalComps.length <= 1 ? 'disabled' : ''}>&times;</button>
+                <span style="display: flex; gap: 0.35rem;">
+                    ${comp.listingKey ? '<button class="comp-remove" data-action="comp-photos" title="View listing photos and judge condition yourself">📷</button>' : ''}
+                    <button class="comp-remove" title="Remove comp" ${appraisalComps.length <= 1 ? 'disabled' : ''}>&times;</button>
+                </span>
             </div>
             <div class="form-group">
                 <label>Address / Label</label>
@@ -1759,7 +1763,29 @@ function renderComps() {
         // A closed MLS price and a list-at-sale proxy are different kinds of
         // number and the card has to say which one is sitting in the field.
         renderCompPriceTruth(card.querySelector('[data-price-truth]'), comp);
-        card.querySelector('.comp-remove').addEventListener('click', () => {
+        // The photos button shares .comp-remove styling, so the REMOVE handler
+        // must select by title — the first .comp-remove is now the camera
+        // whenever the comp carries a listing key
+        const photoBtn = card.querySelector('[data-action="comp-photos"]');
+        if (photoBtn) {
+            photoBtn.addEventListener('click', () => openPhotoViewer({
+                listingKey: comp.listingKey,
+                photosCount: comp.photosCount,
+                label: comp.label || 'Listing photos',
+                onCondition: (cond) => {
+                    comp.condition = cond;
+                    comp.conditionEvidence = 'photos — your read';
+                    comp.conditionUnverified = false;
+                    delete comp.conditionConflict;
+                    // Reflect into the visible select without a full re-render
+                    // so the viewer stays open over an up-to-date card
+                    const sel = card.querySelector('[data-field="condition"]');
+                    if (sel) sel.value = cond;
+                    recalcAppraisal();
+                }
+            }));
+        }
+        card.querySelector('.comp-remove[title="Remove comp"]').addEventListener('click', () => {
             appraisalComps.splice(idx, 1);
             renderComps();
             recalcAppraisal();
@@ -1835,6 +1861,139 @@ function refreshCompSubdivisions() {
         el.textContent = match ? `${sub} · ✓ matches subject` : sub;
         el.classList.toggle('match', match);
     });
+}
+
+// ==================== MLS Photo Viewer ====================
+// The photos exist so a HUMAN can judge condition. This is the deliberate
+// alternative to automated photo scoring: measured CV condition models buy
+// 0.3–0.4 MAPE points at ~60% classifier accuracy, while a person looking at
+// a kitchen for three seconds is the gold-standard label — and condition is
+// the one input this feed does not carry (NTREIS publishes no
+// PropertyCondition). So the viewer shows the photos and offers three
+// buttons; pressing one becomes the comp's condition with the evidence
+// "photos — your read", which outranks the remarks classifier.
+//
+// Licence posture: photos are licensed MLS content. They render on screen
+// for the licensee only, are never written to localStorage (the browser's
+// HTTP cache holds them privately for the same 12 h the MLS record cache
+// uses), and never appear in the printable protest packet.
+//
+// Mechanics: /mls/photo?key=<ListingKeyNumeric>&i=<n>&type=HighRes. Index 1
+// is the first photo (0 is the server's alias for it); photosCount bounds
+// the roll. Each request rides the worker's serial RETS queue, so photos
+// arrive one at a time — the viewer preloads the next while you look.
+
+let photoViewerEl = null;
+let photoViewerState = null;
+
+function ensurePhotoViewer() {
+    if (photoViewerEl) return photoViewerEl;
+    const el = document.createElement('div');
+    el.className = 'photo-viewer hidden';
+    el.innerHTML = `
+        <div class="photo-viewer-backdrop" data-close></div>
+        <div class="photo-viewer-panel" role="dialog" aria-label="Listing photos">
+            <div class="photo-viewer-head">
+                <span class="photo-viewer-title"></span>
+                <span class="photo-viewer-count"></span>
+                <button class="comp-remove" data-close title="Close (Esc)">&times;</button>
+            </div>
+            <div class="photo-viewer-stage">
+                <button class="photo-nav" data-prev title="Previous (←)">&#x2039;</button>
+                <img class="photo-viewer-img" alt="Listing photo">
+                <div class="photo-viewer-loading">Loading photo…</div>
+                <button class="photo-nav" data-next title="Next (→)">&#x203a;</button>
+            </div>
+            <div class="photo-viewer-actions">
+                <span>Your condition read:</span>
+                <button class="btn btn-secondary" data-cond="renovated">Renovated</button>
+                <button class="btn btn-secondary" data-cond="average">Average</button>
+                <button class="btn btn-secondary" data-cond="dated">Dated</button>
+                <span class="photo-viewer-note"></span>
+            </div>
+        </div>`;
+    document.body.appendChild(el);
+
+    el.querySelectorAll('[data-close]').forEach(b =>
+        b.addEventListener('click', closePhotoViewer));
+    el.querySelector('[data-prev]').addEventListener('click', () => stepPhoto(-1));
+    el.querySelector('[data-next]').addEventListener('click', () => stepPhoto(1));
+    el.querySelectorAll('[data-cond]').forEach(b => b.addEventListener('click', () => {
+        if (!photoViewerState || !photoViewerState.onCondition) return;
+        photoViewerState.onCondition(b.dataset.cond);
+        el.querySelector('.photo-viewer-note').textContent =
+            `Set to ${b.dataset.cond} — counted as verified.`;
+    }));
+    document.addEventListener('keydown', (e) => {
+        if (!photoViewerState) return;
+        if (e.key === 'Escape') closePhotoViewer();
+        else if (e.key === 'ArrowLeft') stepPhoto(-1);
+        else if (e.key === 'ArrowRight') stepPhoto(1);
+    });
+
+    const img = el.querySelector('.photo-viewer-img');
+    img.addEventListener('load', () => {
+        el.querySelector('.photo-viewer-loading').classList.add('hidden');
+        img.classList.remove('hidden');
+        // The next photo starts through the serial queue while this one is
+        // being looked at, so paging forward feels instant
+        if (photoViewerState && photoViewerState.index < photoViewerState.count) {
+            new Image().src = photoUrl(photoViewerState.key, photoViewerState.index + 1);
+        }
+    });
+    img.addEventListener('error', () => {
+        // Past the end of the roll, or the feed hiccuped — either way say so
+        // rather than showing a broken-image glyph
+        el.querySelector('.photo-viewer-loading').textContent =
+            'No photo here — the roll may be shorter than the listed count.';
+    });
+    photoViewerEl = el;
+    return el;
+}
+
+function photoUrl(key, i) {
+    return `${workerBase()}/mls/photo?key=${encodeURIComponent(key)}&i=${i}&type=HighRes`;
+}
+
+function showCurrentPhoto() {
+    const el = photoViewerEl;
+    const s = photoViewerState;
+    el.querySelector('.photo-viewer-count').textContent = `${s.index} / ${s.count}`;
+    const img = el.querySelector('.photo-viewer-img');
+    const loading = el.querySelector('.photo-viewer-loading');
+    loading.textContent = 'Loading photo…';
+    loading.classList.remove('hidden');
+    img.classList.add('hidden');
+    img.src = photoUrl(s.key, s.index);
+}
+
+function stepPhoto(delta) {
+    const s = photoViewerState;
+    if (!s) return;
+    const next = s.index + delta;
+    if (next < 1 || next > s.count) return;
+    s.index = next;
+    showCurrentPhoto();
+}
+
+function openPhotoViewer(opts) {
+    const el = ensurePhotoViewer();
+    photoViewerState = {
+        key: opts.listingKey,
+        count: Math.max(1, Math.min(40, Engine.num(opts.photosCount) || 1)),
+        index: 1,
+        onCondition: opts.onCondition || null
+    };
+    el.querySelector('.photo-viewer-title').textContent = opts.label || 'Listing photos';
+    el.querySelector('.photo-viewer-note').textContent = '';
+    el.querySelector('.photo-viewer-actions').classList.toggle('hidden', !opts.onCondition);
+    el.classList.remove('hidden');
+    showCurrentPhoto();
+}
+
+function closePhotoViewer() {
+    if (photoViewerEl) photoViewerEl.classList.add('hidden');
+    photoViewerState = null;
 }
 
 // ==================== Comp Suggestions ====================
@@ -2222,6 +2381,10 @@ function applyCandidateData(c) {
     if (c.priceType) comp.priceType = c.priceType;
     if (c.source) comp.priceSource = c.source;
     if (c.mlsNumber) comp.mlsNumber = c.mlsNumber;
+    // The GetObject key and photo count travel with the comp so the card can
+    // open the photo viewer after the candidate list is long gone
+    if (c.listingKey) comp.listingKey = c.listingKey;
+    if (c.photosCount > 0) comp.photosCount = c.photosCount;
     // Concessions are engine math, not a note: the grid nets them off the
     // price before the time adjustment
     if (c.concessions > 0) comp.concessions = c.concessions;
@@ -2234,6 +2397,17 @@ function applyCandidateData(c) {
     // square foot. Marketing prose is a weak signal and "sold as-is" is
     // boilerplate; a full condition uplift is the single largest line in the
     // grid, so it does not get to fire on a phrase the sale price contradicts.
+    // A HUMAN read from the photos outranks everything: the research's one
+    // clear result on condition is that human labels beat both the prose
+    // classifier and CV scoring, and the photos are exactly what the person
+    // looked at. Set from the photo viewer on the candidate row.
+    if (c.userCondition) {
+        comp.condition = c.userCondition;
+        comp.conditionEvidence = 'photos — your read';
+        comp.conditionUnverified = false;
+        delete comp.conditionConflict;
+        return true;
+    }
     const textRead = Engine.classifyCondition(c.remarks, c.propertyCondition);
     const read = Engine.reconcileCondition(textRead, c.ppsfDeviationPct);
     if (read && read.trusted) {
@@ -2320,7 +2494,35 @@ function renderCandidates(list) {
                 <div class="candidate-specs"></div>
             </div>
             <span class="candidate-score" title="similarity to subject (0–100)"></span>
+            <button class="btn btn-secondary candidate-photos" title="View listing photos and judge condition yourself">📷</button>
             <button class="btn btn-secondary candidate-add">Add</button>`;
+        const photosBtn = row.querySelector('.candidate-photos');
+        if (c.listingKey) {
+            photosBtn.addEventListener('click', () => openPhotoViewer({
+                listingKey: c.listingKey,
+                photosCount: c.photosCount,
+                label: c.address,
+                onCondition: (cond) => {
+                    // Remember the read on the candidate so Add carries it —
+                    // and if this one is already on a card, flow it through now
+                    c.userCondition = cond;
+                    const comp = appraisalComps.find(x =>
+                        normalizeAddr(x.label) === normalizeAddr(c.address));
+                    if (comp) {
+                        comp.condition = cond;
+                        comp.conditionEvidence = 'photos — your read';
+                        comp.conditionUnverified = false;
+                        delete comp.conditionConflict;
+                        renderComps();
+                        recalcAppraisal();
+                    }
+                }
+            }));
+        } else {
+            // A fallback-source candidate has no MLS key and therefore no photos
+            photosBtn.disabled = true;
+            photosBtn.title = 'No MLS photos for this source';
+        }
         const addrEl = row.querySelector('.candidate-addr');
         addrEl.textContent = c.address;
         // Only a recorded closing earns the badge — a proxy row stays bare

@@ -1940,6 +1940,117 @@ function suggestFieldMapFromMetadata(rows) {
 // Escape hatch for a stuck one-session-per-login server (see ReplyCode 20022).
 // Not called on the normal path: sessions are cached and reused, and logging
 // out after every search would throw away the cache for no benefit.
+/**
+ * One listing photo via RETS GetObject, as raw bytes.
+ *
+ * Photos exist so a HUMAN can judge condition. The research settled this
+ * direction deliberately: automated CV condition scoring measures at 0.3–0.4
+ * MAPE points with ~60% classifier accuracy, while human labels beat CV
+ * inside the pricing model — so the app ships the photos to the person and
+ * the person sets the condition dropdown, which is the one signal this feed
+ * does not carry (no PropertyCondition field on NTREIS).
+ *
+ * Mechanics: ID is `<ListingKeyNumeric>:<n>` — the record KEY, not the MLS
+ * number. Object 0 is the server's "preferred" photo; 1..N are indexed. A
+ * miss comes back as text/xml with ReplyCode 20403, and Matrix being Matrix,
+ * that XML can arrive with HTTP 200 — so the body's content type decides,
+ * never the status line. Same digest/session/serial discipline as Search:
+ * the digest signs path AND query, and everything queues single-file because
+ * NTREIS answers concurrency with 20512.
+ */
+function retsGetObject(env, key, index, type) {
+  return retsSerial(() => retsGetObjectInner(env, key, index, type));
+}
+
+async function retsGetObjectInner(env, key, index, type, attempt) {
+  const session = await retsLogin(env);
+  const objUrl = retsAbsolute(session, session.caps.GetObject);
+  if (!objUrl) throw new Error('RETS login returned no GetObject capability URL');
+  const q = new URLSearchParams({
+    Resource: (env.MLS_RETS_RESOURCE || 'Property').trim(),
+    // Matrix serves 'Photo'; MLS_PHOTO_TYPE exists for a feed that names it
+    // differently (HighRes, LargePhoto) — check METADATA-OBJECT before using
+    Type: type || (env.MLS_PHOTO_TYPE || 'Photo').trim(),
+    ID: `${key}:${index}`
+  });
+  const full = `${objUrl}?${q}`;
+  const res = await fetch(full, {
+    headers: await retsHeaders(env, 'GET', full, session),
+    redirect: 'manual', signal: mlsSignal(MLS_RETS_TIMEOUT_MS)
+  });
+
+  // Stale nonce mid-session: one re-digest against the fresh challenge, the
+  // same recovery retsSearchInner uses
+  if (res.status === 401 && !attempt) {
+    const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
+    if (challenge && String(challenge.stale).toLowerCase() === 'true' && session.digest) {
+      session.digest = { ...challenge, nc: 0 };
+      return await retsGetObjectInner(env, key, index, type, 1);
+    }
+    retsSessionCache = null;
+    return await retsGetObjectInner(env, key, index, type, 1);
+  }
+  if (!res.ok) throw new Error(`GetObject HTTP ${res.status}`);
+
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const bytes = await res.arrayBuffer();
+
+  // An error rides in as XML regardless of the HTTP status
+  if (contentType.includes('xml') || contentType.includes('text/')) {
+    const xml = new TextDecoder().decode(bytes.slice(0, 2048));
+    const code = retsReplyCode(xml);
+    if (code === 20403) return null;               // no such object — end of the roll
+    if (code === 20512 && !attempt) {              // throttled; one backoff
+      await sleep(1500);
+      return await retsGetObjectInner(env, key, index, type, 1);
+    }
+    throw new Error(`GetObject ReplyCode ${code}: ${retsReplyText(xml)}`);
+  }
+  // Multipart means the server ignored the single-object ID form; surfacing
+  // it beats silently handing the client a boundary-wrapped blob
+  if (contentType.includes('multipart')) {
+    throw new Error('GetObject returned multipart for a single-object request — unexpected on Matrix');
+  }
+  return { contentType: contentType || 'image/jpeg', bytes };
+}
+
+async function handleMlsPhoto(params, env, cors) {
+  if (!mlsConfigured(env)) return json({ error: 'no MLS feed configured' }, 501, cors);
+  const key = (params.get('key') || '').trim();
+  const index = parseInt(params.get('i'), 10);
+  // The key is a Matrix numeric id; anything else is a malformed or hostile
+  // request and must not reach the feed
+  if (!/^\d{1,15}$/.test(key)) return json({ error: 'key must be the numeric ListingKey' }, 400, cors);
+  if (!Number.isInteger(index) || index < 0 || index > 39) {
+    return json({ error: 'i must be 0-39' }, 400, cors);
+  }
+  // The server's own METADATA-OBJECT vocabulary, read live 2026-08-28:
+  // Photo, LargePhoto, XXLarge, HighRes — all image/jpeg, all counted by
+  // PhotosCount. A whitelist, because Type is interpolated into the RETS
+  // query and unknown values are silently substituted rather than rejected.
+  const PHOTO_TYPES = ['Photo', 'LargePhoto', 'XXLarge', 'HighRes'];
+  const type = params.get('type');
+  if (type && !PHOTO_TYPES.includes(type)) {
+    return json({ error: 'type must be one of ' + PHOTO_TYPES.join('/') }, 400, cors);
+  }
+  try {
+    const obj = await retsGetObject(env, key, index, type);
+    if (!obj) return json({ error: 'no photo at that index' }, 404, cors);
+    return new Response(obj.bytes, {
+      status: 200,
+      headers: {
+        'Content-Type': obj.contentType,
+        // Licensed content: cache in THIS browser only, and only for the
+        // same 12 hours the MLS record cache honours. Never shared/edge.
+        'Cache-Control': 'private, max-age=43200',
+        ...cors
+      }
+    });
+  } catch (e) {
+    return json({ error: mlsSystemName(env) + ': ' + e.message }, 502, cors);
+  }
+}
+
 async function retsLogout(env) {
   const session = retsSessionCache;
   if (!session) return 'no cached session';
@@ -2466,6 +2577,10 @@ function mlsToCandidate(row, env) {
     source: mlsSystemName(env),
     // ---- MLS-only additions ----
     mlsNumber: mlsFlat(row[f.mlsNumber]),
+    // The server's own record key — what GetObject addresses photos by.
+    // ListingId is the human-facing MLS number and GetObject rejects it.
+    listingKey: mlsFlat(row[f.key]),
+    photosCount: numOrNull(row[f.photosCount]),
     listPrice,
     originalListPrice: numOrNull(row[f.originalListPrice]),
     concessions: numOrNull(row[f.concessions]),
@@ -3012,6 +3127,20 @@ async function handleMlsProbe(params, env, cors) {
       };
     } catch (e) {
       out.dmql = { query: q, error: e.message };
+    }
+    return json(out, 200, cors);
+  }
+
+  // ?objects=1 — dump METADATA-OBJECT: the photo/media object types this
+  // server really serves, so the viewer requests a size that exists instead
+  // of whatever Matrix silently substitutes for an unknown Type value.
+  if (transport === 'rets' && params.get('objects') === '1') {
+    try {
+      const rows = await retsGetMetadata(env, 'METADATA-OBJECT', (env.MLS_RETS_RESOURCE || 'Property').trim());
+      out.objectTypes = rows;
+      out.steps.push('METADATA-OBJECT: ' + rows.length + ' rows');
+    } catch (e) {
+      out.steps.push('METADATA-OBJECT failed: ' + e.message);
     }
     return json(out, 200, cors);
   }
@@ -3612,6 +3741,8 @@ export default {
           return await handleTrend(url.searchParams, env, cors);
         case '/backtest/sample':
           return await handleBacktestSample(url.searchParams, env, cors);
+        case '/mls/photo':
+          return await handleMlsPhoto(url.searchParams, env, cors);
         case '/mls/probe':
           return await handleMlsProbe(url.searchParams, env, cors);
         case '/lookup':

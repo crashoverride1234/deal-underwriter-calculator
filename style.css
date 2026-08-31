@@ -1613,3 +1613,119 @@ input[type="range"]::-webkit-slider-thumb:active {
     line-height: 1.55;
 }
 .hoa-gate-list li { margin-bottom: 0.2rem; }
+
+/* ---- MLS photo viewer ---- */
+/* The photos exist so a human can judge condition in seconds. Dark stage,
+   big image, nothing competing with it; the condition buttons sit under the
+   photo because that is the decision being made. */
+.photo-viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.photo-viewer.hidden { display: none; }
+
+.photo-viewer-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.82);
+}
+
+.photo-viewer-panel {
+    position: relative;
+    width: min(96vw, 1100px);
+    max-height: 94vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: #111827;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+}
+
+.photo-viewer-head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.photo-viewer-title {
+    font-weight: 600;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.photo-viewer-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.photo-viewer-stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40vh;
+    background: #000;
+    border-radius: 0.35rem;
+    overflow: hidden;
+}
+
+.photo-viewer-img {
+    max-width: 100%;
+    max-height: 74vh;
+    display: block;
+}
+
+.photo-viewer-loading {
+    position: absolute;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+.photo-viewer-loading.hidden { display: none; }
+.photo-viewer-img.hidden { display: none; }
+
+.photo-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border: none;
+    font-size: 2rem;
+    line-height: 1;
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+    border-radius: 0.35rem;
+}
+.photo-nav[data-prev] { left: 0.5rem; }
+.photo-nav[data-next] { right: 0.5rem; }
+.photo-nav:hover { background: rgba(0, 0, 0, 0.8); }
+
+.photo-viewer-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+.photo-viewer-actions.hidden { display: none; }
+
+.photo-viewer-note {
+    color: var(--accent-success);
+    font-size: 0.75rem;
+}
+
+.candidate-photos { flex-shrink: 0; }
+.candidate-photos:disabled { opacity: 0.35; cursor: default; }
