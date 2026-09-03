@@ -1920,15 +1920,20 @@ function compDistanceMi(comp) {
     return Number.isFinite(fromSearch) ? fromSearch : null;
 }
 
-function updateCompTolerances() {
-    // readAppraisalInputs() hands the engine raw strings, so a blank subject
-    // field stays blank — EXCEPT baths, which totalBaths() sums to the NUMBER
-    // 0 when nothing was entered (the half-bath field ships as "0"). Zero is
-    // a value to has(), so left alone it would paint every comp's Baths.
+// readAppraisalInputs() hands the engine raw strings, so a blank subject
+// field stays blank — EXCEPT baths, which totalBaths() sums to the NUMBER 0
+// when nothing was entered (the half-bath field ships as "0"). Zero is a
+// value to has(), so left alone it would paint every comp's Baths.
+function toleranceSubject() {
     const subject = readAppraisalInputs().subject;
     if (subjectBathsFullInput.value.trim() === '' && Engine.num(subjectBathsHalfInput.value) === 0) {
         subject.baths = '';
     }
+    return subject;
+}
+
+function updateCompTolerances() {
+    const subject = toleranceSubject();
     const settings = readToleranceSettings();
     [...compsContainer.children].forEach((card, i) => {
         const comp = appraisalComps[i];
@@ -1974,6 +1979,124 @@ function updateCompTolerances() {
             strip.appendChild(span);
         });
         strip.classList.toggle('hidden', parts.length === 0);
+    });
+}
+
+// ---- The same bands, on the SUGGESTION list ----
+// This is where the bands earn the most: the card highlight tells you a comp
+// you already picked is a stretch, the suggestion highlight stops you picking
+// it. Same engine call, same colour, painted onto the individual facts of the
+// one-line spec readout rather than onto form fields.
+
+// A candidate carries soldDate, not the card's monthsAgo. Anchor on the
+// CONTRACT date exactly as applyCandidateData() does, so the row and the card
+// it becomes never disagree about how old the sale is.
+function candidateMonthsAgo(c) {
+    if (!c.soldDate) return '';
+    const m = Math.round(Engine.compMonthsAgo({ closeDate: c.soldDate, contractDate: c.contractDate }));
+    return Number.isFinite(m) && m >= 0 ? m : '';
+}
+
+// The spec line as SEGMENTS rather than one joined string, each tagged with
+// the tolerance field(s) it reports, so a single fact can be painted without
+// colouring the whole row. Beds and baths share a segment because they are
+// displayed as one ("3 bd / 2 ba"); it flags if either is outside and the
+// tooltip says which.
+function candidateSpecSegments(c) {
+    const textRead = Engine.classifyCondition(c.remarks, c.propertyCondition);
+    const read = Engine.reconcileCondition(textRead, c.ppsfDeviationPct);
+    const conditionNote = !textRead
+        ? (c.remarks ? 'remarks: no condition signal' : 'no remarks')
+        : (read && read.trusted)
+            ? `${textRead.from === 'field' ? 'MLS condition' : 'remarks'} → ${textRead.condition} (“${textRead.evidence}”)`
+            : `⚠ ${read.conflict}`;
+    const priceNote = !c.price ? 'no price'
+        : formatCurrency(c.price) + (c.priceType === 'closed' ? ' closed' : ' list');
+    return [
+        { text: priceNote },
+        // $/sqft is how you see at a glance that two "comps" are in
+        // different market segments — it is the number an appraiser
+        // scans first, and the grid cannot adjust a segment mismatch away
+        { text: c.ppsf ? `$${c.ppsf}/sf${c.ppsfOutlier ? ' ⚠ off-market-rate' : ''}` : null },
+        { text: c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null, tol: ['monthsAgo'] },
+        { text: c.concessions > 0 ? `−${formatCurrency(c.concessions)} concessions` : null },
+        { text: c.sqft ? `${c.sqft.toLocaleString()} sqft` : null, tol: ['sqft'] },
+        { text: (c.beds != null && c.baths != null) ? `${c.beds} bd / ${c.baths} ba` : null, tol: ['beds', 'baths'] },
+        { text: c.yearBuilt ? `blt ${c.yearBuilt}` : null, tol: ['yearBuilt'] },
+        { text: c.distanceMi != null ? `${c.distanceMi} mi` : null, tol: ['distanceMi'] },
+        { text: c.dom != null ? `${c.dom} DOM` : null },
+        // Correlation is a RentCast score; it means nothing on an MLS row
+        { text: c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null },
+        { text: conditionNote }
+    ].filter(s => s.text);
+}
+
+function renderCandidateSpecs(el, c) {
+    if (!el) return;
+    const r = Engine.compTolerance(toleranceSubject(),
+        { ...c, monthsAgo: candidateMonthsAgo(c) }, readToleranceSettings());
+    el.textContent = '';
+    const segments = candidateSpecSegments(c);
+    segments.forEach((seg, i) => {
+        if (i) el.append(' · ');
+        const span = document.createElement('span');
+        // Feed text — textContent, never innerHTML
+        span.textContent = seg.text;
+        const verdicts = (seg.tol || []).map(k => r.fields[k]).filter(Boolean);
+        if (verdicts.length) {
+            const tip = verdicts.map(v => v.note);
+            // The segment prints the CLOSE date while the age is measured from
+            // the CONTRACT date, so on a financed sale the tooltip's month
+            // count does not match the date beside it. Say so, rather than
+            // leaving the reader to check the arithmetic and conclude it is
+            // broken: measured median lag on this feed is about 30 days, and
+            // one of these comps closed 36 days after it went under contract.
+            if ((seg.tol || []).includes('monthsAgo') && c.contractDate && c.soldDate
+                && String(c.contractDate).slice(0, 10) !== String(c.soldDate).slice(0, 10)) {
+                tip.push(`Measured from the contract date ${String(c.contractDate).slice(0, 10)}, when the price was agreed, not the ${String(c.soldDate).slice(0, 10)} close.`);
+            }
+            span.title = tip.join('\n');
+        }
+        if (verdicts.some(v => v.outside)) span.classList.add('out');
+        el.appendChild(span);
+    });
+    // A band that fired but owns no segment still has to reach the eye. Lot
+    // size is the live case — this row has never printed one, so a candidate
+    // on a five-times lot looked perfectly clean here and then lit up the
+    // instant it was added, which inverts the whole point of putting the
+    // bands on the list you choose from. Written generically rather than as a
+    // lot special case, so a band added to the engine later surfaces here
+    // instead of being silently dropped. Same rule as the comp card's strip:
+    // nothing on a clean row, a chip when it breaks.
+    const covered = new Set(segments.flatMap(s => s.tol || []));
+    r.outside.filter(k => !covered.has(k)).forEach(k => {
+        el.append(' · ');
+        const span = document.createElement('span');
+        span.textContent = r.fields[k].short;
+        span.title = r.fields[k].note;
+        span.classList.add('out');
+        el.appendChild(span);
+    });
+}
+
+// Changing a band, or the subject itself, must restyle a suggestion list that
+// is already on screen. Guarded by a signature because recalcAppraisal() runs
+// on every keystroke and this list can be twenty rows of eleven segments —
+// typing in a comp card must not rebuild all of it.
+let candidateTolSig = '';
+
+function candidateTolSignature() {
+    const s = toleranceSubject();
+    return JSON.stringify([s.sqft, s.beds, s.baths, s.yearBuilt, s.lotSqft, readToleranceSettings()]);
+}
+
+function updateCandidateTolerances() {
+    if (!compCandidatesPanel || compCandidatesPanel.classList.contains('hidden')) return;
+    const sig = candidateTolSignature();
+    if (sig === candidateTolSig) return;
+    candidateTolSig = sig;
+    compCandidatesPanel.querySelectorAll('.candidate-row').forEach(row => {
+        if (row.candidateData) renderCandidateSpecs(row.querySelector('.candidate-specs'), row.candidateData);
     });
 }
 
@@ -2576,32 +2699,9 @@ function renderCandidates(list) {
     list.forEach(c => {
         const row = document.createElement('div');
         row.className = 'candidate-row';
-        const textRead = Engine.classifyCondition(c.remarks, c.propertyCondition);
-        const read = Engine.reconcileCondition(textRead, c.ppsfDeviationPct);
-        const conditionNote = !textRead
-            ? (c.remarks ? 'remarks: no condition signal' : 'no remarks')
-            : (read && read.trusted)
-                ? `${textRead.from === 'field' ? 'MLS condition' : 'remarks'} → ${textRead.condition} (“${textRead.evidence}”)`
-                : `⚠ ${read.conflict}`;
-        const priceNote = !c.price ? 'no price'
-            : formatCurrency(c.price) + (c.priceType === 'closed' ? ' closed' : ' list');
-        const specs = [
-            priceNote,
-            // $/sqft is how you see at a glance that two "comps" are in
-            // different market segments — it is the number an appraiser
-            // scans first, and the grid cannot adjust a segment mismatch away
-            c.ppsf ? `$${c.ppsf}/sf${c.ppsfOutlier ? ' ⚠ off-market-rate' : ''}` : null,
-            c.soldDate ? `sold ${String(c.soldDate).slice(0, 10)}` : null,
-            c.concessions > 0 ? `−${formatCurrency(c.concessions)} concessions` : null,
-            c.sqft ? `${c.sqft.toLocaleString()} sqft` : null,
-            (c.beds != null && c.baths != null) ? `${c.beds} bd / ${c.baths} ba` : null,
-            c.yearBuilt ? `blt ${c.yearBuilt}` : null,
-            c.distanceMi != null ? `${c.distanceMi} mi` : null,
-            c.dom != null ? `${c.dom} DOM` : null,
-            // Correlation is a RentCast score; it means nothing on an MLS row
-            c.correlation != null ? `RentCast ${(c.correlation * 100).toFixed(0)}%` : null,
-            conditionNote
-        ].filter(Boolean).join(' · ');
+        // The row keeps its candidate so a band change can restyle the spec
+        // line in place, without re-running the search
+        row.candidateData = c;
         if (c.remarks) row.title = c.remarks.slice(0, 600); // hover to read the listing text
         row.innerHTML = `
             <div class="candidate-main">
@@ -2649,7 +2749,7 @@ function renderCandidates(list) {
             badge.title = 'Recorded closing from the MLS feed';
             addrEl.appendChild(badge);
         }
-        row.querySelector('.candidate-specs').textContent = specs;
+        renderCandidateSpecs(row.querySelector('.candidate-specs'), c);
         row.querySelector('.candidate-score').textContent = c.score;
         const btn = row.querySelector('.candidate-add');
         if (c.isSubject) {
@@ -2667,6 +2767,7 @@ function renderCandidates(list) {
         });
         compCandidatesPanel.appendChild(row);
     });
+    candidateTolSig = candidateTolSignature();
     appendMlsAttribution(compCandidatesPanel,
         (compsMeta.mls && compsMeta.mls.used) ? compsMeta.mls.attribution : null);
 }
@@ -3774,6 +3875,7 @@ function recalcAppraisal() {
     updateSubjectSummary();
     refreshCompSubdivisions();
     updateCompTolerances();
+    updateCandidateTolerances();
     updateCompsMap();
 
     arvEstimateValue.textContent = formatCurrency(a.arv);

@@ -1189,6 +1189,15 @@
             return Number.isFinite(raw) ? Math.max(0, raw) : d[key];
         };
         const val = (v) => (has(v) && Number.isFinite(parseFloat(v))) ? parseFloat(v) : null;
+        // A measurement of ZERO is missing data, not a zero-foot house: the
+        // feed reports an unknown lot as 0 (seen live on a real NTREIS row,
+        // which rendered "0 sqft lot (−100%)"), and "missing comp data must
+        // produce NO adjustment, not a phantom one" applies to a verdict just
+        // as it does to a dollar line. Rooms are deliberately NOT covered —
+        // a studio genuinely has 0 bedrooms — and 0 months ago and 0.00 miles
+        // are real answers, so the guard sits only on the three measurements
+        // where zero is impossible rather than on val() itself.
+        const measured = (v) => { const n = val(v); return (n !== null && n > 0) ? n : null; };
         const fmt = (n, dp = 0) => Number(n).toLocaleString('en-US', {
             minimumFractionDigits: 0, maximumFractionDigits: dp
         });
@@ -1234,11 +1243,11 @@
                 note: mkNote(cv, outside), short: mkShort(cv) };
         };
 
-        fields.sqft = pctBand(val(c.sqft), val(s.sqft), limitOf('sqftPct'), 'living area');
-        fields.lotSqft = pctBand(val(c.lotSqft), val(s.lotSqft), limitOf('lotPct'), 'lot');
+        fields.sqft = pctBand(measured(c.sqft), measured(s.sqft), limitOf('sqftPct'), 'living area');
+        fields.lotSqft = pctBand(measured(c.lotSqft), measured(s.lotSqft), limitOf('lotPct'), 'lot');
 
         {
-            const cv = val(c.yearBuilt), sv = val(s.yearBuilt), limit = limitOf('yearBuiltYears');
+            const cv = measured(c.yearBuilt), sv = measured(s.yearBuilt), limit = limitOf('yearBuiltYears');
             fields.yearBuilt = absBand(cv, sv, limit,
                 (delta, outside) => delta === 0
                     ? `Built ${yr(cv)}, the same year as the subject (tolerance ±${fmt(limit)} years)`

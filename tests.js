@@ -1753,6 +1753,26 @@ test('comp tolerance: smaller and older flag just like larger and newer', () => 
     assert(/−12 yrs/.test(r.fields.yearBuilt.short), r.fields.yearBuilt.short);
 });
 
+test('comp tolerance: a zero measurement is missing data, not a zero-foot house', () => {
+    // Seen live: an NTREIS row whose lot the feed reports as 0 rendered
+    // "0 sqft lot (−100%)" as a confident flag
+    const r = Engine.compTolerance(TOL_SUBJECT, { sqft: 0, lotSqft: 0, yearBuilt: 0 }, {});
+    eq(r.fields.lotSqft, null, 'a zero lot is unknown');
+    eq(r.fields.sqft, null, 'a zero living area is unknown');
+    eq(r.fields.yearBuilt, null, 'year zero is unknown, not 1,970 years old');
+    eq(r.count, 0);
+    // ...and a zero on the SUBJECT side is equally unknown
+    eq(Engine.compTolerance({ sqft: 0, lotSqft: 0, yearBuilt: 0 }, { sqft: 1500, lotSqft: 7000, yearBuilt: 1970 }, {}).count, 0);
+    // Rooms are NOT covered: a studio genuinely has none, and 0 months ago
+    // and 0.00 miles away are real answers that must still be judged
+    const rooms = Engine.compTolerance({ beds: 3, baths: 2 }, { beds: 0, baths: 0, monthsAgo: 0, distanceMi: 0 }, {});
+    eq(rooms.fields.beds.outside, true, '0 beds against a 3-bed subject is a real gap');
+    eq(rooms.fields.baths.outside, true);
+    eq(rooms.fields.monthsAgo.outside, false, 'sold this month is inside the window');
+    eq(rooms.fields.distanceMi.outside, false, 'the same address is not too far away');
+    eq(rooms.fields.monthsAgo.note, 'Sold 0 months ago (within the 6-month window)');
+});
+
 test('comp tolerance: a blank on either side is no verdict, not a flag', () => {
     const r = Engine.compTolerance({ sqft: '', yearBuilt: 1970, beds: 3 },
         { sqft: 2100, yearBuilt: '', beds: undefined, monthsAgo: '', distanceMi: null }, {});

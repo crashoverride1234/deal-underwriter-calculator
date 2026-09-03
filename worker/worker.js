@@ -2378,11 +2378,30 @@ function mlsBaths(row, f) {
   return numOrNull(row[f.bathsTotal]);
 }
 
+// A lot measured in SQUARE FEET is never a fraction. Listing agents type
+// acres into the square-foot column and NTREIS publishes it verbatim —
+// 1109 Bonnie Brae Avenue came back as LotSizeSquareFeet 0.149, which is
+// 6,490 sqft, and 0.149 is truthy so the old `if (sq) return sq` handed it
+// straight through. That is not a cosmetic problem: the lot line of the
+// adjustment grid would price the difference against a subject's 8,949 sqft
+// and invent tens of thousands of dollars of adjustment on a comp the user
+// added in good faith.
+//
+// So the reading is sanity-checked against the two ways it can be wrong.
+// Under the floor it is not square feet; below 10 it is a plausible
+// residential ACREAGE and nothing else, so it converts; between the two it
+// is unreadable garbage and becomes null rather than a guess. An explicit
+// acres column always beats an unusable square-foot one.
+const LOT_SQFT_FLOOR = 100;   // no residential lot is smaller than this
+const LOT_ACRES_MAX = 10;     // a fractional reading this small is acres
+
 function mlsLotSqft(row, f) {
   const sq = numOrNull(row[f.lotSqft]);
-  if (sq) return sq;
+  if (sq && sq >= LOT_SQFT_FLOOR) return sq;
   const acres = numOrNull(row[f.lotAcres]);
-  return acres ? Math.round(acres * 43560) : null;
+  if (acres) return Math.round(acres * 43560);
+  if (sq && sq > 0 && sq < LOT_ACRES_MAX) return Math.round(sq * 43560);
+  return null;
 }
 
 // The record's hoaFee is MONTHLY (the client adds it straight to a monthly

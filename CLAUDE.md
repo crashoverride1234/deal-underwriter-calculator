@@ -21,7 +21,8 @@ GitHub Pages from `main`.
   zero, plus the rent a 1.25 lender DSCR needs; rounds UP so the answer never
   undershoots), `bracketingDefects()` (does the comp set SURROUND the subject),
   `compTolerance()` (one comp against the subject, fact by fact — which
-  field is the stretch; display-only, feeds the card's gradient highlight),
+  field is the stretch; display-only, feeds the gradient highlight on both
+  the comp cards and the suggestion list),
   `neighborhoodTaxRate()` (median effective rate off the comps' own bills —
   closed prices only, null under 3, so a MUD/PID district is distinguishable
   from a bad assessment) +
@@ -433,13 +434,27 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   match brackets a feature on its own (that is the ideal comp, not a gap). Read
   `appraisalComps`, never `lastAppraisal.comps` — `appraise()` emits no
   sqft/beds/yearBuilt.
-- **The comp-card gradient is a SELECTION cue, not an adjustment**
-  (`compTolerance()`, `updateCompTolerances()`, added 2026-09-03). The warm
-  gradient the SUBJECT PROP tag wears is painted onto any comp field that sits
-  outside the band an appraiser would pick from — label, value text and a
-  1px border on the input, plus a strip under the address that also carries
-  the measured distance. Bands live in `DEFAULTS.compTolerances` (GLA ±25%,
-  lot ±50%, ±8 years, ±1 bed/bath, sold within 6 months, within 1 mile) and
+- **The tolerance gradient is a SELECTION cue, not an adjustment**
+  (`compTolerance()`, `updateCompTolerances()`, `renderCandidateSpecs()`,
+  added 2026-09-03). The warm gradient the SUBJECT PROP tag wears is painted
+  onto any comp fact that sits outside the band an appraiser would pick from.
+  It rides on BOTH surfaces, and the SUGGESTION list is the one that matters
+  most: the card highlight tells you a comp you already chose is a stretch,
+  the suggestion highlight stops you choosing it. On a card that is the
+  label, the value text and a 1px border on the input, plus a strip under the
+  address carrying the measured distance; on a `.candidate-row` it is the
+  individual facts of the one-line spec readout, which is why
+  `candidateSpecSegments()` returns `{text, tol}` SEGMENTS rather than one
+  joined string. Beds and baths share a segment there because they are
+  displayed as one, so it flags if either is outside and the tooltip says
+  which. Measured live on 1655 Robinwood Dr against 25 NTREIS candidates: the
+  top three ranked comps came back clean and every flag below them named a
+  real defect (a 27.5%-smaller house, a 2026 new build, a sale seven months
+  old), so the colour tracks `scoreComp()` without duplicating it — the two
+  answer different questions, and a clean row with a mediocre score is
+  informative rather than a contradiction. Bands live in
+  `DEFAULTS.compTolerances` (GLA ±25%, lot ±50%, ±8 years, ±1 bed/bath,
+  sold within 6 months, within 1 mile) and
   are overridable from the "Comp Selection Tolerances" rows of the weights
   panel (persisted with the other model settings; blank restores the default,
   an explicit 0 flags any difference — the `has()` rule again). Three things
@@ -447,7 +462,7 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   collapsed details, so a flag there would otherwise be invisible; a blank on
   EITHER side is no verdict, never a flag (the subject's baths need explicit
   care — `totalBaths()` sums blanks to the NUMBER 0, which `has()` accepts,
-  so `updateCompTolerances()` blanks it when nothing was entered); and every
+  so `toleranceSubject()` blanks it when nothing was entered); and every
   verdict is made on the value ROUNDED TO THE PRECISION THE TOOLTIP PRINTS —
   one decimal of percent and of rooms, two of miles — so "25.4% larger
   (outside ±25%)" and "25% larger (within ±25%)" are the only two things it
@@ -464,7 +479,26 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   measured (a typed, un-picked subject has no coordinates); typing in a
   comp's label clears it with the pin, and typing in the SUBJECT address
   clears every comp's, so "Restore previous comps" cannot revive a distance
-  measured against a different house. Gradient text is a background image,
+  measured against a different house. On the suggestion list the age comes
+  from `candidateMonthsAgo()`, which anchors on the CONTRACT date exactly as
+  `applyCandidateData()` does — so the row prints a close date beside a month
+  count derived from a different date, and on a financed sale the two look
+  like bad arithmetic (1025 Cleckler Avenue: closed 2026-03-23, under contract
+  2026-02-16, reads seven months). The tooltip therefore names the anchor
+  outright rather than leaving the reader to check the subtraction and
+  conclude the app cannot count. `updateCandidateTolerances()` restyles an
+  on-screen list when a band or the subject changes, guarded by
+  `candidateTolSig` because `recalcAppraisal()` runs per keystroke and this
+  list is twenty-odd rows of eleven segments; each row carries its own
+  candidate as `row.candidateData`, so a band change never re-runs the
+  search. The row prints no lot figure, so `renderCandidateSpecs()` closes
+  with a GENERIC tail: any field in `outside` that no rendered segment
+  claimed is appended as its own flagged chip. Written that way deliberately
+  rather than as a lot special case — six of the seven bands had a segment
+  and the seventh was computed and thrown away, which made the Lot Size input
+  a dead control on this surface and let a comp on a five-times lot look
+  clean in the list and turn orange the moment it was added. A band added to
+  `DEFAULTS.compTolerances` later now surfaces here on its own. Gradient text is a background image,
   which printers drop, so `@media print` falls back to solid amber ink.
   Nothing here touches `appraise()` — a flagged comp is adjusted exactly as
   before (tested).

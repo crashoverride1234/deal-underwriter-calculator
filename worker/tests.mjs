@@ -117,6 +117,24 @@ test('mls record: lot acres convert to square feet (the record shape is sqft)', 
     eq(W.mlsToRecord(RESO_CLOSED, ENV).lot, Math.round(0.191 * 43560));
 });
 
+test('mls lot: a fractional "square feet" reading is acres, not a 0-sqft lot', () => {
+    // Live NTREIS row (1109 Bonnie Brae Avenue): LotSizeSquareFeet 0.149.
+    // 0.149 is truthy, so the old guard handed it through as square feet and
+    // the UI rendered "0 sqft lot (−100%)" while the grid would have priced
+    // an 8,949 sqft difference that does not exist.
+    const f = W.mlsFields(ENV);
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 0.149 }, f), Math.round(0.149 * 43560), 'reads as acres');
+    // An explicit acres column always wins over an unusable sqft reading
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 0.149, LotSizeAcres: 0.2 }, f), Math.round(0.2 * 43560));
+    // A real square-foot value is untouched
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 8400 }, f), 8400);
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 100 }, f), 100, 'the floor itself is a real lot');
+    // Between the floor and the acreage range it is unreadable — null, not a guess
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 45 }, f), null);
+    eq(W.mlsLotSqft({ LotSizeSquareFeet: 0 }, f), null);
+    eq(W.mlsLotSqft({}, f), null);
+});
+
 test('mls record: an explicit LotSizeSquareFeet beats the acres conversion', () => {
     const r = W.mlsToRecord({ ...RESO_CLOSED, LotSizeSquareFeet: 8400 }, ENV);
     eq(r.lot, 8400);
