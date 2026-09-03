@@ -1224,6 +1224,18 @@ const adjGarageInput = document.getElementById('adj-garage');
 const adjPoolInput = document.getElementById('adj-pool');
 const adjYearInput = document.getElementById('adj-year');
 const adjStoryInput = document.getElementById('adj-story');
+// Comp selection tolerances (highlight only — see updateCompTolerances)
+const tolSqftInput = document.getElementById('tol-sqft');
+const tolYearInput = document.getElementById('tol-year');
+const tolMonthsInput = document.getElementById('tol-months');
+const tolDistanceInput = document.getElementById('tol-distance');
+const tolBedsInput = document.getElementById('tol-beds');
+const tolBathsInput = document.getElementById('tol-baths');
+const tolLotInput = document.getElementById('tol-lot');
+const TOLERANCE_INPUTS = [
+    [tolSqftInput, 'sqftPct'], [tolYearInput, 'yearBuiltYears'], [tolMonthsInput, 'monthsAgo'],
+    [tolDistanceInput, 'distanceMi'], [tolBedsInput, 'beds'], [tolBathsInput, 'baths'], [tolLotInput, 'lotPct']
+];
 const qualSettingsContainer = document.getElementById('qual-settings');
 
 const lookupBtn = document.getElementById('lookup-address-btn');
@@ -1315,7 +1327,10 @@ function emptyCompSlot() {
     return {
         ...compTemplate(),
         salePrice: '', sqft: '', beds: '', baths: '',
-        lotSqft: '', garageSpaces: '', yearBuilt: ''
+        lotSqft: '', garageSpaces: '', yearBuilt: '',
+        // Recency unknown, not "sold today": the engine reads a blank as 0
+        // either way, but the tolerance tooltip must not claim a window
+        monthsAgo: ''
     };
 }
 
@@ -1346,7 +1361,11 @@ function splitBaths(total) {
 const SETTINGS_STATE_FIELDS = {
     pricePerSqft: adjPriceSqftInput, bed: adjBedInput, bath: adjBathInput,
     condAvg: adjCondAvgInput, condDated: adjCondDatedInput, appreciation: adjAppreciationInput,
-    lot: adjLotInput, garage: adjGarageInput, pool: adjPoolInput, year: adjYearInput, story: adjStoryInput
+    lot: adjLotInput, garage: adjGarageInput, pool: adjPoolInput, year: adjYearInput, story: adjStoryInput,
+    // Selection tolerances are market-area tuning too (an acreage submarket
+    // wants a wider lot band), so they ride in the same settings blob
+    tolSqft: tolSqftInput, tolYear: tolYearInput, tolMonths: tolMonthsInput, tolDistance: tolDistanceInput,
+    tolBeds: tolBedsInput, tolBaths: tolBathsInput, tolLot: tolLotInput
 };
 
 function saveAppraisalState() {
@@ -1519,6 +1538,7 @@ function renderComps() {
                     <div class="address-suggestions hidden" role="listbox"></div>
                 </div>
                 <div class="comp-subdivision hidden" data-subdiv></div>
+                <div class="comp-tolerance hidden" data-tolerance></div>
                 <div class="comp-price-truth hidden" data-price-truth></div>
             </div>
             <div class="input-row">
@@ -1737,7 +1757,7 @@ function renderComps() {
                     // Typing invalidates the previously picked location, same
                     // as the subject field — the map pin and site scan must
                     // never assert coordinates the current text didn't produce
-                    comp.lat = ''; comp.lon = '';
+                    comp.lat = ''; comp.lon = ''; comp.distanceMi = '';
                 }
                 if (el.dataset.field === 'condition') {
                     // The user made the call — stop flagging it as assumed
@@ -1801,6 +1821,7 @@ function renderComps() {
                 // must clear any stale pin from the previous pick
                 comp.lat = s.lat != null ? s.lat : '';
                 comp.lon = s.lon != null ? s.lon : '';
+                comp.distanceMi = '';
                 lookupCompProperty(comp, s.text, s.mprId || null,
                     (s.lat != null && s.lon != null) ? { lat: s.lat, lon: s.lon } : null);
             }
@@ -1860,6 +1881,99 @@ function refreshCompSubdivisions() {
         const match = Boolean(subjectSub) && norm(sub) === subjectSub;
         el.textContent = match ? `${sub} · ✓ matches subject` : sub;
         el.classList.toggle('match', match);
+    });
+}
+
+// ==================== Comp selection tolerances ====================
+// The warm gradient the SUBJECT PROP tag wears, painted onto whichever comp
+// field sits outside the band an appraiser would select from: living area,
+// year built, sale recency, distance, rooms, lot. Display only — the grid
+// adjusts a flagged comp exactly as before; the colour says which number is
+// doing the stretching. Bands come from the weights panel and fall back to
+// Engine.DEFAULTS.compTolerances; the comparison itself is engine math.
+const TOLERANCE_CARD_FIELDS = ['sqft', 'yearBuilt', 'monthsAgo', 'beds', 'baths', 'lotSqft'];
+
+function readToleranceSettings() {
+    return Object.fromEntries(TOLERANCE_INPUTS.map(([input, key]) => [key, input.value]));
+}
+
+// The card's months-ago field stops at 24, so a record whose last sale is
+// older than that leaves it BLANK rather than lying with a 0. For the
+// highlight the sale date still answers: a comp sold three years ago is
+// exactly what the recency band exists to flag.
+function compMonthsAgoForTolerance(comp) {
+    if (comp.monthsAgo !== '' && comp.monthsAgo != null) return comp.monthsAgo;
+    if (!comp.lastSaleDate) return '';
+    const months = Math.round(Engine.compMonthsAgo({ closeDate: comp.lastSaleDate }));
+    return Number.isFinite(months) && months >= 0 ? months : '';
+}
+
+// Live haversine from the picked subject to the comp's own coordinates;
+// falls back to the distance the comps search measured server-side (the
+// subject was typed, not picked, so there is nothing to measure from here)
+function compDistanceMi(comp) {
+    const lat = parseFloat(comp.lat), lon = parseFloat(comp.lon);
+    if (lastSelectedCoords && Number.isFinite(lat) && Number.isFinite(lon)) {
+        return haversineMeters(lastSelectedCoords.lat, lastSelectedCoords.lon, lat, lon) / 1609.34;
+    }
+    const fromSearch = parseFloat(comp.distanceMi);
+    return Number.isFinite(fromSearch) ? fromSearch : null;
+}
+
+function updateCompTolerances() {
+    // readAppraisalInputs() hands the engine raw strings, so a blank subject
+    // field stays blank — EXCEPT baths, which totalBaths() sums to the NUMBER
+    // 0 when nothing was entered (the half-bath field ships as "0"). Zero is
+    // a value to has(), so left alone it would paint every comp's Baths.
+    const subject = readAppraisalInputs().subject;
+    if (subjectBathsFullInput.value.trim() === '' && Engine.num(subjectBathsHalfInput.value) === 0) {
+        subject.baths = '';
+    }
+    const settings = readToleranceSettings();
+    [...compsContainer.children].forEach((card, i) => {
+        const comp = appraisalComps[i];
+        if (!comp) return;
+        const r = Engine.compTolerance(subject, {
+            ...comp,
+            distanceMi: compDistanceMi(comp),
+            monthsAgo: compMonthsAgoForTolerance(comp)
+        }, settings);
+
+        // Field by field: the label takes the gradient, the input a gradient
+        // border, and both carry the reason on hover (inside or out)
+        TOLERANCE_CARD_FIELDS.forEach(key => {
+            const input = card.querySelector(`[data-field="${key}"]`);
+            const group = input && input.closest('.form-group');
+            if (!group) return;
+            const f = r.fields[key];
+            group.classList.toggle('out-of-tolerance', Boolean(f && f.outside));
+            const tip = f ? f.note : '';
+            input.title = tip;
+            const label = group.querySelector('label');
+            if (label) label.title = tip;
+        });
+
+        // Strip under the address: the distance whenever it is known, then
+        // every field outside its band. Year built and lot sit inside the
+        // collapsed details, so without this line a flag there is invisible.
+        const strip = card.querySelector('[data-tolerance]');
+        if (!strip) return;
+        const parts = [];
+        const dist = r.fields.distanceMi;
+        if (dist) parts.push({ text: dist.short, out: dist.outside, note: dist.note });
+        r.outside.filter(k => k !== 'distanceMi').forEach(k => {
+            parts.push({ text: r.fields[k].short, out: true, note: r.fields[k].note });
+        });
+        strip.textContent = '';
+        parts.forEach((p, k) => {
+            if (k) strip.append(' · ');
+            const span = document.createElement('span');
+            span.textContent = p.text;
+            span.title = p.note;
+            if (p.out) span.classList.add('out');
+            strip.appendChild(span);
+        });
+        strip.classList.toggle('hidden', parts.length === 0);
     });
 }
 
@@ -2359,6 +2473,7 @@ function applyCandidateData(c) {
     }
     comp.label = c.address;
     if (c.lat != null && c.lon != null) { comp.lat = c.lat; comp.lon = c.lon; }
+    if (c.distanceMi != null) comp.distanceMi = c.distanceMi;
     if (c.price > 0) comp.salePrice = c.price;
     if (c.sqft) comp.sqft = c.sqft;
     if (c.beds != null) comp.beds = c.beds;
@@ -2373,7 +2488,7 @@ function applyCandidateData(c) {
         // by that much on every comp, always in the same direction.
         const months = Math.round(
             Engine.compMonthsAgo({ closeDate: c.soldDate, contractDate: c.contractDate }));
-        if (months >= 0 && months <= 24) comp.monthsAgo = months;
+        comp.monthsAgo = (months >= 0 && months <= 24) ? months : ''; // beyond the field = unknown, never a stale 0
     }
     if (c.price > 0) comp.lastSalePrice = c.price;
     // Provenance travels with the number so the card can say whether this is
@@ -3658,6 +3773,7 @@ function recalcAppraisal() {
     updateWeightImpacts(a);
     updateSubjectSummary();
     refreshCompSubdivisions();
+    updateCompTolerances();
     updateCompsMap();
 
     arvEstimateValue.textContent = formatCurrency(a.arv);
@@ -4392,7 +4508,7 @@ function applyRecordToComp(comp, rec) {
         const months = Math.round((Date.now() - new Date(rec.lastSaleDate).getTime()) / (1000 * 60 * 60 * 24 * 30.44));
         // Only within the comp window — an ancient record sale must not
         // masquerade as a 24-month-old comp
-        if (months >= 0 && months <= 24) comp.monthsAgo = months;
+        comp.monthsAgo = (months >= 0 && months <= 24) ? months : ''; // beyond the field = unknown, never a stale 0
     }
     if (rec.formattedAddress) comp.label = rec.formattedAddress.split(',')[0];
 }
@@ -4635,6 +4751,9 @@ attachAddressAutocomplete(subjectAddressInput, addressSuggestionsBox, (s) => {
 
 subjectAddressInput.addEventListener('input', () => {
     lastSelectedCoords = null; // typing invalidates the previously picked location
+    // ...and every distance the comps search measured against it — "Restore
+    // previous comps" would otherwise bring them back against a new subject
+    appraisalComps.forEach(c => { c.distanceMi = ''; });
     lastSelectedMprId = null;
     purchaseEnteredForSubject = false; // a new subject voids the old price as evidence
     updateProtestNote();
@@ -4731,7 +4850,8 @@ addCompBtn.addEventListener('click', () => {
     subjectOwnerNamesInput, subjectOwnerTypeInput, subjectOwnerMailingInput,
     adjPriceSqftInput, adjBedInput, adjBathInput, adjCondAvgInput,
     adjCondDatedInput, adjAppreciationInput, adjLotInput, adjGarageInput,
-    adjPoolInput, adjYearInput, adjStoryInput
+    adjPoolInput, adjYearInput, adjStoryInput,
+    tolSqftInput, tolYearInput, tolMonthsInput, tolDistanceInput, tolBedsInput, tolBathsInput, tolLotInput
 ].forEach(input => input.addEventListener('input', recalcAppraisal));
 
 // Typing in a derived field is the override. From then on the next comp
@@ -4845,6 +4965,12 @@ if (window.lucide) {
 }
 switchStrategy('flip');
 renderQualSettings();          // must exist before restore fills the % values
+// Tolerance bands: the inputs carry no HTML default. Placeholder and initial
+// value both come from the engine, and a saved override (restored next) wins.
+TOLERANCE_INPUTS.forEach(([input, key]) => {
+    input.placeholder = String(Engine.DEFAULTS.compTolerances[key]);
+    input.value = String(Engine.DEFAULTS.compTolerances[key]);
+});
 restoreAppraisalState();
 initWeightSliders();           // sliders mirror the restored number values
 try {

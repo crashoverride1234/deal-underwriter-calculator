@@ -496,9 +496,11 @@
                             <span class="pro-badge">Pros Only</span>
                         </summary>
                         <div class="pro-warning">
-                            ⚠ These weights feed every comp adjustment directly into the ARV.
-                            Only change them with market-derived support (paired sales, local
-                            $/sqft studies) — a wrong weight silently skews every valuation.
+                            ⚠ The adjustment weights here feed every comp adjustment directly into
+                            the ARV; the comp selection tolerances at the bottom are the one
+                            display-only section. Only change weights with market-derived support
+                            (paired sales, local $/sqft studies) — a wrong weight silently skews
+                            every valuation.
                             The subject is valued in <strong>after-repair (renovated) condition</strong>;
                             comps in weaker condition adjust upward to match. Sequencing follows
                             appraiser practice: % adjustments apply to each comp's
@@ -633,6 +635,81 @@
                                 </div>
                                 <input type="range" data-for="adj-appreciation" min="-10" max="15" step="0.5" value="2">
                                 <div class="weight-impact" data-impact="time">—</div>
+                            </div>
+                        </div>
+
+                        <!-- Comp selection tolerances: HIGHLIGHT ONLY. Nothing here feeds
+                             the grid — a comp outside a band is adjusted exactly as before;
+                             the card just paints that field in the SUBJECT PROP gradient. -->
+                        <div class="weights-section-title">Comp Selection Tolerances (highlight only)</div>
+                        <p class="weights-note">
+                            How far a comp may sit from the subject on each fact before the card paints
+                            that field in the <span class="warn-gradient-text">warning gradient</span>.
+                            Display only — a flagged comp is adjusted exactly as before; the colour says
+                            which number is doing the stretching. Blank restores the default shown in
+                            grey, 0 flags any difference at all.
+                        </p>
+                        <div class="weights-grid">
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-sqft">Living Area (± % of subject)</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="tol-sqft" min="0" max="100" step="1">
+                                        <span class="input-suffix">%</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-year">Year Built (± years)</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="tol-year" min="0" max="100" step="1">
+                                        <span class="input-suffix">yrs</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-months">Sold Within (months)</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="tol-months" min="0" max="24" step="1">
+                                        <span class="input-suffix">mo</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-distance">Distance From Subject</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="tol-distance" min="0" max="25" step="0.1">
+                                        <span class="input-suffix">mi</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-beds">Bedrooms (±)</label>
+                                    <div class="input-wrapper">
+                                        <input type="number" id="tol-beds" min="0" max="6" step="1">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-baths">Baths (±)</label>
+                                    <div class="input-wrapper">
+                                        <input type="number" id="tol-baths" min="0" max="6" step="0.5">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weight-row">
+                                <div class="weight-head">
+                                    <label for="tol-lot">Lot Size (± % of subject)</label>
+                                    <div class="input-wrapper has-suffix">
+                                        <input type="number" id="tol-lot" min="0" max="500" step="5">
+                                        <span class="input-suffix">%</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 

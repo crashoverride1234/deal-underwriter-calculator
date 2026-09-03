@@ -723,10 +723,72 @@ input[type="range"]::-webkit-slider-thumb:active {
     font-size: 0.82rem;
     letter-spacing: 0.08em;
     margin-right: 0.6rem;
+}
+
+/* The warm gradient the SUBJECT PROP tag wears. A comp field that sits
+   outside its selection band (living area, year built, sale recency,
+   distance, rooms, lot — bands in the weights panel) wears the same one, so
+   the eye links "this number" to "that property" without a legend. */
+.subject-summary-tag,
+.warn-gradient-text,
+.form-group.out-of-tolerance > label,
+.comp-tolerance .out {
     background: linear-gradient(90deg, #fbbf24 0%, #f59e0b 35%, #f97316 70%, #ef4444 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
+}
+
+/* A label is a stretched flex item of .form-group, so without this the 90°
+   gradient runs across the whole column and the glyphs only ever sample its
+   yellow end (measured: ~114px of box for ~30px of text). Shrink the paint
+   box to the text so the label sweeps amber → red the way the tag does. */
+.form-group.out-of-tolerance > label {
+    align-self: flex-start;
+}
+
+/* ...and the input wears it too: the VALUE in gradient text, a 1px gradient
+   border, and an opaque fill between them. Three background layers because
+   border-image ignores border-radius and the input's normal fill is 60%
+   translucent (a border-box gradient would bleed through it as an orange
+   wash — measured in the preview). Verified in Chromium that
+   background-clip: text works on an <input>. The base :focus rule's
+   background shorthand has equal specificity; this block is later in the
+   file, so its longhands win and the focus glow is restated in amber. */
+.form-group.out-of-tolerance input {
+    border-color: transparent;
+    font-weight: 700;
+    background-image:
+        linear-gradient(90deg, #fbbf24 0%, #f59e0b 35%, #f97316 70%, #ef4444 100%),
+        linear-gradient(#0f1526, #0f1526),
+        linear-gradient(90deg, #fbbf24 0%, #f59e0b 35%, #f97316 70%, #ef4444 100%);
+    -webkit-background-clip: text, padding-box, border-box;
+    background-clip: text, padding-box, border-box;
+    -webkit-text-fill-color: transparent;
+}
+
+.form-group.out-of-tolerance input:focus {
+    border-color: transparent;
+    background-image:
+        linear-gradient(90deg, #fbbf24 0%, #f59e0b 35%, #f97316 70%, #ef4444 100%),
+        linear-gradient(#0b1020, #0b1020),
+        linear-gradient(90deg, #fbbf24 0%, #f59e0b 35%, #f97316 70%, #ef4444 100%);
+    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.2);
+}
+
+/* Distance plus every out-of-band field, under a comp's address. Year built
+   and lot live inside the collapsed details, so a flag there needs a line
+   that is visible with the card closed. */
+.comp-tolerance {
+    margin-top: 0.3rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.comp-tolerance .out {
+    font-weight: 700;
 }
 
 /* Site map & influence scan */
@@ -1416,6 +1478,21 @@ input[type="range"]::-webkit-slider-thumb:active {
 #protest-packet { display: none; }
 
 @media print {
+    /* Gradient text is a background image, which printers drop unless
+       "background graphics" is on — transparent glyphs over nothing. Fall
+       back to a solid amber ink so a flagged field still reads as flagged. */
+    .subject-summary-tag, .warn-gradient-text,
+    .form-group.out-of-tolerance > label, .comp-tolerance .out {
+        background: none !important;
+        -webkit-text-fill-color: #b45309 !important;
+        color: #b45309 !important;
+    }
+    .form-group.out-of-tolerance input {
+        background: none !important;
+        -webkit-text-fill-color: #b45309 !important;
+        color: #b45309 !important;
+        border: 1px solid #b45309 !important;
+    }
     /* Crime and neighborhood-demographic readings are private underwriting
        input only. Fannie B4-1.1-04 lists crime-rate references among the
        Unacceptable Appraisal Practices, and for a licensed agent putting them

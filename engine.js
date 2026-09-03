@@ -25,7 +25,23 @@
         bathFootprintSqft: 50,
         // Rehab scope tiers, $/sqft (DFW-typical midpoints of the practitioner
         // ranges: cosmetic 10–20, medium 35–50, full gut 50–80)
-        rehabTiers: { cosmetic: 15, medium: 42, gut: 65 }
+        rehabTiers: { cosmetic: 15, medium: 42, gut: 65 },
+        // Comp SELECTION bands — how far a comp may sit from the subject on
+        // each fact before the card paints that field in the warning
+        // gradient. Display only: a flagged comp is adjusted exactly as
+        // before, the flag says which number is doing the stretching. The
+        // bands are the ones an appraiser picks from — GLA within a quarter,
+        // age within a few years, sold inside six months, inside a mile in
+        // a suburb — and each is user-overridable from the weights panel.
+        compTolerances: {
+            sqftPct: 25,        // ± % of the subject's living area
+            lotPct: 50,         // ± % of the subject's lot
+            yearBuiltYears: 8,  // ± years either side of the subject's build
+            beds: 1,            // ± bedrooms
+            baths: 1,           // ± baths
+            monthsAgo: 6,       // sold no longer ago than this
+            distanceMi: 1       // no farther from the subject than this
+        }
     };
 
     // Coerce any input to a finite non-negative number
@@ -1143,6 +1159,121 @@
         return { medianRatePct: median, n: rates.length, low: rates[0], high: rates[rates.length - 1] };
     }
 
+    // ---- Comp selection tolerances ----
+    // scoreComp() ranks candidates and bracketingDefects() audits the SET;
+    // neither answers the question the analyst asks while looking at one
+    // card: which of these numbers is the stretch? This compares a single
+    // comp to the subject fact by fact and says, per field, whether it sits
+    // inside the band a careful appraiser would select from. The card paints
+    // the outside ones in the SUBJECT PROP gradient so the eye lands on them.
+    //
+    // No price effect whatsoever — the grid adjusts a flagged comp exactly
+    // as it did before. Rules: a blank on EITHER side is no verdict (a
+    // missing fact is not a defect, same as the adjustment lines), a blank
+    // tolerance falls back to DEFAULTS.compTolerances, an explicit 0 is
+    // honoured (any difference at all is outside), the limit itself is
+    // inside, and every verdict is made on the value ROUNDED TO THE PRECISION
+    // THE NOTE PRINTS — one decimal of percent and of rooms, two of miles —
+    // so the tooltip and the colour can never disagree at the edge of a band
+    // ("25.4% larger (outside ±25%)" and "25% larger (within ±25%)" are the
+    // only two things it can say there). Rounding to what is displayed also
+    // absorbs float noise (105 / 1500 * 100 is 7.000000000000001); EPS is
+    // the backstop behind that.
+    function compTolerance(subject, comp, tolerances) {
+        const s = subject || {};
+        const c = comp || {};
+        const t = tolerances || {};
+        const d = DEFAULTS.compTolerances;
+        const limitOf = (key) => {
+            const raw = has(t[key]) ? parseFloat(t[key]) : NaN;
+            return Number.isFinite(raw) ? Math.max(0, raw) : d[key];
+        };
+        const val = (v) => (has(v) && Number.isFinite(parseFloat(v))) ? parseFloat(v) : null;
+        const fmt = (n, dp = 0) => Number(n).toLocaleString('en-US', {
+            minimumFractionDigits: 0, maximumFractionDigits: dp
+        });
+        const signed = (n, dp = 0) => (n > 0 ? '+' : n < 0 ? '−' : '±') + fmt(Math.abs(n), dp);
+        const yr = (n) => String(Math.round(n));            // 1985, never 1,985
+        const fixed = (n, dp) => Number(n).toLocaleString('en-US', {
+            minimumFractionDigits: dp, maximumFractionDigits: dp   // 0.60 mi, like the map popup
+        });
+        const round = (n, dp) => Math.round(n * Math.pow(10, dp)) / Math.pow(10, dp);
+        const EPS = 1e-9;
+        const fields = {};
+
+        // ± percent of the subject's figure (living area, lot), judged at the
+        // one decimal the note prints
+        const pctBand = (cv, sv, limit, noun) => {
+            if (cv == null || sv == null || sv <= 0) return null;
+            const delta = cv - sv;
+            const pct = round(delta / sv * 100, 1);
+            const outside = Math.abs(pct) > limit + EPS;
+            const dir = delta > 0 ? 'larger' : 'smaller';
+            const note = delta === 0
+                ? `${fmt(cv)} sqft ${noun}, the same as the subject (tolerance ±${fmt(limit, 1)}%)`
+                : `${fmt(cv)} sqft ${noun}, ${fmt(Math.abs(pct), 1)}% ${dir} than the subject's ${fmt(sv)} (${outside ? 'outside' : 'within'} ±${fmt(limit, 1)}%)`;
+            return { value: cv, subjectValue: sv, delta, pct, limit, outside, note,
+                short: `${fmt(cv)} sqft${noun === 'lot' ? ' lot' : ''} (${signed(pct, 1)}%)` };
+        };
+        // ± absolute count either side of the subject (years, beds, baths),
+        // judged at the half-room the note prints (2.2 − 1.2 is 1.0000000000000002)
+        const absBand = (cv, sv, limit, mkNote, mkShort) => {
+            if (cv == null || sv == null) return null;
+            const delta = round(cv - sv, 1);
+            const outside = Math.abs(delta) > limit + EPS;
+            return { value: cv, subjectValue: sv, delta, limit, outside,
+                note: mkNote(delta, outside), short: mkShort(delta) };
+        };
+        // one-sided ceiling with no subject counterpart (recency, distance),
+        // judged at the precision the note prints
+        const ceiling = (raw, dp, limit, mkNote, mkShort) => {
+            if (raw == null || raw < 0) return null;
+            const cv = round(raw, dp);
+            const outside = cv > limit + EPS;
+            return { value: cv, subjectValue: null, delta: cv, limit, outside,
+                note: mkNote(cv, outside), short: mkShort(cv) };
+        };
+
+        fields.sqft = pctBand(val(c.sqft), val(s.sqft), limitOf('sqftPct'), 'living area');
+        fields.lotSqft = pctBand(val(c.lotSqft), val(s.lotSqft), limitOf('lotPct'), 'lot');
+
+        {
+            const cv = val(c.yearBuilt), sv = val(s.yearBuilt), limit = limitOf('yearBuiltYears');
+            fields.yearBuilt = absBand(cv, sv, limit,
+                (delta, outside) => delta === 0
+                    ? `Built ${yr(cv)}, the same year as the subject (tolerance ±${fmt(limit)} years)`
+                    : `Built ${yr(cv)}, ${fmt(Math.abs(delta))} year${Math.abs(delta) === 1 ? '' : 's'} ${delta > 0 ? 'newer' : 'older'} than the subject's ${yr(sv)} (${outside ? 'outside' : 'within'} ±${fmt(limit)} years)`,
+                (delta) => `built ${yr(cv)} (${signed(delta)} yrs)`);
+        }
+        {
+            const cv = val(c.beds), sv = val(s.beds), limit = limitOf('beds');
+            fields.beds = absBand(cv, sv, limit,
+                (delta, outside) => `${fmt(cv)} bed${cv === 1 ? '' : 's'} against the subject's ${fmt(sv)} (${outside ? 'outside' : 'within'} ±${fmt(limit)})`,
+                (delta) => `${fmt(cv)} bd (${signed(delta)})`);
+        }
+        {
+            const cv = val(c.baths), sv = val(s.baths), limit = limitOf('baths');
+            fields.baths = absBand(cv, sv, limit,
+                (delta, outside) => `${fmt(cv, 1)} bath${cv === 1 ? '' : 's'} against the subject's ${fmt(sv, 1)} (${outside ? 'outside' : 'within'} ±${fmt(limit, 1)})`,
+                (delta) => `${fmt(cv, 1)} ba (${signed(delta, 1)})`);
+        }
+        {
+            const limit = limitOf('monthsAgo');
+            fields.monthsAgo = ceiling(val(c.monthsAgo), 0, limit,
+                (cv, outside) => `Sold ${fmt(cv)} month${cv === 1 ? '' : 's'} ago (${outside ? 'outside' : 'within'} the ${fmt(limit)}-month window)`,
+                (cv) => `sold ${fmt(cv)} mo ago`);
+        }
+        {
+            const limit = limitOf('distanceMi');
+            fields.distanceMi = ceiling(val(c.distanceMi), 2, limit,
+                (cv, outside) => `${fixed(cv, 2)} mi from the subject (${outside ? 'outside' : 'within'} ${fmt(limit, 2)} mi)`,
+                (cv) => `${fixed(cv, 2)} mi from subject`);
+        }
+
+        const outside = Object.keys(fields).filter(k => fields[k] && fields[k].outside);
+        return { fields, outside, count: outside.length };
+    }
+
     // ---- Bracketing audit ----
     // valuationInterval() measures how much the comps disagree with EACH
     // OTHER, and scoreComp() rates each comp on its own. Neither asks the
@@ -1816,6 +1947,6 @@
         deriveMarketRates, pricePerSqftOutliers, reconcileCondition,
         backtestMetrics, pairedComparison, scoreComp,
         deriveTimeAdjustment, compMonthsAgo, priceAgreedAt, valuationInterval,
-        breakEven, bracketingDefects, neighborhoodTaxRate,
+        breakEven, bracketingDefects, neighborhoodTaxRate, compTolerance,
         compAdjustmentAsymmetry, pooledRetention, twoSidedRetention };
 }));

@@ -1682,6 +1682,118 @@ test('neighbourhood tax rate: list-price proxies and impossible rates are droppe
     assertNear(r.medianRatePct, 2.1, 0.001, 'outliers never move the median');
 });
 
+// ---- Comp selection tolerances ----
+
+const TOL_SUBJECT = { sqft: 1500, yearBuilt: 1970, beds: 3, baths: 2, lotSqft: 7000 };
+
+test('comp tolerance: a comp inside every band raises no flag', () => {
+    const r = Engine.compTolerance(TOL_SUBJECT,
+        { sqft: 1800, yearBuilt: 1976, beds: 4, baths: 2.5, lotSqft: 9000, monthsAgo: 4, distanceMi: 0.6 }, {});
+    eq(r.count, 0, 'nothing outside');
+    eq(r.outside.length, 0);
+    eq(r.fields.sqft.outside, false, '1,800 is 20% over a 1,500 subject — inside ±25%');
+    eq(r.fields.yearBuilt.outside, false, '1976 is six years off 1970 — inside ±8');
+    assert(/within/.test(r.fields.sqft.note), 'the note says within: ' + r.fields.sqft.note);
+    eq(r.fields.distanceMi.short, '0.60 mi from subject', 'distance line reads even when inside');
+});
+
+test('comp tolerance: the user\'s own examples flag', () => {
+    const r = Engine.compTolerance(TOL_SUBJECT, { sqft: 2100, yearBuilt: 1985 }, {});
+    eq(r.fields.sqft.outside, true, '2,100 is 40% over — outside ±25%');
+    eq(r.fields.yearBuilt.outside, true, '1985 is fifteen years off — outside ±8');
+    eq(r.outside.join(','), 'sqft,yearBuilt');
+    eq(r.count, 2);
+    assertNear(r.fields.sqft.pct, 40, 1e-9, 'pct');
+    eq(r.fields.yearBuilt.delta, 15, 'delta is signed comp minus subject');
+    assert(/outside/.test(r.fields.sqft.note) && /40%/.test(r.fields.sqft.note), r.fields.sqft.note);
+    assert(/1985/.test(r.fields.yearBuilt.short) && /\+15/.test(r.fields.yearBuilt.short), r.fields.yearBuilt.short);
+});
+
+test('comp tolerance: the limit itself is inside, one past it is outside', () => {
+    const at = Engine.compTolerance(TOL_SUBJECT,
+        { sqft: 1875, yearBuilt: 1978, beds: 4, baths: 3, lotSqft: 10500, monthsAgo: 6, distanceMi: 1 }, {});
+    eq(at.count, 0, 'exactly on every band: ' + at.outside.join(','));
+    const past = Engine.compTolerance(TOL_SUBJECT,
+        { sqft: 1876, yearBuilt: 1979, beds: 5, baths: 3.5, lotSqft: 10600, monthsAgo: 7, distanceMi: 1.01 }, {});
+    eq(past.outside.slice().sort().join(','), 'baths,beds,distanceMi,lotSqft,monthsAgo,sqft,yearBuilt');
+    eq(past.count, 7);
+});
+
+test('comp tolerance: the verdict is made at the precision the note prints', () => {
+    // 105 / 1500 * 100 is 7.000000000000001 in IEEE doubles (300 / 1500 * 100
+    // happens to land on 20 exactly) — a naive comparison against a 7% band
+    // would flag a comp sitting precisely on the line
+    assert(105 / 1500 * 100 > 7, 'the premise: float noise pushes 7% past 7');
+    eq(Engine.compTolerance(TOL_SUBJECT, { sqft: 1605 }, { sqftPct: 7 }).fields.sqft.outside, false, 'exactly 7% is inside a 7% band');
+    eq(Engine.compTolerance(TOL_SUBJECT, { sqft: 1606 }, { sqftPct: 7 }).fields.sqft.outside, true, 'one foot past it is outside');
+    // A comp 25.4% over prints "25.4%" and reads outside; one 25.04% over
+    // prints "25%" and therefore reads INSIDE — the tooltip and the colour
+    // must never contradict each other at the edge of the band
+    const over = Engine.compTolerance(TOL_SUBJECT, { sqft: 1881 }, {});
+    eq(over.fields.sqft.outside, true, '25.4% is outside');
+    assert(/25\.4% larger/.test(over.fields.sqft.note) && /\+25\.4%/.test(over.fields.sqft.short),
+        over.fields.sqft.note + ' | ' + over.fields.sqft.short);
+    const hair = Engine.compTolerance(TOL_SUBJECT, { sqft: 1875.6 }, {});
+    eq(hair.fields.sqft.outside, false, '25.04% rounds to the printed 25%, which is inside');
+    assert(/ 25% larger/.test(hair.fields.sqft.note) && /within/.test(hair.fields.sqft.note), hair.fields.sqft.note);
+    // 2.2 − 1.2 is 1.0000000000000002 — a bath count difference of exactly one
+    eq(Engine.compTolerance({ baths: 1.2 }, { baths: 2.2 }, {}).fields.baths.outside, false, 'rooms round to the half');
+    // Distance prints at two decimals and is judged there too
+    eq(Engine.compTolerance({}, { distanceMi: 1.004 }, {}).fields.distanceMi.outside, false, '1.004 prints as 1.00 mi');
+    eq(Engine.compTolerance({}, { distanceMi: 1.006 }, {}).fields.distanceMi.outside, true, '1.006 prints as 1.01 mi');
+    eq(Engine.compTolerance({}, { distanceMi: 1.004 }, {}).fields.distanceMi.note, '1.00 mi from the subject (within 1 mi)');
+});
+
+test('comp tolerance: smaller and older flag just like larger and newer', () => {
+    const r = Engine.compTolerance(TOL_SUBJECT, { sqft: 1100, yearBuilt: 1958, beds: 1 }, {});
+    eq(r.outside.join(','), 'sqft,yearBuilt,beds');
+    assert(/smaller/.test(r.fields.sqft.note) && /older/.test(r.fields.yearBuilt.note),
+        r.fields.sqft.note + ' | ' + r.fields.yearBuilt.note);
+    assert(/−26\.7%/.test(r.fields.sqft.short), 'short form carries the sign: ' + r.fields.sqft.short);
+    assert(/−12 yrs/.test(r.fields.yearBuilt.short), r.fields.yearBuilt.short);
+});
+
+test('comp tolerance: a blank on either side is no verdict, not a flag', () => {
+    const r = Engine.compTolerance({ sqft: '', yearBuilt: 1970, beds: 3 },
+        { sqft: 2100, yearBuilt: '', beds: undefined, monthsAgo: '', distanceMi: null }, {});
+    eq(r.fields.sqft, null, 'subject sqft blank');
+    eq(r.fields.yearBuilt, null, 'comp year blank');
+    eq(r.fields.beds, null, 'comp beds missing');
+    eq(r.fields.monthsAgo, null, 'blank recency is unknown, not zero');
+    eq(r.fields.distanceMi, null, 'no coordinates, no distance');
+    eq(r.count, 0);
+    eq(Engine.compTolerance({ sqft: 0 }, { sqft: 1500 }, {}).fields.sqft, null, 'a zero subject has no percent');
+    eq(Engine.compTolerance({ sqft: 'abc' }, { sqft: 1500 }, {}).fields.sqft, null, 'garbage is blank');
+    eq(Engine.compTolerance(null, null, null).count, 0, 'nothing at all is fine');
+});
+
+test('comp tolerance: blank setting restores the default, explicit 0 is honoured', () => {
+    const blank = Engine.compTolerance(TOL_SUBJECT, { yearBuilt: 1975 }, { yearBuiltYears: '' });
+    eq(blank.fields.yearBuilt.limit, Engine.DEFAULTS.compTolerances.yearBuiltYears, 'blank → default');
+    eq(blank.fields.yearBuilt.outside, false);
+    const zero = Engine.compTolerance(TOL_SUBJECT, { yearBuilt: 1971 }, { yearBuiltYears: 0 });
+    eq(zero.fields.yearBuilt.limit, 0, 'an explicit zero is an answer');
+    eq(zero.fields.yearBuilt.outside, true, 'one year off is outside a zero band');
+    eq(Engine.compTolerance(TOL_SUBJECT, { yearBuilt: 1970 }, { yearBuiltYears: 0 }).fields.yearBuilt.outside,
+        false, 'the same year still fits a zero band');
+    const wide = Engine.compTolerance(TOL_SUBJECT, { sqft: 2100 }, { sqftPct: '45' });
+    eq(wide.fields.sqft.outside, false, 'a string setting is read the way the inputs deliver it');
+    eq(Engine.compTolerance(TOL_SUBJECT, { sqft: 1600 }, { sqftPct: -5 }).fields.sqft.limit, 0, 'negative clamps to zero');
+    eq(Engine.compTolerance(TOL_SUBJECT, { sqft: 1600 }, { sqftPct: 'x' }).fields.sqft.limit, 25, 'garbage setting → default');
+});
+
+test('comp tolerance: it never touches the appraisal', () => {
+    const subject = { ...TOL_SUBJECT, stories: 1 };
+    const comp = { label: 'A', salePrice: 300000, sqft: 2100, beds: 3, baths: 2, lotSqft: 7000,
+        garageSpaces: 2, yearBuilt: 1985, stories: 1, condition: 'renovated', monthsAgo: 9 };
+    const before = Engine.appraise({ subject, comps: [comp], settings: {} }).arv;
+    const snapshot = JSON.stringify(comp);
+    Engine.compTolerance(subject, comp, {});
+    eq(JSON.stringify(comp), snapshot, 'pure — the comp is not mutated');
+    const after = Engine.appraise({ subject, comps: [comp], settings: {} }).arv;
+    eq(after, before, 'no price effect');
+});
+
 // ---- Report ----
 
 const failed = results.filter(r => !r.pass);

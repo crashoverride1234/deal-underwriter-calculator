@@ -20,6 +20,8 @@ GitHub Pages from `main`.
   `breakEven()` (same bisection, solving for the sale price / rent that nets
   zero, plus the rent a 1.25 lender DSCR needs; rounds UP so the answer never
   undershoots), `bracketingDefects()` (does the comp set SURROUND the subject),
+  `compTolerance()` (one comp against the subject, fact by fact — which
+  field is the stretch; display-only, feeds the card's gradient highlight),
   `neighborhoodTaxRate()` (median effective rate off the comps' own bills —
   closed prices only, null under 3, so a MUD/PID district is distinguishable
   from a bad assessment) +
@@ -91,7 +93,7 @@ GitHub Pages from `main`.
   `serve.ps1` is holding it (HttpListener registers via http.sys, so the
   listener shows as PID 4/System) — kill powershell processes whose command
   line contains `serve.ps1`.
-- **Test**: `node tests.js` (158 tests as of 2026-08-28) AND `node worker/tests.mjs`
+- **Test**: `node tests.js` (166 tests as of 2026-09-03) AND `node worker/tests.mjs`
   (106 MLS-transport tests). Both must pass before deploy.
 - **Deploy app**: commit + push to `main` → GitHub Pages redeploys in ~20s.
   Verify by polling the live URL for a marker string with no-cache headers.
@@ -431,6 +433,41 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   match brackets a feature on its own (that is the ideal comp, not a gap). Read
   `appraisalComps`, never `lastAppraisal.comps` — `appraise()` emits no
   sqft/beds/yearBuilt.
+- **The comp-card gradient is a SELECTION cue, not an adjustment**
+  (`compTolerance()`, `updateCompTolerances()`, added 2026-09-03). The warm
+  gradient the SUBJECT PROP tag wears is painted onto any comp field that sits
+  outside the band an appraiser would pick from — label, value text and a
+  1px border on the input, plus a strip under the address that also carries
+  the measured distance. Bands live in `DEFAULTS.compTolerances` (GLA ±25%,
+  lot ±50%, ±8 years, ±1 bed/bath, sold within 6 months, within 1 mile) and
+  are overridable from the "Comp Selection Tolerances" rows of the weights
+  panel (persisted with the other model settings; blank restores the default,
+  an explicit 0 flags any difference — the `has()` rule again). Three things
+  are deliberate: the strip exists because year built and lot sit inside the
+  collapsed details, so a flag there would otherwise be invisible; a blank on
+  EITHER side is no verdict, never a flag (the subject's baths need explicit
+  care — `totalBaths()` sums blanks to the NUMBER 0, which `has()` accepts,
+  so `updateCompTolerances()` blanks it when nothing was entered); and every
+  verdict is made on the value ROUNDED TO THE PRECISION THE TOOLTIP PRINTS —
+  one decimal of percent and of rooms, two of miles — so "25.4% larger
+  (outside ±25%)" and "25% larger (within ±25%)" are the only two things it
+  can say at the edge, and float noise (105/1500×100 is 7.000000000000001;
+  300/1500×100 is NOT 20.000000000000004, that claim was checked and was
+  wrong) is absorbed the same way. The seven inputs carry no HTML default:
+  placeholder and value are seeded from `DEFAULTS.compTolerances` at load so
+  the number is defined once. A record sale older than the 24-month field
+  leaves `monthsAgo` BLANK (never a stale 0 — `emptyCompSlot()` starts blank
+  too, and the engine reads blank as 0 either way), and the highlight falls
+  back to `lastSaleDate` so a three-year-old sale is flagged rather than
+  described as inside the window. Distance is the live haversine from
+  `lastSelectedCoords`, falling back to the `distanceMi` the comps search
+  measured (a typed, un-picked subject has no coordinates); typing in a
+  comp's label clears it with the pin, and typing in the SUBJECT address
+  clears every comp's, so "Restore previous comps" cannot revive a distance
+  measured against a different house. Gradient text is a background image,
+  which printers drop, so `@media print` falls back to solid amber ink.
+  Nothing here touches `appraise()` — a flagged comp is adjusted exactly as
+  before (tested).
 - **Cite live rules, and date them.** Fannie ELIMINATED the 15%/25% net/gross
   adjustment guidelines in Selling Guide B4-1.3-09 (2025-06-04), so the >25%
   warning is framed as a hint ("being argued into place"), not policy. Fannie
@@ -632,8 +669,9 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   lot size+lotUsability).
 - Every open starts a BLANK underwriting (deliberate, 2026-08): subject
   fields, market inputs, and comps never restore and index.html carries no
-  demo values; only the adjustment-grid settings + qualitative weights
-  persist (`underwriter-appraisal-v1` is settings-only now) plus API keys.
+  demo values; only the adjustment-grid settings + qualitative weights +
+  comp-selection tolerances persist (`underwriter-appraisal-v1` is
+  settings-only now) plus API keys.
 - localStorage keys: `underwriter-appraisal-v1`, `underwriter-rentcast-key`,
   `underwriter-melissa-key`, `underwriter-worker-url`,
   `underwriter-property-cache-v5` (v4 added `_cachedAt`; v5 evicted records
