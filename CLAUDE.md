@@ -548,9 +548,24 @@ exist**, so an unconfigured worker behaves exactly as it did before.
   on 0 (was 3), RentCast reached only on the 2 addresses realtor.com has no
   record for at all.
   Unlike `/comps`, which DROPS its proxies wholesale once the feed delivers,
-  `/lookup` folds: `mlsToRecord()` hard-nulls `assessedValue`, `ownerNames`,
-  `ownerMailing`, `legal` and `apn`, so the feed and the county roll are
-  complements. "Enough" is therefore a MATCH STANDARD, not a row count —
+  `/lookup` folds, so the feed and the county roll are complements.
+  `mlsToRecord()` hard-nulls what a LISTING cannot honestly know: `legal`,
+  `garageType`, `assessedLand`, `assessedImprov`, `ownerNames`,
+  `ownerType`, `ownerOccupied`, `ownerMailing`. Two fields that an earlier
+  version of this bullet named are NOT in that list, and the difference is
+  mechanism rather than pedantry (corrected 2026-09-03 after reading the live
+  feed). `assessedValue` IS mapped — from `taxAssessed`, which defaults to
+  `TaxAssessedValue`; NTREIS publishes no such field and `MLS_FIELD_MAP`
+  therefore binds none, so it arrives null from THIS feed while a RESO feed
+  that publishes it would fill it. `apn` IS mapped and IS bound
+  (`parcel` → `ParcelNumber`) and the feed genuinely answers with it:
+  measured live 2026-09-03, 3425 Cloer Drive returned APN 03569403 on the
+  MLS-led fold and null on the same address moments earlier, when a RETS
+  session collision (ReplyCode 20022) forced the realtor.com fallback. So do
+  not "restore" either null. A mapped field that one feed happens to leave
+  empty is the fold degrading exactly as designed; hard-nulling it would
+  break a different MLS for no reason.
+  "Enough" is therefore a MATCH STANDARD, not a row count —
   `mlsAnsweredSubject()` requires `matchedBy === 'address'`
   (`streetMatchStrict`) plus the `hasData()` bar; a `'proximity'` row is
   demoted to LAST in the stack, where it fills blanks but can never overwrite
